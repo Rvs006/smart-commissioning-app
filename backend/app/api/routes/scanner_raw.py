@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import time
@@ -520,6 +521,37 @@ def _parse_scan_result(raw: bytes) -> dict | None:
     return result
 
 
+def _parse_compare_result(raw: bytes) -> dict | None:
+    """Recover ``{rows, summary}`` from a captured ``/api/compare`` body. Unlike
+    ``/api/scan`` this is a finite JSON response (the sidecar's ``compare()`` output
+    returned whole), so a plain JSON parse - not the SSE frame walk - is correct."""
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _min_row_ipv4(rows: list) -> str | None:
+    """The smallest real IPv4 among compare rows, used as the recorded scan-range
+    start for a compare-capture run. ``/api/compare`` carries no scan range (it
+    re-RAGs the last scan's devices), so the honest range we can prove is the span
+    of the rows themselves; the captured replay does no I/O, so this is metadata
+    only. Skips placeholder/missing IPs (``—``, blank).
+    ponytail: the operator's original range is not recoverable on a bare compare -
+    the row span is the faithful reconstruction, not a guess at their input."""
+    best: ipaddress.IPv4Address | None = None
+    for row in rows:
+        ip = row.get("ip") if isinstance(row, dict) else None
+        try:
+            addr = ipaddress.IPv4Address(str(ip))
+        except (ipaddress.AddressValueError, ValueError):
+            continue
+        if best is None or addr < best:
+            best = addr
+    return str(best) if best is not None else None
+
+
 def _persist_ip_scan_result(
     session: scanner_raw_session.PanelSession,
     principal: AuthPrincipal,
@@ -612,6 +644,69 @@ def _persist_mqtt_scan_result(
         logger.warning("mqtt results-out persistence failed: %s", session.session_id, exc_info=True)
 
 
+def _persist_ip_compare_result(
+    session: scanner_raw_session.PanelSession,
+    principal: AuthPrincipal,
+    raw: bytes,
+) -> None:
+    """Results-out for an IP re-compare: after the operator loads/changes a register
+    in the panel and re-RAGs the last scan (``/api/compare``), persist that verdict
+    as a real ``ip_scanner`` run so the register-aware RAG the operator saw lands in
+    SCT - not just the raw scan captured earlier. Same ``{rows, summary}`` the scan
+    produces, so it replays through the same captured dispatch; the scan-range start
+    is reconstructed from the rows (compare carries none). Best-effort."""
+    try:
+        result = _parse_compare_result(raw)
+        rows = result.get("rows") if isinstance(result, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return
+        start_ip = _min_row_ipv4(rows)
+        if not start_ip:
+            return
+        from app.api.routes.scanners import dispatch_captured_ip_scanner_run
+
+        dispatch_captured_ip_scanner_run(
+            project_id=session.project_id,
+            site_id=session.site_id,
+            principal=principal,
+            start_ip=start_ip,
+            captured={"rows": rows, "summary": result.get("summary") or {}},
+        )
+    except Exception:  # noqa: BLE001 - results-out is best-effort, never breaks the compare
+        logger.warning("ip compare results-out persistence failed: %s", session.session_id, exc_info=True)
+
+
+def _persist_bacnet_compare_result(
+    session: scanner_raw_session.PanelSession,
+    principal: AuthPrincipal,
+    raw: bytes,
+) -> None:
+    """Results-out for a BACnet re-compare: persist a ``/api/compare`` verdict as a
+    real ``bacnet_scanner`` run, mirroring the BACnet scan capture. BACnet needs no
+    scan-range start (the dispatch helper freezes the source NIC from SCT config),
+    so the compare ``{rows, summary}`` replays directly. Best-effort."""
+    try:
+        result = _parse_compare_result(raw)
+        rows = result.get("rows") if isinstance(result, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return
+        from app.api.routes.scanners import dispatch_captured_bacnet_scanner_run
+
+        dispatch_captured_bacnet_scanner_run(
+            project_id=session.project_id,
+            site_id=session.site_id,
+            principal=principal,
+            captured={
+                "rows": rows,
+                "summary": result.get("summary") or {},
+                "device_files": [],
+                "routers": [],
+            },
+        )
+    except Exception:  # noqa: BLE001 - results-out is best-effort, never breaks the compare
+        logger.warning("bacnet compare results-out persistence failed: %s", session.session_id, exc_info=True)
+
+
 @router.api_route(
     "/{proto}/raw/{path:path}",
     methods=["GET", "POST", "DELETE", "HEAD"],
@@ -681,29 +776,42 @@ async def proxy_scanner_raw(
         response_headers["x-accel-buffering"] = "no"
 
     # Results-out: capture the completed body and persist it as a real run where the
-    # protocol has a discrete "done" signal - IP/BACnet scan SSE result frame, MQTT
-    # the finite export-archive ZIP. GET only, with a session.
+    # protocol has a discrete "done" signal - IP/BACnet scan SSE result frame, the
+    # IP/BACnet re-compare JSON, MQTT the finite export-archive ZIP. Needs a session;
+    # the scan captures are GET SSE, compare is a POST with a finite JSON body.
     on_complete: Callable[[bytes], None] | None = None
-    if session is not None and request.method == "GET":
+    if session is not None:
         capture_session, capture_principal, capture_query = session, principal, request.url.query
-        if proto == "ip" and path == "api/scan" and is_sse:
+        if request.method == "GET" and proto == "ip" and path == "api/scan" and is_sse:
 
             def on_complete_ip(raw: bytes) -> None:
                 _persist_ip_scan_result(capture_session, capture_principal, capture_query, raw)
 
             on_complete = on_complete_ip
-        elif proto == "bacnet" and path == "api/scan" and is_sse:
+        elif request.method == "GET" and proto == "bacnet" and path == "api/scan" and is_sse:
 
             def on_complete_bacnet(raw: bytes) -> None:
                 _persist_bacnet_scan_result(capture_session, capture_principal, raw)
 
             on_complete = on_complete_bacnet
-        elif proto == "mqtt" and path == "api/export-archive":
+        elif request.method == "GET" and proto == "mqtt" and path == "api/export-archive":
 
             def on_complete_mqtt(raw: bytes) -> None:
                 _persist_mqtt_scan_result(capture_session, capture_principal, raw)
 
             on_complete = on_complete_mqtt
+        elif request.method == "POST" and proto == "ip" and path == "api/compare":
+
+            def on_complete_ip_compare(raw: bytes) -> None:
+                _persist_ip_compare_result(capture_session, capture_principal, raw)
+
+            on_complete = on_complete_ip_compare
+        elif request.method == "POST" and proto == "bacnet" and path == "api/compare":
+
+            def on_complete_bacnet_compare(raw: bytes) -> None:
+                _persist_bacnet_compare_result(capture_session, capture_principal, raw)
+
+            on_complete = on_complete_bacnet_compare
 
     return StreamingResponse(
         _relay(client, upstream, cap=is_sse, on_complete=on_complete),
