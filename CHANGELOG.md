@@ -28,6 +28,13 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   `byte_limit_reached` with a `byte_cap` `broker_status_detail`, and
   `topic_limit_reached` still flags a run that reaches the topic ceiling, so a
   byte-truncated capture is no longer reported as a normal complete one.
+- MQTT discovery byte-cap reason is now preserved when the cap trips before the
+  first message is retained. An oversized first payload fills the retained-payload
+  byte budget on its own and ends the capture with zero retained messages; the run
+  now reports `broker_status_detail`/failure reason `byte_cap` (with an operator
+  hint) instead of `capture_window_empty`, which had read as a quiet broker and hid
+  why discovery returned nothing. `byte_limit_reached` was already true in this
+  case; only the reason string was wrong.
   Operators can still pass a smaller `max_messages` to bound a single run. UDMI
   validation already scaled its capture to the register (v0.1.29); this brings
   the discovery lane in line.
