@@ -19,6 +19,18 @@ function describeWrite(body: string): string {
   }
 }
 
+// Throws if the sidecar does not answer its health probe. Shared by the preflight
+// (before the tool is shown) and the iframe onLoad recheck (a sidecar that dies
+// after the panel is ready).
+async function assertSidecarHealthy(proto: string, label: string): Promise<void> {
+  const health = await fetch(`/api/v1/scanners/${proto}/raw/api/health`, {
+    credentials: "same-origin",
+  });
+  if (!health.ok) {
+    throw new Error(`The ${label} scanner service is unavailable (HTTP ${health.status}).`);
+  }
+}
+
 export function AdvancedScannerPanel({
   proto,
   projectId,
@@ -51,6 +63,13 @@ export function AdvancedScannerPanel({
     let cancelled = false;
     setBridgeReady(false);
     setPhase("loading");
+    // Context changed (different scanner / project / site) or Retry: drop any write
+    // confirmation left over from the previous scanner. Otherwise a stale IP write
+    // dialog lingers over - and could be confirmed against - the newly loaded
+    // BACnet/MQTT tool, since this component instance is reused across the switch.
+    setPending(null);
+    setAcknowledged(false);
+    setWriteError(null);
     (async () => {
       try {
         const session = await fetch(`/api/v1/scanners/${proto}/raw/session`, {
@@ -62,12 +81,7 @@ export function AdvancedScannerPanel({
         if (!session.ok) {
           throw new Error(`The panel session could not be opened (HTTP ${session.status}).`);
         }
-        const health = await fetch(`/api/v1/scanners/${proto}/raw/api/health`, {
-          credentials: "same-origin",
-        });
-        if (!health.ok) {
-          throw new Error(`The ${label} scanner service is unavailable (HTTP ${health.status}).`);
-        }
+        await assertSidecarHealthy(proto, label);
         if (!cancelled) {
           setStartError(null);
           setPhase("ready");
@@ -139,6 +153,21 @@ export function AdvancedScannerPanel({
     }
   }
 
+  // A sidecar that dies AFTER preflight makes the iframe (re)load the proxy's 503
+  // instead of the tool. An iframe's onError does not fire for an HTTP error
+  // document, but onLoad does; re-verify health on each full (re)load and fall back
+  // to the same Retry error state if the sidecar is gone.
+  async function recheckHealth() {
+    try {
+      await assertSidecarHealthy(proto, label);
+    } catch (caught) {
+      setStartError(
+        caught instanceof Error ? caught.message : `The ${label} scanner could not be reached.`,
+      );
+      setPhase("error");
+    }
+  }
+
   if (phase === "loading") {
     return (
       <div className="advanced-panel">
@@ -179,6 +208,7 @@ export function AdvancedScannerPanel({
         className="advanced-panel-frame"
         src={`/api/v1/scanners/${proto}/raw/`}
         title={`${label} advanced scanner`}
+        onLoad={recheckHealth}
       />
       {writeError && (
         <p className="error-text" role="alert">
