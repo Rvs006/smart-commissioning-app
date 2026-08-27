@@ -43,6 +43,12 @@ function stubFetchWithRole(role: string) {
       if (url.endsWith("/api/v1/imports/profiles")) {
         return jsonResponse(profilesPayload);
       }
+      // Permissive fallback so a module's incidental mount polling never throws;
+      // null keeps optional `query.data && (...)` panels (e.g. Nmap capability)
+      // hidden rather than half-rendering. This test asserts only the role gate.
+      if (url.includes("/api/v1/")) {
+        return jsonResponse(null);
+      }
       throw new Error(`Unexpected fetch in test: ${url}`);
     }),
   );
@@ -72,7 +78,7 @@ describe("role-aware engineer actions", () => {
 
   it("disables the engineer-only upload action for a viewer with a requires-engineer tooltip", async () => {
     stubFetchWithRole("viewer");
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const uploadButton = await screen.findByRole("button", { name: /Upload and validate/i });
     // A viewer never gets an enabled engineer action — even with a file selected
@@ -83,7 +89,7 @@ describe("role-aware engineer actions", () => {
 
   it("enables the engineer-only upload action (title cleared) for an engineer", async () => {
     stubFetchWithRole("engineer");
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const uploadButton = await screen.findByRole("button", { name: /Upload and validate/i });
     // For an engineer the requires-engineer tooltip is removed once /me resolves.

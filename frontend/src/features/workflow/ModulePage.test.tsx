@@ -1201,202 +1201,42 @@ describe("ModulePage discovery wiring", () => {
     );
   }
 
-  function stubMqttSidecarRunFetch(onPost: (body: { parameters: Record<string, unknown> }) => void) {
+  // Embed-only sidecar modules (ip/bacnet/mqtt-scanner): the vendored scanner is
+  // the whole module, so there is no native Setup/Run/Results form to drive. A
+  // permissive stub keeps the panel's session POST and any incidental polling from
+  // throwing; the tests assert what renders, not a native run submission.
+  function stubSidecarModuleFetch() {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
         if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
         if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
-        if (url.endsWith("/api/v1/discovery/mqtt_sidecar/runs") && init?.method === "POST") {
-          onPost(JSON.parse(String(init.body)) as { parameters: Record<string, unknown> });
-          return jsonResponse(mqttAccepted);
-        }
-        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
-          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
-        }
-        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
-          return jsonResponse({ ...resultsPayload, run_id: "run-mqtt-1", discovered_assets: [] });
-        }
-        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
-          return jsonResponse(mqttTerminal);
-        }
-        throw new Error(`Unexpected fetch in test: ${url}`);
-      }),
-    );
-  }
-
-  function stubIpSidecarRunFetch(onPost: (body: { parameters: Record<string, unknown> }) => void) {
-    const ipAccepted = {
-      run_id: "run-ip-1",
-      job_type: "ip_scanner",
-      status: "queued",
-      message: "IP scanner accepted.",
-    };
-    const ipTerminal = {
-      run_id: "run-ip-1",
-      job_type: "ip_scanner",
-      status: "succeeded",
-      stage: "scan",
-      progress_percent: 100,
-      created_at: "2026-07-15T09:00:00Z",
-      updated_at: "2026-07-15T09:05:00Z",
-      project_id: "demo-project",
-      site_id: "demo-site",
-      parameters: {},
-      result_summary: { hosts_scanned: 0 },
-      error_message: null,
-    };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
-        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
-        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
-        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
-        if (url.endsWith("/api/v1/discovery/ip_sidecar/runs") && init?.method === "POST") {
-          onPost(JSON.parse(String(init.body)) as { parameters: Record<string, unknown> });
-          return jsonResponse(ipAccepted);
-        }
-        if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
-          return jsonResponse({ ...resultsPayload, run_id: "run-ip-1", devices: [] });
-        }
-        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
-          return jsonResponse(ipTerminal);
-        }
-        // Permissive fallback so the IP module's incidental polling never throws;
-        // this test only asserts the run-submission parameters.
         if (url.includes("/api/v1/")) return jsonResponse({});
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
     );
   }
 
-  it("sends the IP scanner (sidecar) target range as start_ip/end_ip to the run", async () => {
-    let postedBody: { parameters: Record<string, unknown> } | null = null;
-    stubIpSidecarRunFetch((body) => {
-      postedBody = body;
-    });
-
+  it("makes the embedded scanner the whole IP sidecar module (no native run form)", async () => {
+    stubSidecarModuleFetch();
     renderModule("ip-scanner");
 
-    fireEvent.change(await screen.findByLabelText(/Start IP/i), {
-      target: { value: "10.0.10.1" },
-    });
-    fireEvent.change(await screen.findByLabelText(/End IP/i), {
-      target: { value: "10.0.10.254" },
-    });
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    const runButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(runButton).toBeEnabled());
-    fireEvent.click(runButton);
-
-    await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
-      .parameters;
-    expect(parameters.start_ip).toBe("10.0.10.1");
-    expect(parameters.end_ip).toBe("10.0.10.254");
+    // The vendored standalone scanner is the one Scan surface.
+    expect(await screen.findByTitle(/IP advanced scanner/i)).toBeInTheDocument();
+    // Embed-only: no Setup/Run/Results step nav and no native scan form.
+    expect(screen.queryByRole("navigation", { name: /Module steps/i })).toBeNull();
+    expect(screen.queryByLabelText(/Start IP/i)).toBeNull();
   });
 
-  it("hides the dry-run toggle on the IP scanner sidecar lane", async () => {
-    stubIpSidecarRunFetch(() => {});
-    renderModule("ip-scanner");
-    // The vendored sidecar lanes drop the dry-run preview step the standalone
-    // scanner apps never had; the range input is present, the dry-run checkbox is not.
-    await screen.findByLabelText(/Start IP/i);
-    expect(screen.queryByLabelText(/Dry run/i)).toBeNull();
-  });
-
-  it("sends the MQTT scanner (sidecar) topic filter and bounded run time to the run (M3)", async () => {
-    let postedBody: { parameters: Record<string, unknown> } | null = null;
-    stubMqttSidecarRunFetch((body) => {
-      postedBody = body;
-    });
-
+  it("makes the embedded scanner the whole MQTT sidecar module (no native run form)", async () => {
+    stubSidecarModuleFetch();
     renderModule("mqtt-scanner");
 
-    fireEvent.change(await screen.findByLabelText(/Topic filter/i), {
-      target: { value: "site/asset-1/#" },
-    });
-    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "5" } });
-    fireEvent.change(await screen.findByLabelText(/Run time unit/i), {
-      target: { value: "minutes" },
-    });
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    const runButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(runButton).toBeEnabled());
-    fireEvent.click(runButton);
-
-    await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
-      .parameters;
-    expect(parameters.topic_filter).toBe("site/asset-1/#");
-    expect(parameters.capture_seconds).toBe(300);
-  });
-
-  it("omits both MQTT scanner capture keys when filter and run time are blank (M3)", async () => {
-    let postedBody: { parameters: Record<string, unknown> } | null = null;
-    stubMqttSidecarRunFetch((body) => {
-      postedBody = body;
-    });
-
-    renderModule("mqtt-scanner");
-
-    // Blank filter + blank run time -> neither key on the wire; the adapter's own
-    // defaults (# / 60s) apply, never a literal "#" or 0-sentinel.
-    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "" } });
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    const runButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(runButton).toBeEnabled());
-    fireEvent.click(runButton);
-
-    await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
-      .parameters;
-    expect(parameters).not.toHaveProperty("topic_filter");
-    expect(parameters).not.toHaveProperty("capture_seconds");
-  });
-
-  it("refuses an MQTT scanner run time over the 15-minute cap without posting (M3)", async () => {
-    let posted = false;
-    stubMqttSidecarRunFetch(() => {
-      posted = true;
-    });
-
-    renderModule("mqtt-scanner");
-
-    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "16" } });
-    fireEvent.change(await screen.findByLabelText(/Run time unit/i), {
-      target: { value: "minutes" },
-    });
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-
-    expect(await screen.findByText(/15-minute scanner capture limit/i)).toBeInTheDocument();
-    const runButton = screen.getByRole("button", { name: "Run" });
-    expect(runButton).toBeDisabled();
-    fireEvent.click(runButton);
-    expect(posted).toBe(false);
-  });
-
-  it("blocks a non-numeric MQTT scanner run time and posts nothing (M3)", async () => {
-    let posted = false;
-    stubMqttSidecarRunFetch(() => {
-      posted = true;
-    });
-
-    renderModule("mqtt-scanner");
-
-    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
-      target: { value: "45s" },
-    });
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    const runButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(runButton).toBeEnabled());
-    fireEvent.click(runButton);
-
-    expect(await screen.findByText(/Run time must be a positive number/i)).toBeInTheDocument();
-    expect(posted).toBe(false);
+    expect(await screen.findByTitle(/MQTT advanced scanner/i)).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: /Module steps/i })).toBeNull();
+    expect(screen.queryByLabelText(/Topic filter/i)).toBeNull();
   });
 
   it("sends an MQTT dry-run preview instead of an unauthorized live capture", async () => {

@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 const PROTO_LABEL: Record<string, string> = { ip: "IP", bacnet: "BACnet", mqtt: "MQTT" };
 
 type PendingWrite = { id: string; method: string; path: string; body: string };
+type Phase = "loading" | "error" | "ready";
 
 function describeWrite(body: string): string {
   try {
@@ -31,32 +32,59 @@ export function AdvancedScannerPanel({
   sourceInterfaceCidr?: string;
   mqttConfig?: { host: string; port: string; tls: boolean; clientId: string; username: string; qos: string };
 }) {
-  const [ready, setReady] = useState(false);
+  const [phase, setPhase] = useState<Phase>("loading");
+  const [startError, setStartError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const [bridgeReady, setBridgeReady] = useState(false);
   const [pending, setPending] = useState<PendingWrite | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [writeError, setWriteError] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const label = PROTO_LABEL[proto] ?? proto.toUpperCase();
 
-  // Open a panel session first so proxied actions attribute evidence to this
-  // project/site. Best effort: render the tool even if it fails.
+  // Preflight before showing the tool: open the panel session (so proxied actions
+  // attribute evidence to this project/site) AND confirm the sidecar answers. Both
+  // must succeed - a failed session (actions would not attribute) or an
+  // unreachable sidecar (the iframe would load a 503) surfaces an error with Retry
+  // instead of a ready-looking panel that does not work. Re-runs on Retry.
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/v1/scanners/${proto}/raw/session`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ project_id: projectId, site_id: siteId }),
-    })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!cancelled) setReady(true);
-      });
+    setBridgeReady(false);
+    setPhase("loading");
+    (async () => {
+      try {
+        const session = await fetch(`/api/v1/scanners/${proto}/raw/session`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ project_id: projectId, site_id: siteId }),
+        });
+        if (!session.ok) {
+          throw new Error(`The panel session could not be opened (HTTP ${session.status}).`);
+        }
+        const health = await fetch(`/api/v1/scanners/${proto}/raw/api/health`, {
+          credentials: "same-origin",
+        });
+        if (!health.ok) {
+          throw new Error(`The ${label} scanner service is unavailable (HTTP ${health.status}).`);
+        }
+        if (!cancelled) {
+          setStartError(null);
+          setPhase("ready");
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setStartError(
+            caught instanceof Error ? caught.message : `The ${label} scanner could not be reached.`,
+          );
+          setPhase("error");
+        }
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [proto, projectId, siteId]);
+  }, [proto, projectId, siteId, attempt, label]);
 
   // The bridge inside the iframe posts a write request; hold it until the
   // operator confirms. Only accept messages from our own iframe.
@@ -66,7 +94,7 @@ export function AdvancedScannerPanel({
       const data = event.data as { type?: string; id?: string; method?: string; path?: string; body?: string };
       if (data?.type === "sct-bridge-ready") setBridgeReady(true);
       if (data?.type === "sct-write-request" && data.id && data.method && data.path) {
-        setError(null);
+        setWriteError(null);
         setPending({ id: data.id, method: data.method, path: data.path, body: data.body ?? "" });
       }
     }
@@ -106,15 +134,35 @@ export function AdvancedScannerPanel({
       setAcknowledged(true);
       decide(pendingWrite, token);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Write confirmation failed.");
+      setWriteError(caught instanceof Error ? caught.message : "Write confirmation failed.");
       decide(pendingWrite, null);
     }
   }
 
-  if (!ready) {
+  if (phase === "loading") {
     return (
       <div className="advanced-panel">
         <p className="advanced-panel-note">Preparing the {label} scanner...</p>
+      </div>
+    );
+  }
+
+  if (phase === "error") {
+    return (
+      <div className="advanced-panel">
+        <div className="state-panel error" role="alert">
+          <strong>The {label} scanner could not start</strong>
+          <span>{startError}</span>
+          <div className="inline-actions">
+            <button
+              className="secondary-button compact"
+              onClick={() => setAttempt((n) => n + 1)}
+              type="button"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -132,9 +180,9 @@ export function AdvancedScannerPanel({
         src={`/api/v1/scanners/${proto}/raw/`}
         title={`${label} advanced scanner`}
       />
-      {error && (
+      {writeError && (
         <p className="error-text" role="alert">
-          {error}
+          {writeError}
         </p>
       )}
       {pending && (
