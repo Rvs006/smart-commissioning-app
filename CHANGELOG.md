@@ -7,6 +7,46 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Fixed
+
+- MQTT discovery (built-in engine) no longer truncates a full-site capture at 500
+  distinct topics. The discovery engine is registerless, so its default
+  distinct-topic cap (`DEFAULT_MAX_MESSAGES`, `engines/mqtt_discovery.py`) now
+  equals the memory-safe ceiling `MAX_TOPIC_CAP` (10,000) instead of 500. A large
+  estate (hundreds of assets, ~3 topic families each, thousands of distinct
+  topics) is captured in full by default rather than silently dropping every
+  topic seen after the 500th. Retain-latest plus the transport byte bound still
+  cap memory, and `topic_limit_reached` still flags any run that reaches the
+  ceiling. Operators can still pass a smaller `max_messages` to bound a single
+  run. UDMI validation already scaled its capture to the register (v0.1.29); this
+  brings the discovery lane in line.
+
+## [0.1.55] - 2026-08-27
+
+### Added
+
+- Scanner marriage: the embedded IP, BACnet, and MQTT scanners are reskinned to
+  the SCT Electracom theme and wired end to end. A completed panel scan is
+  captured as a real `ip_scanner` / `bacnet_scanner` / `mqtt_scanner` run, so the
+  Results tab, run history, and reports fill in; IP and BACnet re-compare and a
+  BACnet export are captured too. The saved Source Interface pre-selects the NIC
+  in the tool and prefills the IP range and the MQTT broker. The IP, BACnet, and
+  MQTT sidecar modules now present the embedded scanner as one Scan surface,
+  retiring the Setup / Run / Results wizard for those modules. The tools' own
+  `app.js` is untouched.
+
+### Fixed
+
+- A panel session is bound to the protocol it was opened for: a session opened
+  for one scanner can no longer authorize or attribute a `scanner_raw_write` for
+  another, and a cross-protocol write is refused.
+- The panel checks the session response and probes the sidecar health before
+  showing the embedded tool, so a failed session or an unavailable sidecar shows
+  an error with a Retry control instead of a ready-looking panel that does not
+  work.
+- A completed BACnet export no longer loses its discovered points; the export
+  archive is decoded and persisted with the run.
+
 ## [0.1.54] - 2026-08-24
 
 ### Changed
