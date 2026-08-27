@@ -98,8 +98,24 @@ _BRIDGE_JS = """(function () {
   // pre-select the NIC that matches SCT's Source Interface, then dispatch a real
   // change event - the vendored scan reads the range that change prefills, not the
   // adapter. Pure DOM, so app.js is untouched; a no-op on apps without #adapterSelect.
+  function applyMqttConfig(m) {
+    function setField(id, val) {
+      var el = document.getElementById(id);
+      if (el && val != null && val !== '' && !el.value) el.value = val;
+    }
+    setField('cHost', m.host);
+    setField('cPort', m.port);
+    setField('cClientId', m.clientId);
+    setField('cUser', m.username);
+    var proto = document.getElementById('cProto');
+    if (proto && typeof m.tls === 'boolean') proto.value = m.tls ? 'mqtts' : 'mqtt';
+    var qos = document.getElementById('cQos');
+    if (qos && m.qos) qos.value = m.qos;
+  }
   function applyConfigIn(cfg) {
-    var cidr = cfg && cfg.sourceInterface;
+    if (!cfg) return;
+    if (cfg.mqtt) applyMqttConfig(cfg.mqtt);   // MQTT: prefill broker modal (secrets left blank)
+    var cidr = cfg.sourceInterface;
     if (!cidr) return;
     var ip = String(cidr).split('/')[0];
     var sel = document.getElementById('adapterSelect');
@@ -538,6 +554,64 @@ def _persist_ip_scan_result(
         logger.warning("results-out persistence failed: %s", session.session_id, exc_info=True)
 
 
+def _persist_bacnet_scan_result(
+    session: scanner_raw_session.PanelSession,
+    principal: AuthPrincipal,
+    raw: bytes,
+) -> None:
+    """Results-out for BACnet: persist a completed panel scan as a real
+    ``bacnet_scanner`` run. The scan's SSE ``result`` frame has the same shape as IP;
+    the source NIC is resolved from SCT config in the dispatch helper (BACnet needs
+    it and the panel query does not carry it). Best-effort."""
+    try:
+        result = _parse_scan_result(raw)
+        rows = result.get("rows") if isinstance(result, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return
+        from app.api.routes.scanners import dispatch_captured_bacnet_scanner_run
+
+        dispatch_captured_bacnet_scanner_run(
+            project_id=session.project_id,
+            site_id=session.site_id,
+            principal=principal,
+            captured={
+                "rows": rows,
+                "summary": result.get("summary") or {},
+                "device_files": [],
+                "routers": [],
+            },
+        )
+    except Exception:  # noqa: BLE001 - results-out is best-effort, never breaks the scan
+        logger.warning("bacnet results-out persistence failed: %s", session.session_id, exc_info=True)
+
+
+def _persist_mqtt_scan_result(
+    session: scanner_raw_session.PanelSession,
+    principal: AuthPrincipal,
+    raw: bytes,
+) -> None:
+    """Results-out for MQTT: persist a completed panel export-archive as a real
+    ``mqtt_scanner`` run. MQTT is a live stream, so the capture point is the finite
+    export ZIP (never per message); its manifest + payloads replay through the
+    engine. Best-effort; skips an empty capture."""
+    try:
+        from smart_commissioning_core.engines.mqtt_scanner_sidecar import _read_export_zip
+
+        manifest, payloads = _read_export_zip(raw)
+        if not payloads:
+            return
+        from app.api.routes.scanners import dispatch_captured_mqtt_scanner_run
+
+        dispatch_captured_mqtt_scanner_run(
+            project_id=session.project_id,
+            site_id=session.site_id,
+            principal=principal,
+            captured={"manifest": manifest, "payloads": payloads},
+        )
+    except Exception:  # noqa: BLE001 - results-out is best-effort, never breaks the export
+        logger.warning("mqtt results-out persistence failed: %s", session.session_id, exc_info=True)
+
+
 @router.api_route(
     "/{proto}/raw/{path:path}",
     methods=["GET", "POST", "DELETE", "HEAD"],
@@ -606,14 +680,30 @@ async def proxy_scanner_raw(
         response_headers["cache-control"] = "no-store"
         response_headers["x-accel-buffering"] = "no"
 
-    # Results-out (pipe 3): when a real IP scan finishes in the panel, capture the
-    # completed SSE body and persist it as an ip_scanner run. GET /api/scan only.
+    # Results-out: capture the completed body and persist it as a real run where the
+    # protocol has a discrete "done" signal - IP/BACnet scan SSE result frame, MQTT
+    # the finite export-archive ZIP. GET only, with a session.
     on_complete: Callable[[bytes], None] | None = None
-    if session is not None and proto == "ip" and path == "api/scan" and is_sse and request.method == "GET":
+    if session is not None and request.method == "GET":
         capture_session, capture_principal, capture_query = session, principal, request.url.query
+        if proto == "ip" and path == "api/scan" and is_sse:
 
-        def on_complete(raw: bytes) -> None:
-            _persist_ip_scan_result(capture_session, capture_principal, capture_query, raw)
+            def on_complete_ip(raw: bytes) -> None:
+                _persist_ip_scan_result(capture_session, capture_principal, capture_query, raw)
+
+            on_complete = on_complete_ip
+        elif proto == "bacnet" and path == "api/scan" and is_sse:
+
+            def on_complete_bacnet(raw: bytes) -> None:
+                _persist_bacnet_scan_result(capture_session, capture_principal, raw)
+
+            on_complete = on_complete_bacnet
+        elif proto == "mqtt" and path == "api/export-archive":
+
+            def on_complete_mqtt(raw: bytes) -> None:
+                _persist_mqtt_scan_result(capture_session, capture_principal, raw)
+
+            on_complete = on_complete_mqtt
 
     return StreamingResponse(
         _relay(client, upstream, cap=is_sse, on_complete=on_complete),
