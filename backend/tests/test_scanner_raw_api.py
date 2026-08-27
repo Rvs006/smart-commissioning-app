@@ -39,6 +39,47 @@ def _mqtt_export_zip() -> bytes:
 
 _MQTT_EXPORT_ZIP = _mqtt_export_zip()
 
+
+def _bacnet_export_sse() -> bytes:
+    """A BACnet /api/export SSE body: a device event then the terminal ``ready``
+    event carrying a base64 ZIP with one per-asset JSON (identity + one point)."""
+    import base64
+    import io
+    import json
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr(
+            "AHU-1_1001/asset.json",
+            json.dumps(
+                {
+                    "asset": "AHU-1",
+                    "deviceInstance": 1001,
+                    "address": "192.0.2.10",
+                    "network": 0,
+                    "vendor": "Acme",
+                    "points": [
+                        {
+                            "objectType": "analogInput",
+                            "objectInstance": 1,
+                            "name": "Temp",
+                            "presentValue": 21.5,
+                            "units": "degC",
+                        }
+                    ],
+                }
+            ),
+        )
+    ready = json.dumps(
+        {"type": "ready", "filename": "x.zip", "assets": 1, "points": 1,
+         "base64": base64.b64encode(buf.getvalue()).decode("ascii")}
+    )
+    return (b'data: {"type":"device","index":0}\n\n' + f"data: {ready}\n\n".encode())
+
+
+_BACNET_EXPORT_SSE = _bacnet_export_sse()
+
 _API_KEY = "test-scanner-raw-key"
 _ENV = {"JOB_EXECUTION_MODE": "inline", "AUTH_MODE": "api_key", "API_KEY": _API_KEY}
 
@@ -106,6 +147,11 @@ def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=_Bytes([b'{"ok":true}']), headers={"content-type": "application/json"})
     if path == "/api/export-archive":
         return httpx.Response(200, stream=_Bytes([_MQTT_EXPORT_ZIP]), headers={"content-type": "application/zip"})
+    if path == "/api/export":
+        # BACnet export: a POST that streams SSE and ends with the base64 ZIP.
+        return httpx.Response(
+            200, stream=_Bytes([_BACNET_EXPORT_SSE]), headers={"content-type": "text/event-stream"}
+        )
     return httpx.Response(404, text="not found")
 
 
@@ -263,6 +309,29 @@ class ScannerRawApiTest(ApiTestCase):
             self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(len(calls), 1)
         self.assertIn("site/ahu1", calls[0]["captured"]["payloads"])
+
+    def test_completed_bacnet_export_persists_points(self) -> None:
+        # REV-1: a BACnet scan carries no points - they come from /api/export. The
+        # export SSE's ZIP is captured, decoded to device_files (with points), and
+        # device rows are rebuilt from the per-asset identity, then handed to the
+        # bacnet dispatch helper. Without this the exported points are dropped.
+        from app.api.routes import scanners
+
+        calls: list[dict] = []
+        with patch.object(
+            scanners, "dispatch_captured_bacnet_scanner_run", lambda **kw: calls.append(kw)
+        ):
+            session = self.sessions.create(
+                owner="tester", project_id="demo-project", site_id="demo-site", proto="bacnet"
+            )
+            self.client.cookies.set("sct_panel", session.session_id)
+            resp = self.client.post("/api/v1/scanners/bacnet/raw/api/export", json={"devices": []})
+            self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(len(calls), 1)
+        captured = calls[0]["captured"]
+        self.assertEqual(captured["device_files"][0]["deviceInstance"], 1001)
+        self.assertEqual(len(captured["device_files"][0]["points"]), 1)
+        self.assertEqual(captured["rows"][0]["instance"], 1001)
 
     def test_ip_recompare_persists_a_real_ip_scanner_run(self) -> None:
         # Results-out for a re-compare: after loading a register and re-RAGing, the

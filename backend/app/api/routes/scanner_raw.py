@@ -715,6 +715,90 @@ def _persist_bacnet_compare_result(
         logger.warning("bacnet compare results-out persistence failed: %s", session.session_id, exc_info=True)
 
 
+def _parse_export_ready_zip(raw: bytes) -> str | None:
+    """Recover the base64 export ZIP from a captured BACnet ``/api/export`` SSE body:
+    the terminal ``ready`` event carries the whole ZIP inline as ``base64``."""
+    zip_b64: str | None = None
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line[len("data:") :].strip())
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "ready" and event.get("base64"):
+            zip_b64 = str(event["base64"])
+    return zip_b64
+
+
+def _bacnet_rows_from_export(device_files: list) -> list[dict]:
+    """Rebuild device rows from the export ZIP's per-asset JSON so a captured BACnet
+    export persists as a complete devices+points run (``_map_result`` builds devices
+    from rows and points from device_files). The export carries device identity and
+    points but not the register/RAG comparison - that stays with the scan run - so
+    these rows carry no rag/register."""
+    rows: list[dict] = []
+    for asset in device_files:
+        if not isinstance(asset, dict):
+            continue
+        address = str(asset.get("address") or "")
+        rows.append(
+            {
+                "instance": asset.get("deviceInstance"),
+                "ip": address.split(":", 1)[0] or None,
+                "name": asset.get("asset") or None,
+                "vendor": asset.get("vendor") or None,
+                "model": asset.get("model") or None,
+                "firmware": asset.get("firmware") or None,
+                "network": asset.get("network"),
+                "objectCount": asset.get("objectCount"),
+                "status": "reachable",
+            }
+        )
+    return rows
+
+
+def _persist_bacnet_export_result(
+    session: scanner_raw_session.PanelSession,
+    principal: AuthPrincipal,
+    raw: bytes,
+) -> None:
+    """Results-out for a BACnet export (REV-1): a scan discovers devices but no
+    points - points come from the separate ``/api/export`` action, which reads each
+    device's object list and returns them in a ZIP. Capture that ZIP (mirroring the
+    MQTT export-archive capture) and persist a real ``bacnet_scanner`` run carrying
+    the exported points, so a completed export is not silently dropped. Device rows
+    are rebuilt from the export's per-asset identity; the RAG verdict stays with the
+    scan run. Best-effort and no live I/O - it decodes the ZIP the panel already
+    produced, it does not drive a new export."""
+    try:
+        from smart_commissioning_core.engines.bacnet_scanner_sidecar import _decode_export_zip
+
+        zip_b64 = _parse_export_ready_zip(raw)
+        if not zip_b64:
+            return
+        device_files = _decode_export_zip(zip_b64)
+        if not device_files:
+            return
+        rows = _bacnet_rows_from_export(device_files)
+        from app.api.routes.scanners import dispatch_captured_bacnet_scanner_run
+
+        dispatch_captured_bacnet_scanner_run(
+            project_id=session.project_id,
+            site_id=session.site_id,
+            principal=principal,
+            captured={
+                "rows": rows,
+                "summary": {"discovered": len(rows)},
+                "device_files": device_files,
+                "routers": [],
+            },
+        )
+    except Exception:  # noqa: BLE001 - results-out is best-effort, never breaks the export
+        logger.warning("bacnet export results-out persistence failed: %s", session.session_id, exc_info=True)
+
+
 @router.api_route(
     "/{proto}/raw/{path:path}",
     methods=["GET", "POST", "DELETE", "HEAD"],
@@ -792,8 +876,9 @@ async def proxy_scanner_raw(
 
     # Results-out: capture the completed body and persist it as a real run where the
     # protocol has a discrete "done" signal - IP/BACnet scan SSE result frame, the
-    # IP/BACnet re-compare JSON, MQTT the finite export-archive ZIP. Needs a session;
-    # the scan captures are GET SSE, compare is a POST with a finite JSON body.
+    # IP/BACnet re-compare JSON, the BACnet export SSE ZIP (its points), MQTT the
+    # export-archive ZIP. Needs a session; scans are GET SSE, compare a POST JSON,
+    # the BACnet export a POST SSE.
     on_complete: Callable[[bytes], None] | None = None
     if session is not None:
         capture_session, capture_principal, capture_query = session, principal, request.url.query
@@ -827,6 +912,12 @@ async def proxy_scanner_raw(
                 _persist_bacnet_compare_result(capture_session, capture_principal, raw)
 
             on_complete = on_complete_bacnet_compare
+        elif request.method == "POST" and proto == "bacnet" and path == "api/export":
+
+            def on_complete_bacnet_export(raw: bytes) -> None:
+                _persist_bacnet_export_result(capture_session, capture_principal, raw)
+
+            on_complete = on_complete_bacnet_export
 
     return StreamingResponse(
         _relay(client, upstream, cap=is_sse, on_complete=on_complete),
