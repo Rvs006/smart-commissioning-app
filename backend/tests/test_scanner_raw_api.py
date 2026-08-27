@@ -13,6 +13,32 @@ from unittest.mock import patch
 import httpx
 from harness import ApiTestCase
 
+
+def _mqtt_export_zip() -> bytes:
+    """Minimal MQTT export archive: _manifest.json + one topic payload, so
+    _read_export_zip yields non-empty payloads and MQTT results-out fires."""
+    import io
+    import json
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr(
+            "_manifest.json",
+            json.dumps(
+                {
+                    "assets": [{"asset": "AHU-1", "topics": ["site/ahu1"], "matched": True}],
+                    "topicCount": 1,
+                    "assetCount": 1,
+                }
+            ),
+        )
+        archive.writestr("site/ahu1.json", json.dumps({"present_value": 21.5}))
+    return buf.getvalue()
+
+
+_MQTT_EXPORT_ZIP = _mqtt_export_zip()
+
 _API_KEY = "test-scanner-raw-key"
 _ENV = {"JOB_EXECUTION_MODE": "inline", "AUTH_MODE": "api_key", "API_KEY": _API_KEY}
 
@@ -61,6 +87,8 @@ def _handler(request: httpx.Request) -> httpx.Response:
         )
     if path == "/api/publish":
         return httpx.Response(200, stream=_Bytes([b'{"ok":true}']), headers={"content-type": "application/json"})
+    if path == "/api/export-archive":
+        return httpx.Response(200, stream=_Bytes([_MQTT_EXPORT_ZIP]), headers={"content-type": "application/zip"})
     return httpx.Response(404, text="not found")
 
 
@@ -181,6 +209,43 @@ class ScannerRawApiTest(ApiTestCase):
         runs = service.list_runs(job_types={"ip_scanner"})
         self.assertEqual(len(runs), before + 1)
         self.assertEqual(runs[0].status, "succeeded")
+
+    def test_completed_bacnet_scan_dispatches_a_results_out_run(self) -> None:
+        # Results-out for BACnet: a completed panel scan hands the captured rows to
+        # the bacnet dispatch helper (engine path + source_ip resolution live in that
+        # helper, covered by the IP results-out test's real dispatch).
+        from app.api.routes import scanners
+
+        calls: list[dict] = []
+        with patch.object(
+            scanners, "dispatch_captured_bacnet_scanner_run", lambda **kw: calls.append(kw)
+        ):
+            session = self.sessions.create(
+                owner="tester", project_id="demo-project", site_id="demo-site", proto="bacnet"
+            )
+            self.client.cookies.set("sct_panel", session.session_id)
+            resp = self.client.get("/api/v1/scanners/bacnet/raw/api/scan?adapter=0")
+            self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["captured"]["rows"])
+
+    def test_completed_mqtt_export_dispatches_a_results_out_run(self) -> None:
+        # Results-out for MQTT: the finite export-archive ZIP is captured, parsed to
+        # manifest + payloads, and handed to the mqtt dispatch helper.
+        from app.api.routes import scanners
+
+        calls: list[dict] = []
+        with patch.object(
+            scanners, "dispatch_captured_mqtt_scanner_run", lambda **kw: calls.append(kw)
+        ):
+            session = self.sessions.create(
+                owner="tester", project_id="demo-project", site_id="demo-site", proto="mqtt"
+            )
+            self.client.cookies.set("sct_panel", session.session_id)
+            resp = self.client.get("/api/v1/scanners/mqtt/raw/api/export-archive")
+            self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("site/ahu1", calls[0]["captured"]["payloads"])
 
     # -- M4: write guard ------------------------------------------------------
 

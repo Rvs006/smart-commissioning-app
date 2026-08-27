@@ -986,9 +986,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // when the operator has not already typed a range. Editable afterwards; an
   // "Auto" / blank source interface (no cidr) leaves the fields untouched.
   const configurationQuery = useQuery({
-    enabled: module.route === "ip-scanner",
+    enabled: ["ip-scanner", "bacnet-scanner", "mqtt-scanner"].includes(module.route),
     queryFn: ({ signal }) => getConfiguration({ client: apiClient, signal }),
-    queryKey: [...queryKeys.workspace(sessionScopeId, workspaceRef), "configuration", "auto-subnet"],
+    queryKey: [...queryKeys.workspace(sessionScopeId, workspaceRef), "configuration", "panel-config"],
     staleTime: 30_000,
   });
   // The configured Source Interface cidr (e.g. "10.0.10.5/24"), shared by
@@ -1000,6 +1000,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       if (section.values["Source Interface"]) return section.values["Source Interface"];
     }
     return undefined;
+  }, [configurationQuery.data]);
+  // MQTT config-in: the saved broker settings, to prefill the panel's connect
+  // modal (secrets left for the operator). Only when a broker host is configured.
+  const mqttPanelConfig = useMemo(() => {
+    const values = configurationQuery.data?.mqtt?.values;
+    const host = values?.["MQTT Broker FQDN or IP Address"];
+    if (!values || !host) return undefined;
+    return {
+      host,
+      port: values["Port"] ?? "",
+      tls: (values["Use TLS"] ?? "").toLowerCase().startsWith("enab"),
+      clientId: values["Client ID"] ?? "",
+      username: values["MQTT Username"] ?? "",
+      qos: (values["QoS"] ?? "").trim().charAt(0),
+    };
   }, [configurationQuery.data]);
   const autoSubnetApplied = useRef(false);
   useEffect(() => {
@@ -4829,6 +4844,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               projectId={workspaceRef.projectId}
               siteId={workspaceRef.siteId}
               sourceInterfaceCidr={sourceInterfaceCidr}
+              mqttConfig={mqttPanelConfig}
             />
           </section>
         )}

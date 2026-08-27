@@ -23,11 +23,13 @@ export function AdvancedScannerPanel({
   projectId,
   siteId,
   sourceInterfaceCidr,
+  mqttConfig,
 }: {
   proto: string;
   projectId: string;
   siteId: string;
   sourceInterfaceCidr?: string;
+  mqttConfig?: { host: string; port: string; tls: boolean; clientId: string; username: string; qos: string };
 }) {
   const [ready, setReady] = useState(false);
   const [bridgeReady, setBridgeReady] = useState(false);
@@ -76,12 +78,12 @@ export function AdvancedScannerPanel({
   // saved Source Interface so the vendored tool pre-selects the matching NIC.
   // Re-sends if the cidr resolves after the bridge is ready; a no-op with no cidr.
   useEffect(() => {
-    if (!bridgeReady || !sourceInterfaceCidr) return;
+    if (!bridgeReady || (!sourceInterfaceCidr && !mqttConfig)) return;
     iframeRef.current?.contentWindow?.postMessage(
-      { type: "sct-config-in", sourceInterface: sourceInterfaceCidr },
+      { type: "sct-config-in", sourceInterface: sourceInterfaceCidr, mqtt: mqttConfig },
       "*",
     );
-  }, [bridgeReady, sourceInterfaceCidr]);
+  }, [bridgeReady, sourceInterfaceCidr, mqttConfig]);
 
   function decide(pendingWrite: PendingWrite, token: string | null) {
     iframeRef.current?.contentWindow?.postMessage(
