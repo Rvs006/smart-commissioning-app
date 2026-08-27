@@ -316,6 +316,26 @@ class RetainLatestAggregationTests(unittest.TestCase):
             mqtt_discovery.MAX_TOPIC_CAP,
         )
 
+    def test_default_captures_a_full_site_sweep_not_just_500(self) -> None:
+        # Registerless engine: a default run (no max_messages) must sweep a whole
+        # estate, not stop at the old 500. 600 distinct topics all land and the
+        # cap flag stays clear because the default is now MAX_TOPIC_CAP, not 500.
+        self.assertEqual(mqtt_discovery.DEFAULT_MAX_MESSAGES, mqtt_discovery.MAX_TOPIC_CAP)
+        store = FakeRunStore()
+        messages = [_json_msg(f"udmi/DEV-{i}/pointset", {"i": i}) for i in range(600)]
+        capture = FakeCapture(messages)
+
+        result = mqtt_discovery.process_mqtt_discovery_run(
+            "run_full_site", {**_AUTH}, run_store=store, execution_mode="dramatiq_worker",
+            live_capture=capture, build_settings=_stub_build,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(capture.calls[-1]["max_messages"], mqtt_discovery.MAX_TOPIC_CAP)
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["topics_discovered"], 600)  # every topic past the 500th
+        self.assertFalse(summary["topic_limit_reached"])
+
 
 class MessageMetadataTests(unittest.TestCase):
     """Per-topic last-message metadata (retained / delivery QoS / received-at)

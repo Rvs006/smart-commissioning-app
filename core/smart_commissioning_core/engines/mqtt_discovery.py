@@ -89,13 +89,16 @@ ENGINE_NAME = "mqtt_discovery"
 
 DEFAULT_TOPIC_FILTER = "#"
 DEFAULT_CAPTURE_SECONDS = 5.0
-DEFAULT_MAX_MESSAGES = 500
 # With retain-latest the message cap bounds DISTINCT TOPICS, not raw messages
 # (mqtt_transport.subscribe_and_capture keeps one latest payload per topic), so a
 # large operator max_messages can no longer buy unbounded payload memory — but
 # each retained topic still holds one decoded JSON object, so clamp the topic
 # count. Worst-case memory ~= distinct_topics x largest payload.
 MAX_TOPIC_CAP = 10_000
+# Registerless engine, so nothing scales the default to the site. Default equals
+# the memory-safe ceiling so a full-site sweep is captured whole rather than
+# truncated at the old 500; operators can still pass a smaller max_messages.
+DEFAULT_MAX_MESSAGES = MAX_TOPIC_CAP
 
 # The capture callable: same positional/keyword shape as
 # mqtt_transport.subscribe_and_capture, so the real client is the default and a
