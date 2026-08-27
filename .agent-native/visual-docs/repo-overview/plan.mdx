@@ -1,0 +1,102 @@
+---
+title: "Smart Commissioning Tool — Architecture"
+brief: "Architecture map of the Smart Commissioning Tool: React SPA, FastAPI API, shared core engines, Dramatiq worker. Discovers and validates building IP/BACnet/MQTT/UDMI devices and exports signed evidence."
+kind: "plan"
+localOnly: true
+---
+
+# Smart Commissioning Tool — Architecture
+
+A commissioning and verification platform for building-automation Master Systems Integrators: configure a site, discover its IP / BACnet / MQTT / UDMI devices, validate what is live against what was specified, and export signed, tamper-evident evidence. React SPA, FastAPI API, a shared `smart_commissioning_core` package, and a Dramatiq worker. Pre-1.0; latest public release v0.1.54.
+
+This workspace is repo-native: the MDX files are local source files, comments stay beside them in `comments.json`, and the Plan UI reads them through the localhost bridge instead of writing the plan to hosted storage.
+
+Manifest: `../../../agent-native.json`
+
+## Architecture at a glance
+
+One executable serves the SPA, the HTTP API, and the discovery engines. The shared `smart_commissioning_core` package is the single source of truth: it is imported by both the FastAPI request thread and the Dramatiq worker, so an inline run and a queued run execute the identical engine code. The portable Windows build runs everything in-process against SQLite; the Docker stack splits API, worker, Postgres, and Redis and is the basis for the central hub.
+
+| Layer | Path | Role |
+| --- | --- | --- |
+| Frontend | `frontend/` (92 files) | React SPA, hash router, one `ModulePage` drives 9 module routes; TanStack Query + SSE |
+| API | `backend/app/` (174 files) | FastAPI: routes → services → core repositories; auth, RBAC, serves the SPA |
+| Core | `core/smart_commissioning_core/` (172 files) | Engines, validation, run lifecycle + seals, persistence, sync, integrity |
+| Worker | `worker/` (14 files) | Dramatiq actors for the queued lane (server/hub deployments) |
+| Data | `infra/docker-compose.yml` | Postgres or SQLite, Redis, signed-evidence and secret volumes; 16 Alembic migrations |
+
+Run flow: a route creates a leased, sealed `run` (row + frozen execution context + dispatch outbox in one write), `dispatch_run` forks to an inline daemon thread or a Redis/Dramatiq actor, the engine executes under a lease and heartbeat, then finalize folds an observation hash-chain into a terminal result and writes a `RunSeal` binding `context_sha256 ⊕ result_sha256`. Progress streams over SSE that polls the run store, so it works without a broker. Finished runs sync to a central hub as an Ed25519-signed `.scbundle` verified fail-closed.
+
+## Visualized Targets
+
+<FileTree id="visualized-targets" title="Visualized targets" entries={[{"path":"backend/app/main.py","note":"area; file-tree, diagram, annotated-code"},{"path":"backend/app/api/router.py","note":"area; file-tree, diagram, annotated-code"},{"path":"backend/app/services/run_service.py","note":"area; file-tree, diagram, annotated-code"},{"path":"backend/app/services/run_dispatch.py","note":"area; file-tree, diagram, annotated-code"},{"path":"backend/app/api/routes/scanner_raw.py","note":"flow; wireframe, diagram, annotated-code"},{"path":"core/smart_commissioning_core/engines/base.py","note":"area; file-tree, diagram, annotated-code"},{"path":"core/smart_commissioning_core/db/models.py","note":"model; data-model, diagram, annotated-code"},{"path":"core/smart_commissioning_core/db/run_lifecycle.py","note":"model; data-model, diagram, annotated-code"},{"path":"core/smart_commissioning_core/records.py","note":"area; file-tree, diagram, annotated-code"},{"path":"core/smart_commissioning_core/sync.py","note":"area; file-tree, diagram, annotated-code"},{"path":"worker/app/tasks.py","note":"area; file-tree, diagram, annotated-code"},{"path":"frontend/src/app/routes.tsx","note":"area; file-tree, diagram, annotated-code"},{"path":"frontend/src/features/workflow/ModulePage.tsx","note":"area; file-tree, diagram, annotated-code"},{"path":"frontend/src/api/client.ts","note":"area; file-tree, diagram, annotated-code"}]} />
+
+## Backend / API
+
+### `backend/app/main.py` — application assembly
+
+Builds the FastAPI app with a `lifespan` that re-reads settings, configures JSON+file logging, runs Alembic `upgrade_to_head` when `auto_migrate` is on, optionally launches the scanner sidecars via `SidecarSupervisor.start_all()`, and starts a 5-second daemon maintenance thread that recovers expired run leases and publishes pending dispatches. Middleware (inner to outer): a schema-gate that 404s `/docs` in api_key mode, Prometheus metrics, request-id echo, and CORS with credentials off (header auth only). The router mounts at `/api/v1`; the built frontend is served from `SCT_FRONTEND_DIST` with a traversal-safe SPA catch-all that keeps `api/` 404s ahead of file resolution. `APP_VERSION` is pinned here.
+
+### `backend/app/api/router.py` — route surface and auth tiers
+
+Assembles the API in three trust tiers. Unauthenticated: `health`, `hub_sync_v2` (its own `X-Sync-Key` machine credential), and the public `imports` / `udmi_schemas` template routers. Everything else hangs off a `protected_router` gated by `require_auth`, with per-route RBAC layered on top (for example the `events` stream requires viewer, hub ingest requires admin). `scanner_raw` mounts at `/scanners`; the discovery scanners at `/discovery`.
+
+### `backend/app/services/run_service.py` — run lifecycle owner
+
+`RunService` wraps the core `DbRunStore` and `RunLifecycleRepository`. `create_or_reuse_job_run` first checks the idempotency replay, then in one call writes the `Run` row plus its frozen `RunExecutionContext` plus the `RunDispatch` outbox row. It also owns lease claiming, cooperative cancel, read-only run views for the SSE endpoint, and lease recovery. Queued-versus-inline is disambiguated after the fact from `result_summary.queue_name` / `actor_name`.
+
+### `backend/app/services/run_dispatch.py` — inline vs queue fork
+
+`dispatch_run` is the divergence point. When the queue is unavailable or `job_execution_mode == "inline"` it runs inline: claim the owned run, start an `OwnedRunHeartbeat`, and (by default) execute on a daemon thread that resolves the frozen context and calls the engine. Otherwise it enqueues a Dramatiq message on the destination queue and marks the dispatch published. A failed publish leaves the outbox row pending for the maintenance-thread retry; it never silently falls back to a second inline executor. Note: `job_execution_mode="auto"` is only special-cased against `"inline"`, so auto behaves as the queue path and the portable build must set `inline`.
+
+### `backend/app/api/routes/scanner_raw.py` — scanner reverse proxy (Advanced tab)
+
+Reverse-proxies the three vendored standalone scanner web apps (run as loopback sidecars by `SidecarSupervisor`) so they embed inside the SPA while every action stays governed. `classify()` treats GET/HEAD and an allowlist of read actions as free reads; everything else is a write, fail-closed, forwarded only with an `X-SCT-Write-Confirm` single-use token whose digest binds method + path + body and is minted after the operator confirms in the SCT parent. `_relay` streams via httpx and injects `sct-bridge.js` + `sct-theme.css`. Actions are recorded as real run rows (`scanner_raw_action` / `scanner_raw_write`, the latter with a redacted payload and `payload_sha256`).
+
+## Core engine — `smart_commissioning_core`
+
+### `engines/base.py` — engine framework
+
+Every engine is a callable taking an `EngineContext` and returning an `EngineResult`, run via `run_engine` / `run_engine_async`, which write a terminal status on every code path and merge `discovered_assets`, `structured_records` (DB rows), and `issues`. A `Throttle` bounds concurrency and rate against live networks. The IP, BACnet, MQTT discovery engines and the point / mapping / UDMI validators all build on this one contract, so the inline and worker lanes share identical execution.
+
+### `core/smart_commissioning_core/db/models.py` — data model
+
+The single SQLAlchemy models file (~1.8k lines) defining every table. Core entities: `users`, `projects`, `sites`, `runs`. The run cluster: `run_issues`, `run_execution_contexts`, `run_results`, `run_seals`, `run_links`, `run_dispatch_outbox`, `run_idempotency_keys`, `active_protocol_slots`, `scan_authorizations`. Discovery outputs: `discovered_devices`, `discovered_points`, `discovered_topics`, and the progressive `run_discovery_observations`. Inputs and evidence: `import_records`, `configuration_snapshots`, `udmi_schema_sets`, `raw_evidence_artifacts`, plus the `sync_*` tables. Migrations live in `core/alembic/versions/`.
+
+### `core/smart_commissioning_core/db/run_lifecycle.py` — transactional run heart
+
+`RunLifecycleRepository` is where run state is written under a fence. `create_run_with_context` writes the row + context + dispatch atomically; `claim_run` enforces owner-token + attempt + lease fencing; `heartbeat` and `require_active_control` keep a live run owned; `append_discovery_observation` feeds the hash-chained observation stream; `finalize_discovery_run` seals the run by writing `run_results` and a `run_seals` row over `context_sha256 ⊕ result_sha256`. It also handles idempotency replay, protocol-slot reservation, scan authorizations, and expired-lease recovery.
+
+### `core/smart_commissioning_core/records.py` — shared issue model
+
+`ValidationIssueRecord` is the one issue type emitted by every path — discovery, point validation, BACnet↔MQTT comparison, and UDMI — with a `severity` of low / medium / high / critical. It maps 1:1, column per field, into the `run_issues` table, and is constructed through `make_issue` (sequential `PREFIX-0001` ids) alongside the shared `Tolerance` / `within_tolerance` helpers. One contract keeps every validation result comparable and traceable.
+
+### `core/smart_commissioning_core/sync.py` — edge → hub bundle
+
+The transport-agnostic v1 bundle builder and ingest verifier. `build_sync_bundle` packs only terminal runs into a deterministic, Ed25519-signed `.scbundle` (a `manifest.json` of per-run content hashes plus `runs/<id>.json`). `ingest_sync_bundle` verifies fail-closed in order — parse, trusted edge and matching key fingerprint, detached signature, then per-run hash — and only then does an immutable per-run upsert (insert, skip identical, or reject a changed re-use of an id). Content hashing deliberately excludes provenance (`edge_id`, server-assigned ids) so idempotency holds across two independent databases. Bytes flow over an online HTTP push or an offline carried file.
+
+## Worker
+
+### `worker/app/tasks.py` — Dramatiq actors
+
+The queued lane. A `RedisBroker` is created at import; actors on the `discovery` queue (`discover_ip_range`, `discover_bacnet`, `discover_mqtt`) and the `validation` queue (`validate_udmi_payloads`, `validate_bacnet_points`, `compare_bacnet_mqtt`, `publish_mqtt_config`) call the same core engine processors as the inline path. The `@_with_worker_lease` decorator claims the lease, verifies the frozen context, runs a heartbeat, and seals failures. A maintenance actor recovers expired leases. Present for the shared-server and hub deployments; the portable build skips it.
+
+## Frontend
+
+### `frontend/src/app/routes.tsx` — route table
+
+A `createHashRouter` (hash routing so the SPA works from the portable `file://` EXE) with lazy-loaded routes under the `App` shell: dashboard, configuration, the six discovery/validation modules, reports, hub, run history, and admin users. Each protocol exposes two lanes — an operator-facing sidecar route (on the nav) and a built-in `*-sct` engine route (off-nav, reachable by URL). The `brief` and `learning` pages render outside the shell.
+
+### `frontend/src/features/workflow/ModulePage.tsx` — universal module page
+
+One ~10.6k-line component drives all nine module routes off a config table (`getModuleByRoute`). It renders a Setup → Run → Results stepper (plus an Advanced tab for sidecars), a hero metrics band, run controls, import/register cards, a live run console, and the results tables and payload panels; behaviour branches on `module.route`. State runs through a `useReducer(runControllerReducer)` with run-epoch ownership (`runIsolation.ts`) so a stale run's evidence can never bleed into a new submission.
+
+### `frontend/src/api/client.ts` — API and SSE client
+
+A ~3k-line hand-rolled fetch layer. Base URL `/api/v1`, auth via an `X-API-Key` header from local storage. `createSessionBoundApiClient` returns a frozen request bundle carrying an `AbortController`, so a session change or sign-out aborts every in-flight request; server state is TanStack Query keyed by session-scope + workspace. Run progress is consumed over SSE (`GET /runs/{id}/events`) through `fetch` + `ReadableStream` rather than `EventSource` (so it can send the key), parsed by `parseSseBuffer`, with Query polling as the fallback. Binary and report downloads route through the same authenticated path.
+
+## Verification
+
+- Scaffold and lint: `npx @agent-native/core@latest visualize-repo check` (offline) and `... verify` (renderer schema).
+- Open the workspace for review and comments: `npx @agent-native/core@latest visualize-repo --open` from the repo root.
+- Cross-check the anchors: each section names real files under `backend/app/`, `core/smart_commissioning_core/`, `worker/app/`, and `frontend/src/` that still exist on the current branch.
