@@ -298,7 +298,7 @@ type RunSubmissionContext = {
 
 // The module page is split into three stages so the operator works one screen
 // at a time instead of scrolling a single long page of every control at once.
-type ModuleStep = "setup" | "run" | "results" | "advanced";
+type ModuleStep = "setup" | "run" | "results";
 
 type FrozenUdmiReportScope = {
   scope: UdmiReportScopeV1 | null;
@@ -4707,6 +4707,28 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   return (
     <div className="app-page">
+      {isSidecarDiscoveryModule ? (
+        // Embed-only single page: for the IP/BACnet/MQTT sidecar modules the
+        // vendored scanner IS the module - one Scan surface, no Setup/Run/Results
+        // doors. Results-out and compare still persist real runs behind it, so run
+        // history and reports (reached from the Reports module) stay populated.
+        // The native body below is not rendered here, so its queries never fire.
+        <>
+          <h2 className="visually-hidden" ref={pageHeadingRef} tabIndex={-1}>
+            {workspace?.title ?? module.title}
+          </h2>
+          <section className="surface embed-only-scan">
+            <AdvancedScannerPanel
+              proto={module.route.replace("-scanner", "")}
+              projectId={workspaceRef.projectId}
+              siteId={workspaceRef.siteId}
+              sourceInterfaceCidr={sourceInterfaceCidr}
+              mqttConfig={mqttPanelConfig}
+            />
+          </section>
+        </>
+      ) : (
+        <>
       <section
         aria-label="Current run summary"
         className={`module-hero${isUdmiValidation ? " module-hero-workbench" : ""}`}
@@ -4829,7 +4851,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           onStep={setStep}
           hasRun={Boolean(activeRun)}
           terminal={activeRunTerminal}
-          showAdvanced={isSidecarDiscoveryModule}
         />
       )}
 
@@ -4837,17 +4858,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         className={`module-steps${module.route === "reports" ? " reports-module-steps" : ""}`}
         data-step={step}
       >
-        {isSidecarDiscoveryModule && (
-          <section className="surface" data-stepgroup="advanced">
-            <AdvancedScannerPanel
-              proto={module.route.replace("-scanner", "")}
-              projectId={workspaceRef.projectId}
-              siteId={workspaceRef.siteId}
-              sourceInterfaceCidr={sourceInterfaceCidr}
-              mqttConfig={mqttPanelConfig}
-            />
-          </section>
-        )}
         {module.route !== "reports" && (
           <section className="app-grid two-col" data-stepgroup="setup run">
             <article className="surface">
@@ -8306,6 +8316,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           </dialog>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 }
@@ -8318,13 +8330,11 @@ function StepNav({
   onStep,
   hasRun,
   terminal,
-  showAdvanced,
 }: {
   step: ModuleStep;
   onStep: (next: ModuleStep) => void;
   hasRun: boolean;
   terminal: boolean;
-  showAdvanced?: boolean;
 }) {
   const steps: { id: ModuleStep; label: string }[] = [
     { id: "setup", label: "Setup" },
@@ -8348,17 +8358,6 @@ function StepNav({
           </button>
         );
       })}
-      {showAdvanced && (
-        // Trailing tab, outside the numbered done-sequence: the raw standalone tool.
-        <button
-          aria-current={step === "advanced" ? "step" : undefined}
-          className={`step-advanced${step === "advanced" ? " active" : ""}`}
-          onClick={() => onStep("advanced")}
-          type="button"
-        >
-          Advanced
-        </button>
-      )}
     </nav>
   );
 }
