@@ -19,6 +19,18 @@ function describeWrite(body: string): string {
   }
 }
 
+// Throws if the sidecar does not answer its health probe. Shared by the preflight
+// (before the tool is shown) and the iframe onLoad recheck (a sidecar that dies
+// after the panel is ready).
+async function assertSidecarHealthy(proto: string, label: string): Promise<void> {
+  const health = await fetch(`/api/v1/scanners/${proto}/raw/api/health`, {
+    credentials: "same-origin",
+  });
+  if (!health.ok) {
+    throw new Error(`The ${label} scanner service is unavailable (HTTP ${health.status}).`);
+  }
+}
+
 export function AdvancedScannerPanel({
   proto,
   projectId,
@@ -40,6 +52,14 @@ export function AdvancedScannerPanel({
   const [acknowledged, setAcknowledged] = useState(false);
   const [writeError, setWriteError] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  // Bumped by the preflight effect whenever the panel switches scanner/context.
+  // Because this component instance is reused across a switch (same iframe DOM
+  // node, new proto), an async op started under the old context - a write confirm
+  // or a health recheck - could otherwise apply its result to the new scanner.
+  // Each op snapshots this at start and bails before its side effects if it
+  // changed, so a stale IP result never posts a decision to, or errors out, the
+  // BACnet/MQTT tool that replaced it.
+  const contextIdRef = useRef(0);
   const label = PROTO_LABEL[proto] ?? proto.toUpperCase();
 
   // Preflight before showing the tool: open the panel session (so proxied actions
@@ -48,9 +68,19 @@ export function AdvancedScannerPanel({
   // unreachable sidecar (the iframe would load a 503) surfaces an error with Retry
   // instead of a ready-looking panel that does not work. Re-runs on Retry.
   useEffect(() => {
+    // New context: invalidate any in-flight write confirm / health recheck from
+    // the previous scanner so their late results are dropped, not applied here.
+    contextIdRef.current += 1;
     let cancelled = false;
     setBridgeReady(false);
     setPhase("loading");
+    // Context changed (different scanner / project / site) or Retry: drop any write
+    // confirmation left over from the previous scanner. Otherwise a stale IP write
+    // dialog lingers over - and could be confirmed against - the newly loaded
+    // BACnet/MQTT tool, since this component instance is reused across the switch.
+    setPending(null);
+    setAcknowledged(false);
+    setWriteError(null);
     (async () => {
       try {
         const session = await fetch(`/api/v1/scanners/${proto}/raw/session`, {
@@ -62,12 +92,7 @@ export function AdvancedScannerPanel({
         if (!session.ok) {
           throw new Error(`The panel session could not be opened (HTTP ${session.status}).`);
         }
-        const health = await fetch(`/api/v1/scanners/${proto}/raw/api/health`, {
-          credentials: "same-origin",
-        });
-        if (!health.ok) {
-          throw new Error(`The ${label} scanner service is unavailable (HTTP ${health.status}).`);
-        }
+        await assertSidecarHealthy(proto, label);
         if (!cancelled) {
           setStartError(null);
           setPhase("ready");
@@ -122,6 +147,7 @@ export function AdvancedScannerPanel({
   }
 
   async function confirmWrite(pendingWrite: PendingWrite) {
+    const contextId = contextIdRef.current;
     try {
       const response = await fetch(`/api/v1/scanners/${proto}/raw/confirm-write`, {
         method: "POST",
@@ -131,11 +157,36 @@ export function AdvancedScannerPanel({
       });
       if (!response.ok) throw new Error("SCT refused the write confirmation.");
       const { token } = (await response.json()) as { token: string };
+      // Scanner switched while the confirm was in flight: never post this IP
+      // decision + token to the iframe now showing a different scanner.
+      if (contextIdRef.current !== contextId) return;
       setAcknowledged(true);
       decide(pendingWrite, token);
     } catch (caught) {
+      // Same guard on the deny path: a stale "denied" decision must not reach the
+      // replacement scanner either.
+      if (contextIdRef.current !== contextId) return;
       setWriteError(caught instanceof Error ? caught.message : "Write confirmation failed.");
       decide(pendingWrite, null);
+    }
+  }
+
+  // A sidecar that dies AFTER preflight makes the iframe (re)load the proxy's 503
+  // instead of the tool. An iframe's onError does not fire for an HTTP error
+  // document, but onLoad does; re-verify health on each full (re)load and fall back
+  // to the same Retry error state if the sidecar is gone.
+  async function recheckHealth() {
+    const contextId = contextIdRef.current;
+    try {
+      await assertSidecarHealthy(proto, label);
+    } catch (caught) {
+      // A late (re)load health failure from the previous scanner must not
+      // overwrite the current scanner's ready state with a stale error.
+      if (contextIdRef.current !== contextId) return;
+      setStartError(
+        caught instanceof Error ? caught.message : `The ${label} scanner could not be reached.`,
+      );
+      setPhase("error");
     }
   }
 
@@ -179,6 +230,7 @@ export function AdvancedScannerPanel({
         className="advanced-panel-frame"
         src={`/api/v1/scanners/${proto}/raw/`}
         title={`${label} advanced scanner`}
+        onLoad={recheckHealth}
       />
       {writeError && (
         <p className="error-text" role="alert">
