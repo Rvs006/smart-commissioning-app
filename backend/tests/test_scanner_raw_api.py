@@ -381,6 +381,31 @@ class ScannerRawApiTest(ApiTestCase):
         )
         self.assertEqual(resp.status_code, 403)
 
+    # -- REV-7: a panel session is bound to its protocol --------------------------
+
+    def test_confirm_write_rejects_a_cross_protocol_session(self) -> None:
+        # REV-7: an IP-opened session must not mint a write token on the BACnet
+        # route. The mismatch is rejected before any token is minted.
+        self._open_session("ip")
+        resp = self.client.post(
+            "/api/v1/scanners/bacnet/raw/confirm-write",
+            json={"method": "POST", "path": "api/publish", "body": "{}"},
+        )
+        self.assertEqual(resp.status_code, 403, resp.text)
+        self.assertIn("different scanner", resp.text)
+
+    def test_proxy_write_from_a_cross_protocol_session_fails_closed(self) -> None:
+        # REV-7 defense in depth: even a token minted elsewhere cannot push a write
+        # through a route whose protocol differs from the session's - the proxy drops
+        # the mismatched session, so the write has no valid token and is refused.
+        self._open_session("ip")  # IP session cookie, but write on the BACnet route
+        resp = self.client.post(
+            "/api/v1/scanners/bacnet/raw/api/publish",
+            content=b'{"topic": "t", "payload": "1"}',
+            headers={"content-type": "application/json", "X-SCT-Write-Confirm": "forged"},
+        )
+        self.assertEqual(resp.status_code, 403, resp.text)
+
 
 if __name__ == "__main__":
     unittest.main()

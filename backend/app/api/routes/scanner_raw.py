@@ -449,6 +449,14 @@ def confirm_panel_write(proto: str, body: WriteConfirmRequest, request: Request)
     session = scanner_raw_session.resolve(request.cookies.get(COOKIE_NAME))
     if session is None:
         raise HTTPException(status_code=403, detail="Open the Advanced panel before confirming a write.")
+    if session.proto != proto:
+        # A panel session is bound to the protocol it was opened for. A cookie
+        # from another protocol's panel must never authorize this one's write
+        # (REV-7): reject before minting a token.
+        raise HTTPException(
+            status_code=403,
+            detail="This panel session is for a different scanner. Reopen the panel for this protocol.",
+        )
     if classify(body.method, body.path) != "write":
         raise HTTPException(status_code=400, detail="Not a device-write action.")
     digest = write_digest(body.method, body.path, body.body.encode("utf-8"))
@@ -725,6 +733,13 @@ async def proxy_scanner_raw(
 
     body = await request.body()
     session = scanner_raw_session.resolve(request.cookies.get(COOKIE_NAME))
+    if session is not None and session.proto != proto:
+        # Defense in depth for REV-7: a session is valid only for the protocol it
+        # was opened for. A cookie from another protocol's panel must not authorize
+        # this one's writes or be attributed here - drop it, so a write fails closed
+        # (no valid token) and nothing is recorded under the wrong protocol. Reads
+        # still proxy (role-gated), just unattributed.
+        session = None
     is_write = classify(request.method, path) == "write"
     if is_write:
         # A device write is allowed only with a single-use token bound to these
