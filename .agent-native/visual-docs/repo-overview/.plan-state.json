@@ -1,0 +1,24 @@
+{
+  "localOnly": true,
+  "kind": "plan",
+  "visualDocs": {
+    "manifest": "../../../agent-native.json",
+    "targets": [
+      "backend-app-main-py",
+      "backend-app-api-router-py",
+      "backend-app-services-run_service-py",
+      "backend-app-services-run_dispatch-py",
+      "backend-app-api-routes-scanner_raw-py",
+      "core-smart_commissioning_core-engines-base-py",
+      "core-smart_commissioning_core-db-models-py",
+      "core-smart_commissioning_core-db-run_lifecycle-py",
+      "core-smart_commissioning_core-records-py",
+      "core-smart_commissioning_core-sync-py",
+      "worker-app-tasks-py",
+      "frontend-src-app-routes-tsx",
+      "frontend-src-features-workflow-modulepage-tsx",
+      "frontend-src-api-client-ts"
+    ]
+  },
+  "createdAt": "2026-08-27T09:02:11.220Z"
+}

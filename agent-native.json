@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "apps": {
+    "visualize-repo": {
+      "mode": "local-files",
+      "root": ".agent-native/visual-docs",
+      "entry": ".agent-native/visual-docs/repo-overview",
+      "targets": [
+        {
+          "id": "backend-app-main-py",
+          "name": "Main.Py",
+          "kind": "area",
+          "include": [
+            "backend/app/main.py"
+          ],
+          "blocks": [
+            "file-tree",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "seed"
+        },
+        {
+          "id": "backend-app-api-router-py",
+          "name": "Router.Py",
+          "kind": "area",
+          "include": [
+            "backend/app/api/router.py"
+          ],
+          "blocks": [
+            "file-tree",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "seed"
+        },
+        {
+          "id": "backend-app-services-run_service-py",
+          "name": "Run Service.Py",
+          "kind": "area",
+          "include": [
+            "backend/app/services/run_service.py"
+          ],
+          "blocks": [
+            "file-tree",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "seed"
+        },
+        {
+          "id": "backend-app-services-run_dispatch-py",
+          "name": "Run Dispatch.Py",
+          "kind": "area",
+          "include": [
+            "backend/app/services/run_dispatch.py"
+          ],
+          "blocks": [
+            "file-tree",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "seed"
+        },
+        {
+          "id": "backend-app-api-routes-scanner_raw-py",
+          "name": "Scanner Raw.Py",
+          "kind": "flow",
+          "include": [
+            "backend/app/api/routes/scanner_raw.py"
+          ],
+          "blocks": [
+            "wireframe",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "seed"
+        },
+        {
+          "id": "core-smart_commissioning_core-engines-base-py",
+          "name": "Base.Py",
+          "kind": "area",
+          "include": [
+            "core/smart_commissioning_core/engines/base.py"
+          ],
+          "blocks": [
+            "file-tree",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "seed"
+        },
+        {
+          "id": "core-smart_commissioning_core-db-models-py",
+          "name": "Models.Py",
+          "kind": "model",
+          "include": [
+            "core/smart_commissioning_core/db/models.py"
+          ],
+          "blocks": [
+            "data-model",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "required-on-pr"
+        },
+        {
+          "id": "core-smart_commissioning_core-db-run_lifecycle-py",
+          "name": "Run Lifecycle.Py",
+          "kind": "model",
+          "include": [
+            "core/smart_commissioning_core/db/run_lifecycle.py"
+          ],
+          "blocks": [
+            "data-model",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "required-on-pr"
+        },
+        {
+          "id": "core-smart_commissioning_core-records-py",
+          "name": "Records.Py",
+          "kind": "area",
+          "include": [
+            "core/smart_commissioning_core/records.py"
+          ],
+          "blocks": [
+            "file-tree",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "seed"
+        },
+        {
+          "id": "core-smart_commissioning_core-sync-py",
+          "name": "Sync.Py",
+          "kind": "area",
+          "include": [
+            "core/smart_commissioning_core/sync.py"
+          ],
+          "blocks": [
+            "file-tree",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "seed"
+        },
+        {
+          "id": "worker-app-tasks-py",
+          "name": "Tasks.Py",
+          "kind": "area",
+          "include": [
+            "worker/app/tasks.py"
+          ],
+          "blocks": [
+            "file-tree",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "seed"
+        },
+        {
+          "id": "frontend-src-app-routes-tsx",
+          "name": "Routes",
+          "kind": "area",
+          "include": [
+            "frontend/src/app/routes.tsx"
+          ],
+          "blocks": [
+            "file-tree",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "seed"
+        },
+        {
+          "id": "frontend-src-features-workflow-modulepage-tsx",
+          "name": "ModulePage",
+          "kind": "area",
+          "include": [
+            "frontend/src/features/workflow/ModulePage.tsx"
+          ],
+          "blocks": [
+            "file-tree",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "seed"
+        },
+        {
+          "id": "frontend-src-api-client-ts",
+          "name": "Client",
+          "kind": "area",
+          "include": [
+            "frontend/src/api/client.ts"
+          ],
+          "blocks": [
+            "file-tree",
+            "diagram",
+            "annotated-code"
+          ],
+          "policy": "seed"
+        }
+      ],
+      "hide": [
+        "**/node_modules/**",
+        "**/.git/**",
+        "**/dist/**",
+        "**/build/**",
+        "**/.agent-native/**"
+      ]
+    }
+  }
+}
