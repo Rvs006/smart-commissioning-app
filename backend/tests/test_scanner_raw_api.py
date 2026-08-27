@@ -85,6 +85,23 @@ def _handler(request: httpx.Request) -> httpx.Response:
             ),
             headers={"content-type": "text/event-stream"},
         )
+    if path == "/api/compare":
+        # Finite JSON {rows, summary} - the sidecar's re-RAG output returned whole.
+        # A placeholder "missing" row (ip "—") alongside a real one exercises the
+        # start-IP derivation skip.
+        return httpx.Response(
+            200,
+            stream=_Bytes(
+                [
+                    b'{"rows":[{"ip":"\xe2\x80\x94","register":"missing","rag":"red",'
+                    b'"status":"unreachable","hostname":"h-x"},'
+                    b'{"ip":"192.0.2.20","register":"match","rag":"green",'
+                    b'"status":"reachable","hostname":"h-c","openPorts":[80]}],'
+                    b'"summary":{"reachable":1,"matches":1}}'
+                ]
+            ),
+            headers={"content-type": "application/json"},
+        )
     if path == "/api/publish":
         return httpx.Response(200, stream=_Bytes([b'{"ok":true}']), headers={"content-type": "application/json"})
     if path == "/api/export-archive":
@@ -246,6 +263,56 @@ class ScannerRawApiTest(ApiTestCase):
             self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(len(calls), 1)
         self.assertIn("site/ahu1", calls[0]["captured"]["payloads"])
+
+    def test_ip_recompare_persists_a_real_ip_scanner_run(self) -> None:
+        # Results-out for a re-compare: after loading a register and re-RAGing, the
+        # finite /api/compare JSON lands a real ip_scanner run (start IP derived from
+        # the rows, the "—" placeholder skipped). Real dispatch, like the scan test.
+        from app.api.routes.discovery import service
+
+        session = self.sessions.create(
+            owner="tester", project_id="demo-project", site_id="demo-site", proto="ip"
+        )
+        self.client.cookies.set("sct_panel", session.session_id)
+        before = len(service.list_runs(job_types={"ip_scanner"}))
+        resp = self.client.post(
+            "/api/v1/scanners/ip/raw/api/compare", json={"devices": []}
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        runs = service.list_runs(job_types={"ip_scanner"})
+        self.assertEqual(len(runs), before + 1)
+        self.assertEqual(runs[0].status, "succeeded")
+
+    def test_bacnet_recompare_dispatches_a_results_out_run(self) -> None:
+        # Results-out for a BACnet re-compare: the /api/compare JSON is captured and
+        # handed to the bacnet dispatch helper (source_ip resolution lives there).
+        from app.api.routes import scanners
+
+        calls: list[dict] = []
+        with patch.object(
+            scanners, "dispatch_captured_bacnet_scanner_run", lambda **kw: calls.append(kw)
+        ):
+            session = self.sessions.create(
+                owner="tester", project_id="demo-project", site_id="demo-site", proto="bacnet"
+            )
+            self.client.cookies.set("sct_panel", session.session_id)
+            resp = self.client.post(
+                "/api/v1/scanners/bacnet/raw/api/compare", json={"devices": []}
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["captured"]["rows"])
+
+    def test_recompare_without_a_session_persists_nothing(self) -> None:
+        # No panel session -> the compare still forwards, but nothing is captured.
+        from app.api.routes.discovery import service
+
+        before = len(service.list_runs(job_types={"ip_scanner"}))
+        resp = self.client.post(
+            "/api/v1/scanners/ip/raw/api/compare", json={"devices": []}
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(len(service.list_runs(job_types={"ip_scanner"})), before)
 
     # -- M4: write guard ------------------------------------------------------
 
