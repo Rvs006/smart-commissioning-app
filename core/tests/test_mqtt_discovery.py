@@ -335,6 +335,45 @@ class RetainLatestAggregationTests(unittest.TestCase):
         summary = store.summary_calls[-1]
         self.assertEqual(summary["topics_discovered"], 600)  # every topic past the 500th
         self.assertFalse(summary["topic_limit_reached"])
+        self.assertFalse(summary["byte_limit_reached"])  # topic sweep, not byte-cut
+
+    def test_default_path_flags_a_byte_capped_capture_as_incomplete(self) -> None:
+        # The real default path routes through the outcome-aware transport, so a
+        # capture ended by the 256 MB retained-payload backstop must surface as an
+        # incomplete byte-capped run, not a normal complete capture. Force that
+        # path (no injected live_capture) and stub the outcome API to a byte cap.
+        class _ByteCapOutcome:
+            def __init__(self, msgs: list[MqttMessage]) -> None:
+                self.messages = msgs
+                self.termination = "primary_byte_cap"
+                self.primary_byte_cap_reached = True
+                self.interruption_cause = None
+
+        store = FakeRunStore()
+        messages = [_json_msg(f"udmi/DEV-{i}/pointset", {"i": i}) for i in range(120)]
+
+        def _fake_outcome(settings: MqttConnectionSettings, *, on_message: Any = None, **kwargs: Any) -> Any:
+            if on_message is not None:
+                for message in messages:
+                    on_message(message)
+            return _ByteCapOutcome(messages)
+
+        original = mqtt_discovery.subscribe_and_capture_with_outcome
+        mqtt_discovery.subscribe_and_capture_with_outcome = _fake_outcome
+        try:
+            result = mqtt_discovery.process_mqtt_discovery_run(
+                "run_byte_cap", {**_AUTH}, run_store=store, execution_mode="x",
+                build_settings=_stub_build,  # no live_capture => real default adapter
+            )
+        finally:
+            mqtt_discovery.subscribe_and_capture_with_outcome = original
+
+        self.assertEqual(result["status"], "succeeded")  # partial but honest
+        summary = store.summary_calls[-1]
+        self.assertTrue(summary["byte_limit_reached"])
+        self.assertEqual(summary["broker_status_detail"], "byte_cap")
+        self.assertEqual(summary["topics_discovered"], 120)
+        self.assertFalse(summary["topic_limit_reached"])  # byte cut, not the topic cap
 
 
 class MessageMetadataTests(unittest.TestCase):
