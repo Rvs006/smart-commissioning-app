@@ -22,12 +22,15 @@ export function AdvancedScannerPanel({
   proto,
   projectId,
   siteId,
+  sourceInterfaceCidr,
 }: {
   proto: string;
   projectId: string;
   siteId: string;
+  sourceInterfaceCidr?: string;
 }) {
   const [ready, setReady] = useState(false);
+  const [bridgeReady, setBridgeReady] = useState(false);
   const [pending, setPending] = useState<PendingWrite | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +62,7 @@ export function AdvancedScannerPanel({
     function onMessage(event: MessageEvent) {
       if (event.source !== iframeRef.current?.contentWindow) return;
       const data = event.data as { type?: string; id?: string; method?: string; path?: string; body?: string };
+      if (data?.type === "sct-bridge-ready") setBridgeReady(true);
       if (data?.type === "sct-write-request" && data.id && data.method && data.path) {
         setError(null);
         setPending({ id: data.id, method: data.method, path: data.path, body: data.body ?? "" });
@@ -67,6 +71,17 @@ export function AdvancedScannerPanel({
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, []);
+
+  // Config-in (pipe 1): once the in-iframe bridge signals it is live, push the
+  // saved Source Interface so the vendored tool pre-selects the matching NIC.
+  // Re-sends if the cidr resolves after the bridge is ready; a no-op with no cidr.
+  useEffect(() => {
+    if (!bridgeReady || !sourceInterfaceCidr) return;
+    iframeRef.current?.contentWindow?.postMessage(
+      { type: "sct-config-in", sourceInterface: sourceInterfaceCidr },
+      "*",
+    );
+  }, [bridgeReady, sourceInterfaceCidr]);
 
   function decide(pendingWrite: PendingWrite, token: string | null) {
     iframeRef.current?.contentWindow?.postMessage(
