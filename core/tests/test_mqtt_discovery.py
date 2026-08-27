@@ -375,6 +375,44 @@ class RetainLatestAggregationTests(unittest.TestCase):
         self.assertEqual(summary["topics_discovered"], 120)
         self.assertFalse(summary["topic_limit_reached"])  # byte cut, not the topic cap
 
+    def test_byte_cap_before_first_retain_reports_byte_cap_not_empty(self) -> None:
+        # An oversized first payload trips primary_byte_cap before any message is
+        # retained (mqtt_transport.py:820-822 breaks before the append), so the
+        # outcome carries primary_byte_cap_reached=True with NO messages. The byte
+        # cut must still be the reported reason — not capture_window_empty, which
+        # would read as a quiet broker and hide why discovery returned nothing.
+        class _EmptyByteCapOutcome:
+            def __init__(self) -> None:
+                self.messages: list[MqttMessage] = []
+                self.termination = "primary_byte_cap"
+                self.primary_byte_cap_reached = True
+                self.interruption_cause = None
+
+        store = FakeRunStore()
+
+        def _fake_outcome(settings: MqttConnectionSettings, *, on_message: Any = None, **kwargs: Any) -> Any:
+            return _EmptyByteCapOutcome()
+
+        original = mqtt_discovery.subscribe_and_capture_with_outcome
+        mqtt_discovery.subscribe_and_capture_with_outcome = _fake_outcome
+        try:
+            result = mqtt_discovery.process_mqtt_discovery_run(
+                "run_byte_cap_empty", {**_AUTH}, run_store=store, execution_mode="x",
+                build_settings=_stub_build,  # no live_capture => real default adapter
+            )
+        finally:
+            mqtt_discovery.subscribe_and_capture_with_outcome = original
+
+        summary = store.summary_calls[-1]
+        self.assertTrue(summary["byte_limit_reached"])
+        self.assertEqual(summary["broker_status_detail"], "byte_cap")  # not capture_window_empty
+        self.assertEqual(summary["topics_discovered"], 0)
+        self.assertFalse(summary["topic_limit_reached"])
+        # Zero usable result => failed, but with the honest byte-cap reason.
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("byte_cap", result["error_message"])
+        self.assertNotIn("capture_window_empty", result["error_message"])
+
 
 class MessageMetadataTests(unittest.TestCase):
     """Per-topic last-message metadata (retained / delivery QoS / received-at)

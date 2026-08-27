@@ -570,6 +570,10 @@ def _aggregate_capture(
         "topic_limit_reached": len(order) >= max_messages,
         # The 256 MB retained-payload backstop can end a capture before the topic
         # cap, so a byte-truncated run must not read as a normal complete capture.
+        # An oversized first payload trips the cap before ANY message is retained
+        # (mqtt_transport.py:820-822 breaks before the append), so byte_cap must win
+        # even with no messages — otherwise the byte cut is mislabelled as an empty
+        # capture window (a quiet broker), the exact confusion this backstop guards.
         "byte_limit_reached": byte_cap_reached,
         "broker_status_detail": (
             "cancelled"
@@ -577,7 +581,7 @@ def _aggregate_capture(
             else capture_error_status
             or (
                 "byte_cap"
-                if byte_cap_reached and messages
+                if byte_cap_reached
                 else ("messages_captured" if messages else "capture_window_empty")
             )
         ),
@@ -588,7 +592,12 @@ def _aggregate_capture(
         "message_limit_reached": len(messages) >= max_messages,
     }
 
-    failure_status = capture_error_status or ("capture_window_empty" if not messages else None)
+    # A zero-message run that hit the byte cap failed BECAUSE of the byte cap, not
+    # because the broker was quiet — keep the honest reason (byte_cap wins over the
+    # empty-window default), matching broker_status_detail above.
+    failure_status = capture_error_status or (
+        ("byte_cap" if byte_cap_reached else "capture_window_empty") if not messages else None
+    )
     return EngineResult(
         discovered_assets=discovered_assets,
         structured_records=structured_records,
@@ -614,6 +623,12 @@ _FAILURE_HINTS = {
     "dns_resolution_failed": (
         " The configured broker hostname did not resolve in DNS. Check the "
         "broker FQDN or IP address on the Configuration page."
+    ),
+    "byte_cap": (
+        " The capture reached the retained-payload byte limit before retaining "
+        "any message — a single very large message can fill the budget on its "
+        "own. Results are incomplete; reduce payload size or narrow the topic "
+        "filter and re-run."
     ),
 }
 
