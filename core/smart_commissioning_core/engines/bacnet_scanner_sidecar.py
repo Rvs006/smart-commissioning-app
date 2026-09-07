@@ -57,6 +57,7 @@ from smart_commissioning_core.engines.safety import (
     build_dry_run_plan,
     require_scan_authorization,
 )
+from smart_commissioning_core.engines.sidecar_observations import ProgressiveDeviceEmitter
 from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.run_context import json_safe_value
 
@@ -207,14 +208,28 @@ async def _run_bacnet_scanner(
     export_deadline_s = _positive_float(ctx.parameters.get("export_deadline_s"), default=_EXPORT_DEADLINE_S)
 
     try:
-        payload = client(
-            base_url=base_url,
-            source_ip=source_ip,
-            register_csv=_register_csv(register_rows),
-            scan_query=_scan_query(ctx.parameters),
-            is_cancelled=ctx.is_cancelled,
-            export_deadline_s=export_deadline_s,
-        )
+        if client is _default_sidecar_client:
+            # Only the built-in transport drives the live SSE fold, so only it
+            # receives the progressive-observation callback. Injected test
+            # clients keep their existing signature untouched.
+            payload = _default_sidecar_client(
+                base_url=base_url,
+                source_ip=source_ip,
+                register_csv=_register_csv(register_rows),
+                scan_query=_scan_query(ctx.parameters),
+                is_cancelled=ctx.is_cancelled,
+                export_deadline_s=export_deadline_s,
+                on_device=_progressive_device_callback(ctx),
+            )
+        else:
+            payload = client(
+                base_url=base_url,
+                source_ip=source_ip,
+                register_csv=_register_csv(register_rows),
+                scan_query=_scan_query(ctx.parameters),
+                is_cancelled=ctx.is_cancelled,
+                export_deadline_s=export_deadline_s,
+            )
     except SidecarTransportError as error:
         return EngineResult(status_override="failed", error_message=str(error))
 
@@ -678,6 +693,71 @@ def _scan_query(parameters: Mapping[str, Any]) -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------
+# Progressive (live) device observations: fold each ``device`` / ``device-update``
+# SSE event into a viewer-safe projection_v1 device row while the scan is still
+# running. Purely additive — the final persisted result still comes from
+# ``_map_result`` (scan compare + per-asset export), unchanged.
+# --------------------------------------------------------------------------
+
+
+def _opt_str(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _bacnet_device_record(
+    device: Mapping[str, Any],
+    *,
+    project_id: Any,
+    site_id: Any,
+) -> dict[str, Any] | None:
+    """Project one live ``device`` / ``device-update`` event into a device record.
+
+    Returns ``None`` when the event carries no device instance (nothing to key a
+    row on). Discovery precedes the RAG compare, so the provisional row shows
+    identity only; RAG/register/object verdicts firm up from the sealed result at
+    completion. Field set is exactly the observation contract's device record;
+    the instance nests under ``attributes`` (the fixed device columns have no
+    slot for it), matching how ``_map_result`` persists it.
+    """
+    instance = device.get("instance")
+    if not isinstance(instance, int) or isinstance(instance, bool):
+        return None
+    vendor_id = device.get("vendorId")
+    return {
+        "project_id": _opt_str(project_id),
+        "site_id": _opt_str(site_id),
+        "address": _opt_str(device.get("ip")),
+        "device_type": "bacnet_device",
+        "name": _opt_str(device.get("name")),
+        "vendor": _opt_str(device.get("vendor")),
+        "model": _opt_str(device.get("model")),
+        "attributes": {
+            "device_instance": instance,
+            "mac": _opt_str(device.get("mac")),
+            "vendor_id": (
+                vendor_id if isinstance(vendor_id, int) and not isinstance(vendor_id, bool) else None
+            ),
+        },
+    }
+
+
+def _progressive_device_callback(ctx: EngineContext) -> Callable[[Mapping[str, Any]], None] | None:
+    """Build the per-device live-observation sink, or ``None`` when unsupported."""
+    if not ctx.supports_progressive_observations:
+        return None
+    emitter = ProgressiveDeviceEmitter(ctx.run_store, protocol="bacnet", entity_kind="device")
+    project_id = ctx.parameters.get("project_id")
+    site_id = ctx.parameters.get("site_id")
+
+    def on_device(device: Mapping[str, Any]) -> None:
+        record = _bacnet_device_record(device, project_id=project_id, site_id=site_id)
+        if record is not None:
+            emitter.emit(f"device:{record['attributes']['device_instance']}", record)
+
+    return on_device
+
+
+# --------------------------------------------------------------------------
 # Built-in stdlib transport (resolve NIC -> register -> scan SSE -> export SSE).
 # --------------------------------------------------------------------------
 
@@ -690,13 +770,16 @@ def _default_sidecar_client(
     scan_query: Mapping[str, str],
     is_cancelled: Callable[[], bool],
     export_deadline_s: float,
+    on_device: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Speak the driving contract over stdlib HTTP + SSE. Honest failures only."""
     base = base_url.rstrip("/")
     try:
         adapter_index = _resolve_adapter_index(base, source_ip)
         _post_register(base, register_csv)
-        rows, summary, devices, routers = _stream_scan(base, adapter_index, scan_query, is_cancelled)
+        rows, summary, devices, routers = _stream_scan(
+            base, adapter_index, scan_query, is_cancelled, on_device=on_device
+        )
         device_files, export_complete = _export_devices(base, devices, is_cancelled, export_deadline_s)
     except SidecarTransportError:
         _delete_register(base)  # best-effort; never masks the primary error
@@ -780,6 +863,7 @@ def _stream_scan(
     adapter_index: int,
     scan_query: Mapping[str, str],
     is_cancelled: Callable[[], bool],
+    on_device: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Consume ``/api/scan`` SSE; return (rows, summary, device-target list, routers).
 
@@ -787,6 +871,9 @@ def _stream_scan(
     target fields (instance/ip/port/network/mac/name) the ``/api/export`` body
     needs; ``result`` carries the RAG {rows, summary}; ``router`` events carry the
     BACnet/IP routers (and BBMDs) that answered Who-Is-Router, folded per ip.
+    Each device sighting (and each enrichment update) is also folded to
+    ``on_device`` — the accumulated device dict — so the native page can show
+    provisional rows during the scan; ``on_device`` is best-effort and never raises.
     """
     params = dict(scan_query)
     params["adapter"] = str(adapter_index)
@@ -805,6 +892,8 @@ def _stream_scan(
                 instance = device.get("instance")
                 if instance is not None:
                     devices[instance] = {**devices.get(instance, {}), **device}
+                    if on_device is not None:
+                        on_device(devices[instance])
             elif kind == "router":
                 _fold_router_event(router_fold, event)
             elif kind == "result":

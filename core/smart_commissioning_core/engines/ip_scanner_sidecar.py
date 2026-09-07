@@ -43,6 +43,7 @@ from smart_commissioning_core.engines.safety import (
     build_dry_run_plan,
     require_scan_authorization,
 )
+from smart_commissioning_core.engines.sidecar_observations import ProgressiveDeviceEmitter
 from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.run_context import json_safe_value
 
@@ -155,24 +156,33 @@ async def _run_ip_scanner(
             error_message="No scan range was provided (a start IP is required).",
         )
 
-    if client is None:
-        if base_url is None:
-            # Honest failure: the sidecar is not available on this host.
-            return EngineResult(
-                status_override="failed",
-                error_message="IP scanner sidecar is not available on this host.",
-            )
-        client = _default_sidecar_client
-
     register_rows = _load_register_rows(ctx.parameters, import_loader)
 
     try:
-        payload = client(
-            base_url=base_url,
-            register_rows=register_rows,
-            scan_query=scan_query,
-            is_cancelled=ctx.is_cancelled,
-        )
+        if client is None:
+            if base_url is None:
+                # Honest failure: the sidecar is not available on this host.
+                return EngineResult(
+                    status_override="failed",
+                    error_message="IP scanner sidecar is not available on this host.",
+                )
+            # Only the built-in transport drives the live SSE fold, so only it
+            # receives the progressive-observation callback. Injected test
+            # clients keep their existing signature untouched.
+            payload = _default_sidecar_client(
+                base_url=base_url,
+                register_rows=register_rows,
+                scan_query=scan_query,
+                is_cancelled=ctx.is_cancelled,
+                on_device=_progressive_device_callback(ctx),
+            )
+        else:
+            payload = client(
+                base_url=base_url,
+                register_rows=register_rows,
+                scan_query=scan_query,
+                is_cancelled=ctx.is_cancelled,
+            )
     except SidecarTransportError as error:
         return EngineResult(status_override="failed", error_message=str(error))
 
@@ -448,6 +458,74 @@ def _scan_query(parameters: Mapping[str, Any]) -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------
+# Progressive (live) device observations: fold each SSE ``device`` event into a
+# viewer-safe projection_v1 device row while the scan is still running. Purely
+# additive — the final persisted result still comes from ``_map_result``.
+# --------------------------------------------------------------------------
+
+
+def _opt_str(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _ip_device_record(
+    device: Mapping[str, Any],
+    *,
+    project_id: Any,
+    site_id: Any,
+) -> dict[str, Any] | None:
+    """Project one live ``device`` SSE event into a projection_v1 device record.
+
+    Returns ``None`` when the event carries no IP (nothing to key a row on). The
+    live event predates the RAG compare, so the provisional row shows identity
+    and reachability only; RAG/register verdicts firm up from the sealed result
+    at completion. Field set is exactly the observation contract's device record.
+    """
+    ip = _opt_str(device.get("ip"))
+    if ip is None:
+        return None
+    open_ports = sorted(
+        {
+            port
+            for port in (device.get("openPorts") or [])
+            if isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65_535
+        }
+    )
+    hostname = _opt_str(device.get("hostname"))
+    return {
+        "project_id": _opt_str(project_id),
+        "site_id": _opt_str(site_id),
+        "address": ip,
+        "device_type": "ip_host",
+        "name": hostname,
+        "vendor": _opt_str(device.get("vendor")),
+        "model": None,
+        "attributes": {
+            "hostname": hostname,
+            "mac_address": _opt_str(device.get("mac")),
+            "open_ports": open_ports,
+            "reachable": True,
+        },
+    }
+
+
+def _progressive_device_callback(ctx: EngineContext) -> Callable[[Mapping[str, Any]], None] | None:
+    """Build the per-device live-observation sink, or ``None`` when unsupported."""
+    if not ctx.supports_progressive_observations:
+        return None
+    emitter = ProgressiveDeviceEmitter(ctx.run_store, protocol="ip", entity_kind="host")
+    project_id = ctx.parameters.get("project_id")
+    site_id = ctx.parameters.get("site_id")
+
+    def on_device(device: Mapping[str, Any]) -> None:
+        record = _ip_device_record(device, project_id=project_id, site_id=site_id)
+        if record is not None:
+            emitter.emit(f"host:{record['address']}", record)
+
+    return on_device
+
+
+# --------------------------------------------------------------------------
 # Built-in stdlib transport (register import -> SSE scan -> register clear).
 # --------------------------------------------------------------------------
 
@@ -458,12 +536,13 @@ def _default_sidecar_client(
     register_rows: Sequence[Mapping[str, Any]],
     scan_query: Mapping[str, str],
     is_cancelled: Callable[[], bool],
+    on_device: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Speak the driving contract over stdlib HTTP + SSE. Honest failures only."""
     base = base_url.rstrip("/")
     try:
         _post_register(base, _register_csv(register_rows))
-        payload = _stream_scan(base, scan_query, is_cancelled)
+        payload = _stream_scan(base, scan_query, is_cancelled, on_device=on_device)
     except (urllib.error.URLError, OSError, TimeoutError) as error:
         raise SidecarTransportError(
             "The IP scanner sidecar could not be reached during the scan."
@@ -497,12 +576,16 @@ def _stream_scan(
     base: str,
     scan_query: Mapping[str, str],
     is_cancelled: Callable[[], bool],
+    on_device: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Consume the SSE ``/api/scan`` stream; return the final {rows, summary}.
 
     Checks cooperative cancellation between events and closes the stream on
     cancel. The server injects a ``result`` event (compare output) then
-    ``complete``; ``error`` raises.
+    ``complete``; ``error`` raises. Each live ``device`` event (emitted during
+    the port-scan phase, before the compare ``result``) is folded to
+    ``on_device`` so the native page can show provisional rows during the scan;
+    ``on_device`` is best-effort and never raises.
     """
     url = f"{base}/api/scan?{urllib.parse.urlencode(dict(scan_query))}"
     result: dict[str, Any] = {"rows": [], "summary": {}}
@@ -519,7 +602,10 @@ def _stream_scan(
             except json.JSONDecodeError:
                 continue
             kind = event.get("type")
-            if kind == "result":
+            if kind == "device":
+                if on_device is not None:
+                    on_device(event.get("device") or {})
+            elif kind == "result":
                 result = {"rows": event.get("rows") or [], "summary": event.get("summary") or {}}
             elif kind == "error":
                 raise SidecarTransportError(
