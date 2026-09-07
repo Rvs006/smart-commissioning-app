@@ -232,6 +232,40 @@ export function formatIpHeadlineMetrics(value: unknown): IpHeadlineMetricDisplay
   });
 }
 
+export type IpSidecarSummaryCard = Readonly<{ heading: string; value: string }>;
+
+// GAP-C2: the four-card summary strip for the native IP sidecar lane. The
+// sidecar engine stamps its totals straight onto result_summary
+// (register_expected / hosts_scanned / register_matches / register_rogue),
+// not the sealed lane's ip_headline_metrics_v1 snapshot, so this reads them
+// directly. Returns null when none is a number (a dry-run, an older run, or a
+// failed scan has nothing to show, so the strip is omitted rather than faked);
+// a present-but-null field renders "—", never an invented count.
+const IP_SIDECAR_SUMMARY_FIELDS = [
+  ["Expected", "register_expected"],
+  ["Reachable / Discovered", "hosts_scanned"],
+  ["Matches", "register_matches"],
+  ["Rogue", "register_rogue"],
+] as const;
+
+export function formatIpSidecarSummaryCards(
+  summary: Record<string, unknown> | null | undefined,
+): IpSidecarSummaryCard[] | null {
+  if (!summary || typeof summary !== "object") {
+    return null;
+  }
+  const anyPresent = IP_SIDECAR_SUMMARY_FIELDS.some(
+    ([, key]) => typeof summary[key] === "number",
+  );
+  if (!anyPresent) {
+    return null;
+  }
+  return IP_SIDECAR_SUMMARY_FIELDS.map(([heading, key]) => {
+    const value = summary[key];
+    return { heading, value: typeof value === "number" ? String(value) : "—" };
+  });
+}
+
 /**
  * Project `result_summary.routers` (stamped by the bacnet_scanner engine) into
  * display rows. Returns null when the key is absent or not a list — a pre-router

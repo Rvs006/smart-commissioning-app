@@ -8,6 +8,7 @@ import {
   filterResultRows,
   forbiddenOpenPorts,
   groupUdmiRowsByAsset,
+  ipDeviceDetailItems,
   ipResultColumns,
   ipRowVerdict,
   ipRowsFromResults,
@@ -1019,5 +1020,56 @@ describe("groupUdmiRowsByAsset (ITEM-7)", () => {
       { index: 1, row: { Asset: "EM-1", Payload: "UDMI metadata", Issues: "0", Observed: "Yes", __tone: "pass" } },
     ];
     expect(groupUdmiRowsByAsset(visible)[0].worstTone).toBe("pass");
+  });
+});
+
+describe("ipDeviceDetailItems (GAP-IP2 row-detail drawer)", () => {
+  it("surfaces the persisted attributes the flat row cannot hold", () => {
+    const items = ipDeviceDetailItems({
+      rag: "amber",
+      register: "partial",
+      status: "reachable",
+      hostname_status: "mismatch",
+      expected_hostname: "ahu-1",
+      latency: 12,
+      services: [
+        { port: 443, product: "nginx", version: "1.25" },
+        "raw-service",
+      ],
+      banner: "SSH-2.0",
+      expected_ports: [80, 443],
+      missing_ports: [443],
+      extra_ports: [8080],
+      discovered_by: "tcp_connect",
+      project: "P1",
+      location: "Room 2",
+      description: "rooftop unit",
+    });
+    const byLabel = Object.fromEntries(items.map((item) => [item.label, item.value]));
+    expect(byLabel.RAG).toBe("amber");
+    expect(byLabel.Register).toBe("partial");
+    expect(byLabel["Hostname check"]).toBe("mismatch");
+    expect(byLabel["Expected hostname"]).toBe("ahu-1");
+    expect(byLabel.Latency).toBe("12");
+    expect(byLabel.Services).toBe("443 nginx 1.25; raw-service");
+    expect(byLabel["Expected ports"]).toBe("80, 443");
+    expect(byLabel["Missing ports"]).toBe("443");
+    expect(byLabel["Extra ports"]).toBe("8080");
+    expect(byLabel.Project).toBe("P1");
+    expect(byLabel.Location).toBe("Room 2");
+  });
+
+  it("drops blank scalars and empty lists, and tolerates a missing record", () => {
+    const items = ipDeviceDetailItems({
+      rag: "green",
+      register: "",
+      status: null,
+      services: [],
+      expected_ports: [],
+    });
+    const labels = items.map((item) => item.label);
+    expect(labels).toEqual(["RAG"]);
+    expect(ipDeviceDetailItems(undefined)).toEqual([]);
+    expect(ipDeviceDetailItems(null)).toEqual([]);
   });
 });

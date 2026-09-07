@@ -53,6 +53,21 @@ class BindIpScannerRegisterTest(unittest.TestCase):
         self.bind("proj", "site", params, records=[])
         self.assertNotIn("register_import_id", params)
 
+    def test_ignore_register_skips_binding(self) -> None:
+        # GAP-C1: with the opt-out set, even a usable register is not bound, so the
+        # scan runs without RAG comparison.
+        params: dict = {"ignore_register": True}
+        records = [{"import_id": "imp_new", "accepted_rows": [{"IP Address": "192.0.2.5"}]}]
+        self.bind("proj", "site", params, records=records)
+        self.assertNotIn("register_import_id", params)
+
+    def test_ignore_register_drops_a_smuggled_import_id(self) -> None:
+        # The opt-out path still strips a client-supplied id (never trust the body).
+        params: dict = {"ignore_register": True, "register_import_id": "imp_smuggled"}
+        records = [{"import_id": "imp_new", "accepted_rows": [{"IP Address": "192.0.2.5"}]}]
+        self.bind("proj", "site", params, records=records)
+        self.assertNotIn("register_import_id", params)
+
 
 class BindScannerRegisterTypeTest(unittest.TestCase):
     """The generic binder (IP/BACnet/MQTT sidecars share it) must query the

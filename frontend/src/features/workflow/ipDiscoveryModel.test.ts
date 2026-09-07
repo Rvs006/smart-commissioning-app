@@ -3,6 +3,7 @@ import {
   classifyScanAuthorization,
   formatBacnetRouters,
   formatIpHeadlineMetrics,
+  formatIpSidecarSummaryCards,
   serializeIpTargetRows,
   type IpTargetRow,
   type ScanAuthorizationRecord,
@@ -192,5 +193,46 @@ describe("BACnet router presentation", () => {
         { address: "192.0.2.9", networks: [1, "two", 3] },
       ]),
     ).toEqual([{ address: "192.0.2.9", networks: "1, 3" }]);
+  });
+});
+
+describe("IP sidecar summary cards (GAP-C2)", () => {
+  it("reads the four totals the sidecar engine stamps on result_summary", () => {
+    expect(
+      formatIpSidecarSummaryCards({
+        register_expected: 12,
+        hosts_scanned: 9,
+        register_matches: 7,
+        register_rogue: 2,
+        scanner: "ip_scanner_sidecar",
+      }),
+    ).toEqual([
+      { heading: "Expected", value: "12" },
+      { heading: "Reachable / Discovered", value: "9" },
+      { heading: "Matches", value: "7" },
+      { heading: "Rogue", value: "2" },
+    ]);
+  });
+
+  it("renders a present-but-null field as a dash, never a fabricated count", () => {
+    expect(
+      formatIpSidecarSummaryCards({
+        register_expected: null,
+        hosts_scanned: 5,
+        register_matches: null,
+        register_rogue: 0,
+      }),
+    ).toEqual([
+      { heading: "Expected", value: "—" },
+      { heading: "Reachable / Discovered", value: "5" },
+      { heading: "Matches", value: "—" },
+      { heading: "Rogue", value: "0" },
+    ]);
+  });
+
+  it("returns null when no total is present (dry-run / older / failed run: no strip)", () => {
+    expect(formatIpSidecarSummaryCards({})).toBeNull();
+    expect(formatIpSidecarSummaryCards(undefined)).toBeNull();
+    expect(formatIpSidecarSummaryCards({ scanner: "ip_scanner_sidecar" })).toBeNull();
   });
 });

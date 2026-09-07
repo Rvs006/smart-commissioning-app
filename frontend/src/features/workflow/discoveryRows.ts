@@ -173,6 +173,81 @@ export function ipRowsFromResults(results: DiscoveryResultsResponse): Record<str
   });
 }
 
+// The sidecar's per-service objects (port/service plus product/version/title/
+// certCN/tls) rendered compactly for the drawer. A bare string passes through;
+// an object prefers "<port> <product> <version>" and falls back to its service
+// name, then a JSON dump, so nothing observed is silently dropped.
+function formatIpServices(value: unknown): string {
+  if (!Array.isArray(value) || value.length === 0) {
+    return "";
+  }
+  return value
+    .map((entry) => {
+      if (typeof entry === "string") {
+        return entry;
+      }
+      if (entry && typeof entry === "object") {
+        const record = entry as Record<string, unknown>;
+        const label = [record.port, record.product ?? record.service ?? record.title, record.version]
+          .map((part) => (part === null || part === undefined ? "" : String(part)))
+          .filter(Boolean)
+          .join(" ");
+        return label || JSON.stringify(entry);
+      }
+      return str(entry);
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
+// GAP-IP2: the persisted per-device attributes for the IP results row-detail
+// drawer. The results table reads the flat discovered_assets projection; the
+// richer record the sidecar engine persists (rag, hostname check, latency,
+// services, banner, port diffs, project/location) nests on the structured
+// device's `attributes` (ip_scanner_sidecar.py), looked up by the row's Observed
+// IP. Scalars render "—"-free (blank fields are dropped), empty port/service
+// lists are skipped, and only these named keys are surfaced — never fabricated.
+export function ipDeviceDetailItems(
+  attributes: Record<string, unknown> | undefined | null,
+): { label: string; value: string }[] {
+  if (!attributes || typeof attributes !== "object") {
+    return [];
+  }
+  const items: { label: string; value: string }[] = [];
+  const scalar = (label: string, key: string) => {
+    const value = attributes[key];
+    if (value !== null && value !== undefined && value !== "") {
+      items.push({ label, value: str(value) });
+    }
+  };
+  const portList = (label: string, key: string) => {
+    const value = attributes[key];
+    if (Array.isArray(value) && value.length > 0) {
+      items.push({ label, value: value.map((entry) => str(entry)).join(", ") });
+    }
+  };
+
+  scalar("RAG", "rag");
+  scalar("Register", "register");
+  scalar("Status", "status");
+  scalar("Hostname check", "hostname_status");
+  scalar("Expected hostname", "expected_hostname");
+  scalar("Latency", "latency");
+  const services = formatIpServices(attributes.services);
+  if (services) {
+    items.push({ label: "Services", value: services });
+  }
+  scalar("Banner", "banner");
+  portList("Expected ports", "expected_ports");
+  portList("Missing ports", "missing_ports");
+  portList("Extra ports", "extra_ports");
+  scalar("Discovered by", "discovered_by");
+  scalar("Project", "project");
+  scalar("Location", "location");
+  scalar("Description", "description");
+  return items;
+}
+
 // BACnet device rows come from the structured devices[] (with per-engine
 // attributes carrying device_instance / point_count / vendor_id).
 export function bacnetRowsFromResults(

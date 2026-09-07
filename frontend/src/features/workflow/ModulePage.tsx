@@ -40,6 +40,7 @@ import {
   getValidationRun,
   getImportTemplatePath,
   getReportDownloadPath,
+  getSystemInterfaces,
   REPORTS_EXPORT_PATH,
   getUdmiSchemaTemplatePath,
   ImportBatchSummary,
@@ -85,6 +86,7 @@ import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
 import { AdvancedScannerPanel } from "./AdvancedScannerPanel";
 import { MqttLiveTopicTree } from "./MqttLiveTopicTree";
 import { MqttPublishModal } from "./MqttPublishModal";
+import { SourceInterfaceDetails } from "./SourceInterfaceDetails";
 import { useMqttLiveSession } from "./useMqttLiveSession";
 import {
   assetMatchesFacetFilter,
@@ -108,6 +110,7 @@ import {
   expectedPortsOk,
   forbiddenOpenPorts,
   groupUdmiRowsByAsset,
+  ipDeviceDetailItems,
   matchesTopicFilter,
   missingExpectedPorts,
   mqttRegisterCompareNote,
@@ -175,11 +178,13 @@ import {
 } from "./runIsolation";
 import {
   formatIpHeadlineMetrics,
+  formatIpSidecarSummaryCards,
   formatBacnetHeadlineMetrics,
   formatBacnetRouters,
   serializeIpTargetRows,
   type IpTargetRow,
   type IpHeadlineMetricDisplay,
+  type IpSidecarSummaryCard,
   type BacnetHeadlineMetricDisplay,
   type BacnetRouterDisplay,
 } from "./ipDiscoveryModel";
@@ -320,6 +325,17 @@ const DISCOVERY_ROUTES = new Set([
   "mqtt-scanner",
   "mqtt-discovery-sct",
 ]);
+
+// The three vendored standalone scanner lanes. They carry their own operator
+// inputs (e.g. IP range) and deliberately drop the sealed lanes' dry-run preview
+// step — true for all three whether they render native or embedded.
+const SIDECAR_DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-scanner", "mqtt-scanner"]);
+
+// Sidecar lanes still served by the embedded vendored UI (iframe + reverse
+// proxy). This set SHRINKS one protocol per PR as each goes native; the native
+// body renders for any sidecar route NOT in here. One-line rollback for a
+// protocol = add its route back to this set.
+const EMBEDDED_SIDECAR_ROUTES = new Set(["bacnet-scanner", "mqtt-scanner"]);
 
 // A large register can reject hundreds of rows. Render the first N and state the
 // honest remainder count rather than building pagination for a pre-1.0 fix:
@@ -617,11 +633,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     module.route === "ip-scanner-sct" || module.route === "bacnet-discovery-sct";
   // The vendored standalone scanner lanes brought into SCT. They carry their own
   // operator inputs (e.g. IP range) and deliberately drop the dry-run preview
-  // step the sealed lanes use.
-  const isSidecarDiscoveryModule =
-    module.route === "ip-scanner" ||
-    module.route === "bacnet-scanner" ||
-    module.route === "mqtt-scanner";
+  // step the sealed lanes use — true whether the lane renders native or embedded.
+  const isSidecarDiscoveryModule = SIDECAR_DISCOVERY_ROUTES.has(module.route);
+  // Whether THIS sidecar lane is still served by the embedded vendored UI. IP has
+  // gone native (removed from EMBEDDED_SIDECAR_ROUTES); BACnet/MQTT still embed.
+  const isEmbeddedSidecarModule = EMBEDDED_SIDECAR_ROUTES.has(module.route);
   const requestedRunId = searchParams.get("run")?.trim() || null;
   const comparisonRunId = searchParams.get("compare")?.trim() || null;
   const setScopedRunUrl = useCallback(
@@ -687,6 +703,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // start_ip / end_ip; blank leaves the adapter to fail honestly ("no scan range").
   const [ipScanRangeStart, setIpScanRangeStart] = useState("");
   const [ipScanRangeEnd, setIpScanRangeEnd] = useState("");
+  // GAP-IP1: per-probe timeout (ms) the vendored tool exposed. Defaults to 1000;
+  // forwarded as parameters.timeout (the sidecar adapter's _scan_query passes it
+  // through). Blank or non-positive omits the key so the engine's own default
+  // applies rather than a bogus value.
+  const [ipProbeTimeout, setIpProbeTimeout] = useState("1000");
+  // GAP-C1: "Ignore register for this run" — the vendored clear-register / run
+  // without RAG. Forwarded as parameters.ignore_register; the route's register
+  // binder then skips freezing a register into this run.
+  const [ipIgnoreRegister, setIpIgnoreRegister] = useState(false);
   const [scanTargetRows, setScanTargetRows] = useState<IpTargetRow[]>([]);
   const [scanExclusionRows, setScanExclusionRows] = useState<IpTargetRow[]>([]);
   const [scanPreviewRunId, setScanPreviewRunId] = useState<string | null>(null);
@@ -1001,6 +1026,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     return undefined;
   }, [configurationQuery.data]);
+  // No-function-loss: the vendored IP tool showed the selected NIC (IPv4, mask,
+  // gateway, DNS) on its own scan page. The native lane reads the adapter from
+  // Configuration (single source of truth), so surface it read-only on the module
+  // too, so the operator still SEES which NIC scans send from. IP module only —
+  // gated so the query never fires on unrelated module pages.
+  const systemInterfacesQuery = useQuery({
+    enabled: module.route === "ip-scanner",
+    queryFn: ({ signal }) => getSystemInterfaces({ client: apiClient, signal }),
+    queryKey: queryKeys.interfaces(sessionScopeId, workspaceRef),
+  });
   // MQTT config-in: the saved broker settings, to prefill the panel's connect
   // modal (secrets left for the operator). Only when a broker host is configured.
   const mqttPanelConfig = useMemo(() => {
@@ -2419,6 +2454,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               target: scanTarget,
               scanRangeStart: ipScanRangeStart,
               scanRangeEnd: ipScanRangeEnd,
+              probeTimeout: ipProbeTimeout,
+              ignoreRegister: ipIgnoreRegister,
             }),
             runKind: action.runKind,
             workspace: workspaceRef,
@@ -3534,6 +3571,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       // legacy two-number headline for those runs instead of inventing values.
       return null;
     }
+  }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
+
+  // GAP-C2: the native IP sidecar lane's four-card summary strip. The sidecar
+  // engine records its totals directly on result_summary (not the sealed
+  // ip_headline_metrics_v1 snapshot), so ipHeadlineMetrics above is null here;
+  // read them straight. Gated to a terminal run by finalEvidenceReady.
+  const ipSidecarSummaryCards = useMemo<IpSidecarSummaryCard[] | null>(() => {
+    if (module.route !== "ip-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
+      return null;
+    }
+    return formatIpSidecarSummaryCards(discoveryResultsQuery.data.result_summary);
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
 
   const bacnetHeadlineMetrics = useMemo<BacnetHeadlineMetricDisplay[] | null>(() => {
@@ -4707,12 +4755,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   return (
     <div className="app-page">
-      {isSidecarDiscoveryModule ? (
-        // Embed-only single page: for the IP/BACnet/MQTT sidecar modules the
-        // vendored scanner IS the module - one Scan surface, no Setup/Run/Results
-        // doors. Results-out and compare still persist real runs behind it, so run
-        // history and reports (reached from the Reports module) stay populated.
-        // The native body below is not rendered here, so its queries never fire.
+      {isEmbeddedSidecarModule ? (
+        // Embed-only single page: for the still-embedded sidecar modules (BACnet,
+        // MQTT) the vendored scanner IS the module - one Scan surface, no
+        // Setup/Run/Results doors. Results-out and compare still persist real runs
+        // behind it, so run history and reports (reached from the Reports module)
+        // stay populated. The native body below is not rendered here, so its
+        // queries never fire. IP has flipped to the native body (see the flip set).
         <>
           <h2 className="visually-hidden" ref={pageHeadingRef} tabIndex={-1}>
             {workspace?.title ?? module.title}
@@ -4776,6 +4825,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <strong>{metric.value}</strong>
                 <span>{metric.heading}</span>
                 {metric.progress && <small>{metric.progress}</small>}
+              </article>
+            ))}
+          </section>
+        )}
+        {ipSidecarSummaryCards && (
+          <section className="ip-headline-metrics" aria-label="IP scan summary">
+            {ipSidecarSummaryCards.map((card) => (
+              <article key={card.heading}>
+                <strong>{card.value}</strong>
+                <span>{card.heading}</span>
               </article>
             ))}
           </section>
@@ -5092,6 +5151,19 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <div className="form-stack scan-authorization">
                   {module.route === "ip-scanner" && (
                     <div className="form-stack">
+                      <div>
+                        <strong className="eyebrow">Source Interface</strong>
+                        <SourceInterfaceDetails
+                          enumerationFailed={systemInterfacesQuery.isError}
+                          enumerationPending={systemInterfacesQuery.isLoading}
+                          interfaces={
+                            Array.isArray(systemInterfacesQuery.data)
+                              ? systemInterfacesQuery.data
+                              : []
+                          }
+                          value={sourceInterfaceCidr ?? ""}
+                        />
+                      </div>
                       <label>
                         Start IP
                         <input
@@ -5112,6 +5184,24 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         <small>
                           A start address is required. Leave the end blank to scan a single host.
                         </small>
+                      </label>
+                      <label>
+                        Per-probe timeout (ms)
+                        <input
+                          inputMode="numeric"
+                          onChange={(event) => setIpProbeTimeout(event.target.value)}
+                          placeholder="1000"
+                          value={ipProbeTimeout}
+                        />
+                        <small>How long to wait for each host to answer. Blank uses the default.</small>
+                      </label>
+                      <label className="confirm-row">
+                        <input
+                          checked={ipIgnoreRegister}
+                          onChange={(event) => setIpIgnoreRegister(event.target.checked)}
+                          type="checkbox"
+                        />
+                        Ignore register for this run (scan without RAG comparison)
                       </label>
                     </div>
                   )}
@@ -7674,6 +7764,42 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </div>
                   ))}
                 </div>
+                {module.route === "ip-scanner" &&
+                  (() => {
+                    // GAP-IP2: the persisted device record for this row. The flat
+                    // results projection above cannot hold the richer attributes
+                    // (rag, hostname check, latency, services, banner, port diffs,
+                    // project/location), so read them from the structured
+                    // devices[], matched by the row's Observed IP. Absent for a
+                    // row the engine kept out of devices (a "missing" expected
+                    // host), so the panel is omitted rather than shown empty.
+                    const ip = detailRow["Observed IP"];
+                    const device = discoveryResultsQuery.data?.devices?.find(
+                      (candidate) =>
+                        String((candidate as Record<string, unknown>).address ?? "") === ip,
+                    );
+                    const items = ipDeviceDetailItems(
+                      device?.attributes as Record<string, unknown> | undefined,
+                    );
+                    if (items.length === 0) {
+                      return null;
+                    }
+                    return (
+                      <div className="detail-actions">
+                        <div className="property-expansion-panel">
+                          <strong>Device attributes</strong>
+                          <div className="detail-list">
+                            {items.map((item) => (
+                              <div className="detail-row" key={item.label}>
+                                <span>{item.label}</span>
+                                <strong>{item.value}</strong>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 {module.route === "bacnet-scanner" && activeRun && activeRunTerminal && (() => {
                   const deviceInstance = Number(detailRow.Instance);
                   const hasInstance = Number.isInteger(deviceInstance) && deviceInstance >= 0;
@@ -9600,6 +9726,8 @@ function buildDiscoveryParameters(
     target?: string;
     scanRangeStart?: string;
     scanRangeEnd?: string;
+    probeTimeout?: string;
+    ignoreRegister?: boolean;
   },
 ): Record<string, unknown> {
   const parameters: Record<string, unknown> = {};
@@ -9668,6 +9796,18 @@ function buildDiscoveryParameters(
     }
     if (end) {
       parameters.end_ip = end;
+    }
+    // GAP-IP1: per-probe timeout (ms). Only a positive finite value goes on the
+    // wire; a blank or garbage field omits the key so the adapter's own default
+    // applies rather than a bogus timeout.
+    const timeout = Number((options.probeTimeout ?? "").trim());
+    if (Number.isFinite(timeout) && timeout > 0) {
+      parameters.timeout = timeout;
+    }
+    // GAP-C1: opt this run out of register RAG-comparison. The route's binder
+    // reads this and skips freezing a register in.
+    if (options.ignoreRegister) {
+      parameters.ignore_register = true;
     }
   }
   // MQTT discovery: forward the operator's topic filter and capture window so
