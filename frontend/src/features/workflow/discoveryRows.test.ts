@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DiscoveryResultsResponse } from "../../api/client";
 import {
   bacnetBackendLabel,
+  bacnetDeviceDetailItems,
   discoveryEmptyStateFor,
   discoveryMetrics,
   expectedPortsOk,
@@ -1071,5 +1072,59 @@ describe("ipDeviceDetailItems (GAP-IP2 row-detail drawer)", () => {
     expect(labels).toEqual(["RAG"]);
     expect(ipDeviceDetailItems(undefined)).toEqual([]);
     expect(ipDeviceDetailItems(null)).toEqual([]);
+  });
+});
+
+describe("bacnetDeviceDetailItems (GAP-B2 row-detail drawer)", () => {
+  it("surfaces the persisted BACnet identity + register-check attributes", () => {
+    const items = bacnetDeviceDetailItems({
+      asset_id: "bacnet-device-1001",
+      device_instance: 1001,
+      rag: "amber",
+      register_state: "partial",
+      network: 2001,
+      mac: "0a:1b:2c",
+      vendor_id: 999,
+      system_status: "operational",
+      max_apdu: 1476,
+      segmentation: "both",
+      protocol_revision: 19,
+      app_software: "v3.1",
+      firmware: "1.2",
+      object_count: 42,
+      name_status: "mismatch",
+      expected_name: "AHU-01",
+      object_diff: "expected 5, found 4",
+      mismatch: "name, object count",
+      location: "Roof",
+      description: "rooftop unit",
+    });
+    const byLabel = Object.fromEntries(items.map((item) => [item.label, item.value]));
+    expect(byLabel.RAG).toBe("amber");
+    expect(byLabel.Register).toBe("partial");
+    expect(byLabel["Max APDU"]).toBe("1476");
+    expect(byLabel.Segmentation).toBe("both");
+    expect(byLabel["Protocol revision"]).toBe("19");
+    expect(byLabel["Application software"]).toBe("v3.1");
+    expect(byLabel["System status"]).toBe("operational");
+    expect(byLabel["Name check"]).toBe("mismatch");
+    expect(byLabel["Expected name"]).toBe("AHU-01");
+    expect(byLabel["Object diff"]).toBe("expected 5, found 4");
+    expect(byLabel["Register mismatch"]).toBe("name, object count");
+    // device_instance / asset_id are keys, not rendered rows.
+    expect(byLabel["Device instance"]).toBeUndefined();
+  });
+
+  it("drops blank scalars and tolerates a missing record", () => {
+    const items = bacnetDeviceDetailItems({
+      rag: "green",
+      register_state: "match",
+      max_apdu: null,
+      segmentation: "",
+      protocol_revision: undefined,
+    });
+    expect(items.map((item) => item.label)).toEqual(["RAG", "Register"]);
+    expect(bacnetDeviceDetailItems(undefined)).toEqual([]);
+    expect(bacnetDeviceDetailItems(null)).toEqual([]);
   });
 });

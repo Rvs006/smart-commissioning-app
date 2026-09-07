@@ -18,15 +18,27 @@ if it dies mid-scan the adapter engine records a real failed run rather than
 fabricating results.
 """
 
+import json
 import logging
+import zipfile
 from contextlib import nullcontext
+from datetime import datetime
+from io import BytesIO
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from openpyxl import Workbook
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.engines.bacnet_scanner_sidecar import (
     SidecarTransportError,
     browse_device_objects,
+    build_export_assets,
     process_bacnet_scanner_run,
+)
+from smart_commissioning_core.engines.bacnet_scanner_sidecar import (
+    _register_csv as _bacnet_register_csv,  # shared serializer: rows -> the sidecar's 9-col CSV
+)
+from smart_commissioning_core.engines.bacnet_scanner_sidecar import (
+    register_rows_from_devices as register_rows_from_bacnet_devices,
 )
 from smart_commissioning_core.engines.ip_scanner_sidecar import (
     _register_csv as _ip_register_csv,  # shared serializer: rows -> the sidecar's 9-col CSV
@@ -612,3 +624,144 @@ def save_ip_scan_as_register(
         principal.username,
     )
     return summary
+
+
+@router.post(
+    "/bacnet_sidecar/runs/{run_id}/save-as-register",
+    response_model=ImportBatchSummary,
+    dependencies=[Depends(require_engineer)],
+)
+def save_bacnet_scan_as_register(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> ImportBatchSummary:
+    """Turn a succeeded BACnet scanner run's discovered devices into a bacnet_scanner_register.
+
+    GAP-B4, the BACnet mirror of :func:`save_ip_scan_as_register`: a DB read then a
+    DB write, no network I/O and no sidecar, so it skips the scan-authorization
+    consent gate and the inline-only 503 the live routes carry (both untrue here).
+    The created import runs through the same ``ImportService`` pipeline as an
+    upload, so it is indistinguishable from an uploaded ``bacnet_scanner_register``;
+    a later BACnet scan for this project/site binds and RAG-compares against it.
+    """
+    run = _load_discovery_run(run_id, principal)  # scoped access + 404
+    if run.job_type != "bacnet_scanner":
+        raise HTTPException(status_code=404, detail="BACnet scanner run was not found.")
+    if run.status != "succeeded":
+        raise HTTPException(
+            status_code=409,
+            detail="Save as register requires a succeeded BACnet scanner run.",
+        )
+
+    devices = DiscoveryRepository(service.engine).list_devices(run_id)
+    rows = register_rows_from_bacnet_devices(devices)
+    if not rows:
+        raise HTTPException(
+            status_code=409,
+            detail="This run recorded no discovered devices to save as a register.",
+        )
+
+    summary, _errors = ImportService(service.engine).create_import(
+        import_type="bacnet_scanner_register",
+        file_name=f"bacnet-scan-register-{run_id}.csv",
+        file_bytes=_bacnet_register_csv(rows).encode("utf-8"),
+        project_id=run.project_id,
+        site_id=run.site_id,
+    )
+    logger.info(
+        "bacnet scan saved as register run_id=%s import_id=%s rows=%d by=%s",
+        run_id,
+        summary.import_id,
+        summary.accepted_rows,
+        principal.username,
+    )
+    return summary
+
+
+# Fixed zip member timestamp so the same run exports byte-stable bytes (the export
+# is rebuilt from sealed evidence, so it should not churn on every download).
+_ASSET_ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+_ASSET_PROPERTIES_EPOCH = datetime(1980, 1, 1)  # openpyxl core-property timestamps are naive
+
+
+def _asset_xlsx_bytes(rows: list) -> bytes:
+    """Render one asset's ``xlsx_rows`` (pure data from the engine) to XLSX bytes."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Asset"
+    for row in rows:
+        sheet.append(row)
+    # Pin core-property timestamps so a re-export of the same run is stable.
+    workbook.properties.created = _ASSET_PROPERTIES_EPOCH
+    workbook.properties.modified = _ASSET_PROPERTIES_EPOCH
+    out = BytesIO()
+    workbook.save(out)
+    return out.getvalue()
+
+
+def _bacnet_assets_zip(assets: list[dict]) -> bytes:
+    """Pack per-asset JSON + XLSX (one folder per asset) into a single ZIP.
+
+    Mirrors the vendored ``/api/export`` layout (``<base>/<base>.json`` +
+    ``<base>/<base>.xlsx``) but rebuilt from persisted run data, never live reads.
+    """
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for asset in assets:
+            base = str(asset["base"])
+            json_info = zipfile.ZipInfo(f"{base}/{base}.json", date_time=_ASSET_ZIP_EPOCH)
+            archive.writestr(json_info, json.dumps(asset["json"], indent=2).encode("utf-8"))
+            xlsx_info = zipfile.ZipInfo(f"{base}/{base}.xlsx", date_time=_ASSET_ZIP_EPOCH)
+            archive.writestr(xlsx_info, _asset_xlsx_bytes(asset["xlsx_rows"]))
+    return buffer.getvalue()
+
+
+@router.get(
+    "/bacnet_sidecar/runs/{run_id}/export-assets",
+    dependencies=[Depends(require_engineer)],
+)
+def export_bacnet_scan_assets(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> Response:
+    """Rebuild a succeeded BACnet run's per-asset export ZIP from persisted evidence.
+
+    GAP-B3: the vendored tool built this ZIP live during a scan (select devices ->
+    per-asset JSON + XLSX). Every scan run already auto-exports each device's
+    objects into persisted DiscoveredPoint rows, so the DATA is never lost; this
+    endpoint reconstructs the operator-facing artifact after the fact from the
+    run's own devices + points. No sidecar, no network I/O — a DB read then an
+    in-memory pack — so, like save-as-register, it skips the scan-authorization
+    gate and the inline-only 503. v1 is the whole run (one folder per device);
+    device selection is a later nicety, not function loss (the ZIP is per-device
+    foldered already).
+    """
+    run = _load_discovery_run(run_id, principal)  # scoped access + 404
+    if run.job_type != "bacnet_scanner":
+        raise HTTPException(status_code=404, detail="BACnet scanner run was not found.")
+    if run.status != "succeeded":
+        raise HTTPException(
+            status_code=409,
+            detail="Export assets requires a succeeded BACnet scanner run.",
+        )
+
+    repository = DiscoveryRepository(service.engine)
+    assets = build_export_assets(repository.list_devices(run_id), repository.list_points(run_id))
+    if not assets:
+        raise HTTPException(
+            status_code=409,
+            detail="This run recorded no BACnet devices to export.",
+        )
+
+    payload = _bacnet_assets_zip(assets)
+    logger.info(
+        "bacnet assets exported run_id=%s assets=%d by=%s",
+        run_id,
+        len(assets),
+        principal.username,
+    )
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="bacnet-assets-{run_id}.zip"'},
+    )

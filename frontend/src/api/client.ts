@@ -1950,6 +1950,26 @@ export function saveIpScanRunAsRegister(input: {
   );
 }
 
+// Turn a succeeded BACnet scanner run's discovered devices into an accepted
+// bacnet_scanner_register import (server-side, from the run's own evidence).
+// Mirror of saveIpScanRunAsRegister.
+export function saveBacnetScanRunAsRegister(input: {
+  runId: string;
+  context?: ApiRequestContext;
+}): Promise<ImportBatchSummary> {
+  return request<ImportBatchSummary>(
+    `/discovery/bacnet_sidecar/runs/${encodeURIComponent(input.runId)}/save-as-register`,
+    { method: "POST" },
+    input.context,
+  );
+}
+
+// GAP-B3: download path for a succeeded BACnet run's per-asset export ZIP
+// (JSON + XLSX per device), rebuilt server-side from persisted run evidence.
+export function getBacnetExportAssetsPath(runId: string): string {
+  return `/discovery/bacnet_sidecar/runs/${encodeURIComponent(runId)}/export-assets`;
+}
+
 export function createScanAuthorization(input: {
   previewRunId: string;
   ticket: string;
