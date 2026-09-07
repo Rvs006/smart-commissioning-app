@@ -9883,7 +9883,8 @@ function scanPortSpecification(ports: ScanPort[]): string {
 // Builds discovery run parameters, attaching the authorization contract for
 // real scans and the dry_run flag for previews. IP scans also carry the port
 // specification. Mirrors the backend safety contract (parameters.authorized).
-function buildDiscoveryParameters(
+// eslint-disable-next-line react-refresh/only-export-components -- pure param builder exported for buildDiscoveryParameters.test.ts; it renders nothing.
+export function buildDiscoveryParameters(
   action: Extract<ModuleRunAction, { kind: "discovery" }>,
   options: {
     authorized: boolean;
@@ -9992,13 +9993,23 @@ function buildDiscoveryParameters(
   // range is a global Who-Is). low/high are BACnet device instances (0 is a valid
   // instance, so >= 0), discoverMs is a duration (> 0).
   if (action.runKind === "bacnet_sidecar") {
-    const low = Number((options.bacnetInstanceLow ?? "").trim());
-    if (Number.isInteger(low) && low >= 0) {
-      parameters.low = low;
+    // Number("") === 0, so coercing before the blank check would send low:0 /
+    // high:0 for an untouched field and pin the Who-Is to instance range [0,0]
+    // (the sidecar's normal case is BOTH blank = global Who-Is). Guard on the
+    // raw trimmed string being non-empty FIRST so a blank field omits the key.
+    const lowRaw = (options.bacnetInstanceLow ?? "").trim();
+    if (lowRaw !== "") {
+      const low = Number(lowRaw);
+      if (Number.isInteger(low) && low >= 0) {
+        parameters.low = low;
+      }
     }
-    const high = Number((options.bacnetInstanceHigh ?? "").trim());
-    if (Number.isInteger(high) && high >= 0) {
-      parameters.high = high;
+    const highRaw = (options.bacnetInstanceHigh ?? "").trim();
+    if (highRaw !== "") {
+      const high = Number(highRaw);
+      if (Number.isInteger(high) && high >= 0) {
+        parameters.high = high;
+      }
     }
     const discoverMs = Number((options.bacnetDiscoverMs ?? "").trim());
     if (Number.isFinite(discoverMs) && discoverMs > 0) {
