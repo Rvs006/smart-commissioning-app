@@ -81,20 +81,18 @@ belongs in the adapter or the contract test, not in the upstream code.
 gitignored (Node runs `server.js` directly; the portable build regenerates the
 bundle). Copy the source tree, not a built drop with deps committed.
 
-### 3b. EMBED REWRITE (so the app runs inside the SCT Advanced panel)
-The Advanced-panel proxy serves each app's own UI from an SCT sub-path inside an
-iframe, so the UI must use RELATIVE URLs. Run the deterministic rewrite once after
-vendoring (it turns `fetch('/api/...')` and `<script src="/app.js">` into relative
-paths and injects the inert `sct-bridge.js` tag):
-```
-python scripts/rewrite_vendored_scanner_embed.py
-```
-Idempotent: a no-op if upstream already ships relative paths. `dist/bundle.js` is
-gitignored for all three apps and rebuilt from `public/` by the portable build, so
-no manual rebundle is needed. If a future drop uses a new URL-quoting pattern the
-rewrite misses, `tests/test_scanner_raw_embed_contract.py` goes red naming the
-seam - extend the rewrite there. (Standing ask for upstream: ship relative `api/`
-paths at source, which makes this step a no-op.)
+### 3b. EMBED REWRITE — no longer applies (removed in PR #205)
+There is no embed step and nothing to run here. SCT used to serve each app's own
+web UI inside an iframe behind a reverse proxy, which needed a deterministic URL
+rewrite plus injected `sct-bridge.js` / `sct-theme.css` assets. That whole stack
+is gone: all three scanners now render as native SCT module bodies that call the
+sidecar's HTTP `/api/...` endpoints directly. The vendored `public/` front-end
+(`index.html`, `app.js`) is no longer served or rewritten by SCT, so a drop's UI
+files do not affect the integration — only the sidecar's HTTP contract does, and
+step 4 pins that. The deleted `scripts/rewrite_vendored_scanner_embed.py` and
+`tests/test_scanner_raw_embed_contract.py` are not part of any drop. (The source-
+only vendoring and the portable build's sidecar bundling in step 3 are unchanged;
+this note is only about the retired browser embed.)
 
 ### 4. Contract test = the gate
 Each app has its own contract suite (see the table above); together the three

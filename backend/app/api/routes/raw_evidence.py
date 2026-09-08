@@ -22,6 +22,17 @@ require_viewer = require_role(Role.VIEWER)
 
 _SAFE_FILE_PART = re.compile(r"[^a-z0-9_-]+")
 
+# Map a stored artifact's media type to a download extension. An explicit dict
+# (not mimetypes.guess_extension, which is OS/registry-dependent and can return
+# None or surprising values) covers every media type the raw-evidence store
+# actually writes: application/xml (nmap_xml), text/plain (nmap_stderr), and
+# application/zip (mqtt_export_archive). Anything unmapped keeps the prior .bin.
+_MEDIA_TYPE_EXTENSIONS = {
+    "application/zip": ".zip",
+    "application/xml": ".xml",
+    "text/plain": ".txt",
+}
+
 
 def get_raw_evidence_store() -> RawEvidenceArtifactStore:
     """Return the runtime-owned store; injectable for route integration tests."""
@@ -62,7 +73,8 @@ def download_raw_evidence(
         ) from error
 
     artifact_type = _SAFE_FILE_PART.sub("-", descriptor.artifact_type.lower()).strip("-")
-    filename = f"{artifact_type or 'raw-evidence'}-{descriptor.artifact_id}.bin"
+    extension = _MEDIA_TYPE_EXTENSIONS.get(descriptor.media_type, ".bin")
+    filename = f"{artifact_type or 'raw-evidence'}-{descriptor.artifact_id}{extension}"
     return Response(
         content=payload,
         media_type=descriptor.media_type,

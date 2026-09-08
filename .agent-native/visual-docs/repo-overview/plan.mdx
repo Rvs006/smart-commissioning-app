@@ -29,7 +29,7 @@ Run flow: a route creates a leased, sealed `run` (row + frozen execution context
 
 ## Visualized Targets
 
-<FileTree id="visualized-targets" title="Visualized targets" entries={[{"path":"backend/app/main.py","note":"area; file-tree, diagram, annotated-code"},{"path":"backend/app/api/router.py","note":"area; file-tree, diagram, annotated-code"},{"path":"backend/app/services/run_service.py","note":"area; file-tree, diagram, annotated-code"},{"path":"backend/app/services/run_dispatch.py","note":"area; file-tree, diagram, annotated-code"},{"path":"backend/app/api/routes/scanner_raw.py","note":"flow; wireframe, diagram, annotated-code"},{"path":"core/smart_commissioning_core/engines/base.py","note":"area; file-tree, diagram, annotated-code"},{"path":"core/smart_commissioning_core/db/models.py","note":"model; data-model, diagram, annotated-code"},{"path":"core/smart_commissioning_core/db/run_lifecycle.py","note":"model; data-model, diagram, annotated-code"},{"path":"core/smart_commissioning_core/records.py","note":"area; file-tree, diagram, annotated-code"},{"path":"core/smart_commissioning_core/sync.py","note":"area; file-tree, diagram, annotated-code"},{"path":"worker/app/tasks.py","note":"area; file-tree, diagram, annotated-code"},{"path":"frontend/src/app/routes.tsx","note":"area; file-tree, diagram, annotated-code"},{"path":"frontend/src/features/workflow/ModulePage.tsx","note":"area; file-tree, diagram, annotated-code"},{"path":"frontend/src/api/client.ts","note":"area; file-tree, diagram, annotated-code"}]} />
+<FileTree id="visualized-targets" title="Visualized targets" entries={[{"path":"backend/app/main.py","note":"area; file-tree, diagram, annotated-code"},{"path":"backend/app/api/router.py","note":"area; file-tree, diagram, annotated-code"},{"path":"backend/app/services/run_service.py","note":"area; file-tree, diagram, annotated-code"},{"path":"backend/app/services/run_dispatch.py","note":"area; file-tree, diagram, annotated-code"},{"path":"core/smart_commissioning_core/engines/base.py","note":"area; file-tree, diagram, annotated-code"},{"path":"core/smart_commissioning_core/db/models.py","note":"model; data-model, diagram, annotated-code"},{"path":"core/smart_commissioning_core/db/run_lifecycle.py","note":"model; data-model, diagram, annotated-code"},{"path":"core/smart_commissioning_core/records.py","note":"area; file-tree, diagram, annotated-code"},{"path":"core/smart_commissioning_core/sync.py","note":"area; file-tree, diagram, annotated-code"},{"path":"worker/app/tasks.py","note":"area; file-tree, diagram, annotated-code"},{"path":"frontend/src/app/routes.tsx","note":"area; file-tree, diagram, annotated-code"},{"path":"frontend/src/features/workflow/ModulePage.tsx","note":"area; file-tree, diagram, annotated-code"},{"path":"frontend/src/api/client.ts","note":"area; file-tree, diagram, annotated-code"}]} />
 
 ## Backend / API
 
@@ -39,7 +39,7 @@ Builds the FastAPI app with a `lifespan` that re-reads settings, configures JSON
 
 ### `backend/app/api/router.py` — route surface and auth tiers
 
-Assembles the API in three trust tiers. Unauthenticated: `health`, `hub_sync_v2` (its own `X-Sync-Key` machine credential), and the public `imports` / `udmi_schemas` template routers. Everything else hangs off a `protected_router` gated by `require_auth`, with per-route RBAC layered on top (for example the `events` stream requires viewer, hub ingest requires admin). `scanner_raw` mounts at `/scanners`; the discovery scanners at `/discovery`.
+Assembles the API in three trust tiers. Unauthenticated: `health`, `hub_sync_v2` (its own `X-Sync-Key` machine credential), and the public `imports` / `udmi_schemas` template routers. Everything else hangs off a `protected_router` gated by `require_auth`, with per-route RBAC layered on top (for example the `events` stream requires viewer, hub ingest requires admin). The discovery scanners mount at `/discovery`.
 
 ### `backend/app/services/run_service.py` — run lifecycle owner
 
@@ -48,10 +48,6 @@ Assembles the API in three trust tiers. Unauthenticated: `health`, `hub_sync_v2`
 ### `backend/app/services/run_dispatch.py` — inline vs queue fork
 
 `dispatch_run` is the divergence point. When the queue is unavailable or `job_execution_mode == "inline"` it runs inline: claim the owned run, start an `OwnedRunHeartbeat`, and (by default) execute on a daemon thread that resolves the frozen context and calls the engine. Otherwise it enqueues a Dramatiq message on the destination queue and marks the dispatch published. A failed publish leaves the outbox row pending for the maintenance-thread retry; it never silently falls back to a second inline executor. Note: `job_execution_mode="auto"` is only special-cased against `"inline"`, so auto behaves as the queue path and the portable build must set `inline`.
-
-### `backend/app/api/routes/scanner_raw.py` — scanner reverse proxy (Advanced tab)
-
-Reverse-proxies the three vendored standalone scanner web apps (run as loopback sidecars by `SidecarSupervisor`) so they embed inside the SPA while every action stays governed. `classify()` treats GET/HEAD and an allowlist of read actions as free reads; everything else is a write, fail-closed, forwarded only with an `X-SCT-Write-Confirm` single-use token whose digest binds method + path + body and is minted after the operator confirms in the SCT parent. `_relay` streams via httpx and injects `sct-bridge.js` + `sct-theme.css`. Actions are recorded as real run rows (`scanner_raw_action` / `scanner_raw_write`, the latter with a redacted payload and `payload_sha256`).
 
 ## Core engine — `smart_commissioning_core`
 

@@ -63,20 +63,6 @@
           "policy": "seed"
         },
         {
-          "id": "backend-app-api-routes-scanner_raw-py",
-          "name": "Scanner Raw.Py",
-          "kind": "flow",
-          "include": [
-            "backend/app/api/routes/scanner_raw.py"
-          ],
-          "blocks": [
-            "wireframe",
-            "diagram",
-            "annotated-code"
-          ],
-          "policy": "seed"
-        },
-        {
           "id": "core-smart_commissioning_core-engines-base-py",
           "name": "Base.Py",
           "kind": "area",

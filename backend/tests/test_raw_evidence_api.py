@@ -158,6 +158,42 @@ class RawEvidenceApiTests(ApiTestCase):
         self.assertNotIn(str(self.store.root), response.text)
         self.assertNotIn("tampered", response.text)
 
+    def test_download_filename_extension_follows_media_type(self) -> None:
+        # P2c: the download filename extension is derived from the stored media
+        # type, not a hardcoded .bin. A ZIP export (mqtt_export_archive) must
+        # download as .zip so the browser and OS treat it as an archive; the
+        # nmap_xml artifact keeps .xml. Both are served by this one shared route.
+        zip_artifact = self.store.import_bytes(
+            run_id=self.run["run_id"],
+            artifact_type="mqtt_export_archive",
+            media_type="application/zip",
+            payload=b"PK\x03\x04zip-bytes",
+            capture_complete=True,
+            producer_executor_id="inline:commissioning-host-01",
+            max_bytes=64,
+        )
+        zip_response = self.client.get(
+            "/api/v1/discovery/runs/"
+            f"{self.run['run_id']}/raw-evidence/{zip_artifact.artifact_id}",
+            headers=self.viewer_headers,
+        )
+        self.assertEqual(zip_response.status_code, 200, zip_response.text)
+        self.assertTrue(
+            zip_response.headers["content-disposition"].endswith('.zip"'),
+            zip_response.headers["content-disposition"],
+        )
+
+        xml_response = self.client.get(
+            "/api/v1/discovery/runs/"
+            f"{self.run['run_id']}/raw-evidence/{self.artifact.artifact_id}",
+            headers=self.viewer_headers,
+        )
+        self.assertEqual(xml_response.status_code, 200, xml_response.text)
+        self.assertTrue(
+            xml_response.headers["content-disposition"].endswith('.xml"'),
+            xml_response.headers["content-disposition"],
+        )
+
     def test_local_synthetic_download_uses_unambiguous_audit_identity(self) -> None:
         response = self.client.get(
             "/api/v1/discovery/runs/"

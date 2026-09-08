@@ -8,7 +8,6 @@
       "backend-app-api-router-py",
       "backend-app-services-run_service-py",
       "backend-app-services-run_dispatch-py",
-      "backend-app-api-routes-scanner_raw-py",
       "core-smart_commissioning_core-engines-base-py",
       "core-smart_commissioning_core-db-models-py",
       "core-smart_commissioning_core-db-run_lifecycle-py",

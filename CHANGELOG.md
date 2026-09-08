@@ -13,6 +13,25 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   `system.location.section`), alongside `Room` and `Floor`. It appears in the
   downloadable template and is captured on accepted rows; leaving it blank never
   rejects a row. Registers without the column import exactly as before.
+- The BACnet scanner gained the same "Ignore register for this run (scan without
+  RAG comparison)" toggle the IP scanner already had, so a BACnet scan can run
+  without freezing a register into it.
+
+### Changed
+
+- The IP, BACnet, and MQTT scanners are now native screens in the app rather than
+  the embedded standalone tools shown in an in-app panel. Each is a single
+  configure-and-scan page; a completed scan is still saved as a real scanner run,
+  so Results, run history, and reports fill in as before, and IP/BACnet
+  re-compare, save-as-register, BACnet object browse, and the BACnet asset export
+  all carry over. The MQTT live topic view is unchanged.
+
+### Removed
+
+- The Advanced scanner panel and its reverse-proxy routes (`/scanners/{proto}/raw`)
+  are gone, together with the panel session and per-write confirmation token
+  behind them; the native scanners replace them. Scans recorded by the old panel
+  stay readable in Run History, since their evidence rows and job types are kept.
 
 ### Fixed
 
@@ -38,6 +57,24 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   Operators can still pass a smaller `max_messages` to bound a single run. UDMI
   validation already scaled its capture to the register (v0.1.29); this brings
   the discovery lane in line.
+- BACnet discovery now saves its discovered points. A native BACnet scan counted
+  points in its summary while the Points / Live Data view came back empty, because
+  the points were written to the device table instead of the points table; they
+  now persist correctly.
+- More scanner evidence-integrity fixes: IP results no longer error while reading
+  back observed ports; a half-filled or inverted BACnet device-instance range is
+  rejected at the Run button instead of silently scanning every instance; an MQTT
+  live session compares against this workspace's register rather than whichever one
+  the shared sidecar held last; a BACnet point export cut short by a deadline or
+  the per-device object cap is flagged rather than reported as a complete
+  zero-point network; and two MQTT live connects starting at once no longer cross
+  workspaces.
+- The native scanner Run button (IP, BACnet, and MQTT) now stays disabled until
+  scan authorization is confirmed, matching the server, which already refused an
+  unauthorized run. Before, the button looked ready while the run would have failed.
+- Saved raw evidence now downloads with a filename extension that matches its type:
+  a captured MQTT export as `.zip`, Nmap XML / stderr as `.xml` / `.txt`, instead
+  of always `.bin`.
 
 ## [0.1.55] - 2026-08-27
 
