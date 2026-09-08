@@ -92,6 +92,13 @@ def _bind_scanner_register(
     each with its own register import type).
     """
     parameters.pop("register_import_id", None)
+    # GAP-C1: "Ignore register for this run". The operator opted this scan out of
+    # register RAG-comparison (the vendored tools' clear-register / run-without-RAG
+    # behaviour). Skip binding so no register is frozen in; the smuggled-id pop
+    # above still runs, so a client cannot pin one either way. Lives at the shared
+    # chokepoint, so BACnet/MQTT inherit it unchanged when they go native.
+    if parameters.get("ignore_register"):
+        return
     if records is None:
         records = ImportRepository(service.engine).list(
             project_id=project_id, site_id=site_id, import_type=import_type

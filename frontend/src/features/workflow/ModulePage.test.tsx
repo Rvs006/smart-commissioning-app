@@ -1219,15 +1219,16 @@ describe("ModulePage discovery wiring", () => {
     );
   }
 
-  it("makes the embedded scanner the whole IP sidecar module (no native run form)", async () => {
+  it("renders the native IP sidecar body (flipped off the embed) with the run form", async () => {
     stubSidecarModuleFetch();
     renderModule("ip-scanner");
 
-    // The vendored standalone scanner is the one Scan surface.
-    expect(await screen.findByTitle(/IP advanced scanner/i)).toBeInTheDocument();
-    // Embed-only: no Setup/Run/Results step nav and no native scan form.
-    expect(screen.queryByRole("navigation", { name: /Module steps/i })).toBeNull();
-    expect(screen.queryByLabelText(/Start IP/i)).toBeNull();
+    // IP has flipped to native: the run form is present and the vendored iframe is gone.
+    expect(await screen.findByLabelText(/Start IP/i)).toBeInTheDocument();
+    expect(screen.queryByTitle(/IP advanced scanner/i)).toBeNull();
+    // GAP-IP1 + GAP-C1 controls ship on the native config strip.
+    expect(screen.getByLabelText(/Per-probe timeout/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Ignore register for this run/i)).toBeInTheDocument();
   });
 
   it("makes the embedded scanner the whole MQTT sidecar module (no native run form)", async () => {
