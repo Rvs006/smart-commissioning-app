@@ -41,6 +41,7 @@ import {
   getImportTemplatePath,
   getReportDownloadPath,
   getBacnetExportAssetsPath,
+  getRawEvidenceDownloadPath,
   getSystemInterfaces,
   REPORTS_EXPORT_PATH,
   getUdmiSchemaTemplatePath,
@@ -57,6 +58,7 @@ import {
   browseBacnetScannerObjects,
   saveIpScanRunAsRegister,
   saveBacnetScanRunAsRegister,
+  saveMqttScanRunAsRegister,
   startDiscoveryPreview,
   startDiscoveryRun,
   startValidationRun,
@@ -86,6 +88,7 @@ import {
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
 import { AdvancedScannerPanel } from "./AdvancedScannerPanel";
+import { MqttFocusedDetail } from "./MqttFocusedDetail";
 import { MqttLiveTopicTree } from "./MqttLiveTopicTree";
 import { MqttPublishModal } from "./MqttPublishModal";
 import { SourceInterfaceDetails } from "./SourceInterfaceDetails";
@@ -185,6 +188,7 @@ import {
   formatBacnetHeadlineMetrics,
   formatBacnetRouters,
   formatBacnetSidecarSummaryCards,
+  formatMqttSidecarSummaryCards,
   serializeIpTargetRows,
   type IpTargetRow,
   type IpHeadlineMetricDisplay,
@@ -338,9 +342,10 @@ const SIDECAR_DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-scanner", "mqtt-
 // Sidecar lanes still served by the embedded vendored UI (iframe + reverse
 // proxy). This set SHRINKS one protocol per PR as each goes native; the native
 // body renders for any sidecar route NOT in here. One-line rollback for a
-// protocol = add its route back to this set. IP (PR-1) and BACnet (PR-3) have
-// flipped to native; MQTT stays embedded until PR-4.
-const EMBEDDED_SIDECAR_ROUTES = new Set(["mqtt-scanner"]);
+// protocol = add its route back to this set. IP (PR-1), BACnet (PR-3) and MQTT
+// (PR-4) have all flipped to native, so the set is empty — the embed/proxy path
+// stays intact behind it for a one-line per-protocol rollback.
+const EMBEDDED_SIDECAR_ROUTES = new Set<string>([]);
 
 // A large register can reject hundreds of rows. Render the first N and state the
 // honest remainder count rather than building pagination for a pre-1.0 fix:
@@ -640,8 +645,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // operator inputs (e.g. IP range) and deliberately drop the dry-run preview
   // step the sealed lanes use — true whether the lane renders native or embedded.
   const isSidecarDiscoveryModule = SIDECAR_DISCOVERY_ROUTES.has(module.route);
-  // Whether THIS sidecar lane is still served by the embedded vendored UI. IP and
-  // BACnet have gone native (removed from EMBEDDED_SIDECAR_ROUTES); MQTT still embeds.
+  // Whether THIS sidecar lane is still served by the embedded vendored UI. IP,
+  // BACnet and MQTT have all gone native (EMBEDDED_SIDECAR_ROUTES is empty), so
+  // this is always false today; the flag stays for the one-line rollback path.
   const isEmbeddedSidecarModule = EMBEDDED_SIDECAR_ROUTES.has(module.route);
   const requestedRunId = searchParams.get("run")?.trim() || null;
   const comparisonRunId = searchParams.get("compare")?.trim() || null;
@@ -810,8 +816,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [savedRegister, setSavedRegister] = useState<ImportBatchSummary | null>(null);
   // mqtt-scanner live topic tree: the live search box (filters server-side).
   const [mqttLiveSearch, setMqttLiveSearch] = useState("");
-  // mqtt-scanner: the sealed "publish a message" modal (M5).
+  // GAP-M4: matched-only toggle applied to the same server-side search endpoint.
+  const [mqttLiveMatchedOnly, setMqttLiveMatchedOnly] = useState(false);
+  // mqtt-scanner: the sealed "publish a message" modal (M5). GAP-M7 opens it with
+  // a prefill (config topic + last-seen config payload, retain on) from a focused
+  // asset; null prefill = a blank publish from the toolbar.
   const [mqttPublishOpen, setMqttPublishOpen] = useState(false);
+  const [mqttPublishPrefill, setMqttPublishPrefill] = useState<{ topic: string; payload: string } | null>(
+    null,
+  );
   const [propertyExpansionNotice, setPropertyExpansionNotice] = useState<string | null>(null);
   const [propertyOwner, setPropertyOwner] = useState<RunEpochOwner | null>(null);
   const [propertyRunId, setPropertyRunId] = useState<string | null>(null);
@@ -903,6 +916,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // GAP-B3: the BACnet per-asset export ZIP download (rebuilt server-side from the
   // run's persisted devices+points; no live I/O).
   const bacnetAssetsDownload = useFileDownload(apiClient);
+  // GAP-M6: the MQTT capture's raw export-archive ZIP, attached to the run as raw
+  // evidence during the capture and served by the shared raw-evidence route.
+  const mqttArchiveDownload = useFileDownload(apiClient);
   const schemaTemplateDownload = useFileDownload(apiClient);
   const activeRunMatchesReservedLiveSubmission = Boolean(
     activeRun &&
@@ -2787,7 +2803,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     mutationFn: (runId: string) =>
       module.route === "bacnet-scanner"
         ? saveBacnetScanRunAsRegister({ context: { client: apiClient }, runId })
-        : saveIpScanRunAsRegister({ context: { client: apiClient }, runId }),
+        : module.route === "mqtt-scanner"
+          ? saveMqttScanRunAsRegister({ context: { client: apiClient }, runId })
+          : saveIpScanRunAsRegister({ context: { client: apiClient }, runId }),
     onSuccess: (summary) => {
       setSavedRegister(summary);
       // Mirror importMutation.onSuccess: refresh the "register on file" note.
@@ -3633,6 +3651,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     return formatBacnetSidecarSummaryCards(discoveryResultsQuery.data.result_summary);
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
 
+  // GAP-C2 (MQTT): the native MQTT sidecar lane's four-card summary strip
+  // (Topics / Assets / Matches / Rogue), read straight from the mqtt_scanner
+  // engine's result_summary totals. Gated to a terminal mqtt-scanner capture run.
+  const mqttSidecarSummaryCards = useMemo<IpSidecarSummaryCard[] | null>(() => {
+    if (module.route !== "mqtt-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
+      return null;
+    }
+    return formatMqttSidecarSummaryCards(discoveryResultsQuery.data.result_summary);
+  }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
+
   // Sidecar-only router/BBMD visibility: bacnet_scanner stamps result_summary.routers
   // (the built-in engine never does). null = no router section at all (absent key);
   // [] = the scan heard no router (render the "none responded" note).
@@ -3645,11 +3673,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   // ip-scanner / bacnet-scanner save-as-register (and BACnet export-assets) are
   // offered only once a scan has succeeded and recorded devices (a failed/empty/
-  // dry-run scan has nothing to save or export).
+  // dry-run scan has nothing to save or export). MQTT save-as-register (GAP-M5)
+  // reads the same gate off the run's persisted topics instead of devices.
   const saveableDeviceCount =
     (module.route === "ip-scanner" || module.route === "bacnet-scanner") &&
     activeRunStatus === "succeeded"
       ? (discoveryResultsQuery.data?.devices?.length ?? 0)
+      : 0;
+  const saveableMqttTopicCount =
+    module.route === "mqtt-scanner" && activeRunStatus === "succeeded"
+      ? (discoveryResultsQuery.data?.topics?.length ?? 0)
       : 0;
 
   // MQTT live topic tree (M4a): a held broker session streamed to the browser.
@@ -4880,6 +4913,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         {bacnetSidecarSummaryCards && (
           <section className="ip-headline-metrics" aria-label="BACnet scan summary">
             {bacnetSidecarSummaryCards.map((card) => (
+              <article key={card.heading}>
+                <strong>{card.value}</strong>
+                <span>{card.heading}</span>
+              </article>
+            ))}
+          </section>
+        )}
+        {mqttSidecarSummaryCards && (
+          <section className="ip-headline-metrics" aria-label="MQTT capture summary">
+            {mqttSidecarSummaryCards.map((card) => (
               <article key={card.heading}>
                 <strong>{card.value}</strong>
                 <span>{card.heading}</span>
@@ -6154,6 +6197,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   : "Run time exceeds the 48-hour capture limit — shorten the window."}
               </span>
             )}
+            {/* The live view and a capture run share the sidecar's single broker
+                connection, so they are mutually exclusive (the run route 409s
+                while a live session is held). Surface that here instead of
+                letting the capture fail mysteriously. */}
+            {module.route === "mqtt-scanner" &&
+              (mqttLive.phase === "live" ||
+                mqttLive.phase === "connecting" ||
+                mqttLive.phase === "reconnecting" ||
+                mqttLive.phase === "unavailable") && (
+                <div className="state-panel" role="status">
+                  <strong>Stop the live view before capturing</strong>
+                  <span>
+                    The live topic tree holds the broker connection. A capture run needs that same
+                    connection, so stop the live view below before you start a capture.
+                  </span>
+                </div>
+              )}
             <p className="section-copy">
               Subscribes through an MQTT discovery run and shows the latest payload seen per topic.
               The live broker capture is on-site-untested here; with no broker reachable the run
@@ -6311,7 +6371,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <form
                     onSubmit={(event) => {
                       event.preventDefault();
-                      void mqttLive.search(mqttLiveSearch.trim());
+                      void mqttLive.search(mqttLiveSearch.trim(), mqttLiveMatchedOnly);
                     }}
                   >
                     <label>
@@ -6321,6 +6381,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         placeholder="Topic, asset, or payload text — press Enter to filter"
                         value={mqttLiveSearch}
                       />
+                    </label>
+                    {/* GAP-M4: matched-only rides the same server-side search;
+                        toggling it re-runs the filter immediately. */}
+                    <label className="confirm-row">
+                      <input
+                        checked={mqttLiveMatchedOnly}
+                        onChange={(event) => {
+                          const next = event.target.checked;
+                          setMqttLiveMatchedOnly(next);
+                          void mqttLive.search(mqttLiveSearch.trim(), next);
+                        }}
+                        type="checkbox"
+                      />
+                      Registered assets only
                     </label>
                   </form>
                   <div className="inline-actions">
@@ -6340,7 +6414,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     <button
                       className="secondary-button compact"
                       disabled={!canEngineer || mqttPublishOpen}
-                      onClick={() => setMqttPublishOpen(true)}
+                      onClick={() => {
+                        setMqttPublishPrefill(null);
+                        setMqttPublishOpen(true);
+                      }}
                       title={canEngineer ? "Publish one message to a topic (sealed preview + admin approval)." : ENGINEER_REQUIRED_TOOLTIP}
                       type="button"
                     >
@@ -6352,7 +6429,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <MqttPublishModal
                     apiClient={apiClient}
                     authorizationEnforced={authorizationEnforced}
-                    onClose={() => setMqttPublishOpen(false)}
+                    defaultTopic={mqttPublishPrefill?.topic}
+                    defaultPayload={mqttPublishPrefill?.payload}
+                    defaultRetain={mqttPublishPrefill ? true : undefined}
+                    onClose={() => {
+                      setMqttPublishOpen(false);
+                      setMqttPublishPrefill(null);
+                    }}
                     workspace={workspaceRef}
                   />
                 )}
@@ -6386,45 +6469,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   treeShown={mqttLive.snapshot.treeShown}
                 />
                 {mqttLive.snapshot.focused ? (
-                  <div className="detail-actions" aria-live="polite">
-                    <div className="property-expansion-panel">
-                      <strong>Focused: {mqttLive.snapshot.focused.asset}</strong>
-                      <span>Live points and the last config payload for this asset. Read-only.</span>
-                    </div>
-                    {mqttLive.snapshot.focused.livePoints.length > 0 ? (
-                      <div className="data-table-wrap results-scroll">
-                        <table className="data-table">
-                          <thead>
-                            <tr>
-                              <th scope="col">Point</th>
-                              <th scope="col">Value</th>
-                              <th scope="col">Units</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {mqttLive.snapshot.focused.livePoints.map((point) => (
-                              <tr key={point.name}>
-                                <td>{point.name}</td>
-                                <td>{point.value == null ? "—" : String(point.value)}</td>
-                                <td>{point.unit || "—"}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    ) : (
-                      <div className="empty-workspace">
-                        <strong>No live points yet</strong>
-                        <span>Points appear as this asset publishes.</span>
-                      </div>
-                    )}
-                    {mqttLive.snapshot.focused.configPayload ? (
-                      <div className="state-panel" role="status">
-                        <strong>Config payload — {mqttLive.snapshot.focused.configTopic}</strong>
-                        <span className="mqtt-config-payload">{mqttLive.snapshot.focused.configPayload}</span>
-                      </div>
-                    ) : null}
-                  </div>
+                  <MqttFocusedDetail
+                    canEngineer={canEngineer}
+                    focused={mqttLive.snapshot.focused}
+                    onWriteConfig={(topic, payload) => {
+                      // GAP-M7: open the sealed publish lane prefilled with the
+                      // device's config topic + last-seen config payload, retain on.
+                      setMqttPublishPrefill({ topic, payload });
+                      setMqttPublishOpen(true);
+                    }}
+                  />
                 ) : null}
               </>
             ) : mqttLive.phase === "connecting" ? (
@@ -7332,16 +7386,24 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <h3>{workspace?.tableTitle ?? "Workflow Results"}</h3>
                 </div>
                 <div className="inline-actions">
-                  {(module.route === "ip-scanner" || module.route === "bacnet-scanner") && (
+                  {(module.route === "ip-scanner" ||
+                    module.route === "bacnet-scanner" ||
+                    module.route === "mqtt-scanner") && (
                     <button
                       className="secondary-button compact"
-                      disabled={!canEngineer || !saveableDeviceCount || saveRegisterMutation.isPending}
+                      disabled={
+                        !canEngineer ||
+                        !(saveableDeviceCount || saveableMqttTopicCount) ||
+                        saveRegisterMutation.isPending
+                      }
                       onClick={() => activeRun && saveRegisterMutation.mutate(activeRun.runId)}
                       title={
                         canEngineer
                           ? module.route === "bacnet-scanner"
                             ? "Turn this scan's discovered devices into an expected-device register (their reported object counts become the expected objects)."
-                            : "Turn this scan's responding devices into an expected-device register (their open ports become the expected ports)."
+                            : module.route === "mqtt-scanner"
+                              ? "Turn this capture's discovered assets into an expected-asset MQTT register (one row per asset, with its topic, schema, site and location)."
+                              : "Turn this scan's responding devices into an expected-device register (their open ports become the expected ports)."
                           : ENGINEER_REQUIRED_TOOLTIP
                       }
                       type="button"
@@ -7349,6 +7411,31 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       {saveRegisterMutation.isPending ? "Saving register..." : "Save scan as register"}
                     </button>
                   )}
+                  {module.route === "mqtt-scanner" &&
+                    typeof discoveryResultsQuery.data?.result_summary?.raw_evidence_artifact_id ===
+                      "string" &&
+                    activeRun && (
+                      <button
+                        className="secondary-button compact"
+                        disabled={mqttArchiveDownload.pendingKey !== null}
+                        onClick={() => {
+                          const artifactId = String(
+                            discoveryResultsQuery.data?.result_summary?.raw_evidence_artifact_id,
+                          );
+                          void mqttArchiveDownload.download({
+                            fallbackFilename: `mqtt-capture-archive-${activeRun.runId}.zip`,
+                            key: "mqtt-archive",
+                            path: getRawEvidenceDownloadPath(activeRun.runId, artifactId),
+                          });
+                        }}
+                        title="Download this capture's raw export archive (per-topic payloads + history), attached to the run as evidence."
+                        type="button"
+                      >
+                        {mqttArchiveDownload.pendingKey === "mqtt-archive"
+                          ? "Downloading..."
+                          : "Download capture archive"}
+                      </button>
+                    )}
                   {module.route === "bacnet-scanner" && (
                     <button
                       className="secondary-button compact"
@@ -7398,19 +7485,28 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </div>
               </div>
 
-              {(module.route === "ip-scanner" || module.route === "bacnet-scanner") &&
+              {(module.route === "ip-scanner" ||
+                module.route === "bacnet-scanner" ||
+                module.route === "mqtt-scanner") &&
                 savedRegister && (
                   <div className="state-panel success" role="status">
                     <strong>Saved as register</strong>
                     <span>
                       {savedRegister.file_name}: {savedRegister.accepted_rows} of{" "}
                       {savedRegister.total_rows} rows accepted ({savedRegister.import_id}). The next{" "}
-                      {module.route === "bacnet-scanner" ? "BACnet" : "IP"} Discovery run for this
-                      project and site will compare against it.
+                      {module.route === "bacnet-scanner"
+                        ? "BACnet"
+                        : module.route === "mqtt-scanner"
+                          ? "MQTT"
+                          : "IP"}{" "}
+                      {module.route === "mqtt-scanner" ? "capture" : "Discovery run"} for this project
+                      and site will compare against it.
                     </span>
                   </div>
                 )}
-              {(module.route === "ip-scanner" || module.route === "bacnet-scanner") &&
+              {(module.route === "ip-scanner" ||
+                module.route === "bacnet-scanner" ||
+                module.route === "mqtt-scanner") &&
                 saveRegisterMutation.isError && (
                   <div className="state-panel error" role="alert">
                     <strong>Save as register failed</strong>
@@ -7425,6 +7521,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <div className="state-panel error" role="alert">
                   <strong>Export assets failed</strong>
                   <span>{bacnetAssetsDownload.error}</span>
+                </div>
+              )}
+              {module.route === "mqtt-scanner" && mqttArchiveDownload.error && (
+                <div className="state-panel error" role="alert">
+                  <strong>Capture archive download failed</strong>
+                  <span>{mqttArchiveDownload.error}</span>
                 </div>
               )}
 

@@ -1970,6 +1970,26 @@ export function getBacnetExportAssetsPath(runId: string): string {
   return `/discovery/bacnet_sidecar/runs/${encodeURIComponent(runId)}/export-assets`;
 }
 
+// GAP-M5: turn a succeeded MQTT scanner run's discovered assets into an accepted
+// mqtt_scanner_register import (server-side, from the run's own topic evidence).
+// Mirror of saveIpScanRunAsRegister.
+export function saveMqttScanRunAsRegister(input: {
+  runId: string;
+  context?: ApiRequestContext;
+}): Promise<ImportBatchSummary> {
+  return request<ImportBatchSummary>(
+    `/discovery/mqtt_sidecar/runs/${encodeURIComponent(input.runId)}/save-as-register`,
+    { method: "POST" },
+    input.context,
+  );
+}
+
+// GAP-M6: download path for a run's attached raw-evidence artifact (e.g. the
+// MQTT capture's export-archive ZIP), served by the shared raw-evidence route.
+export function getRawEvidenceDownloadPath(runId: string, artifactId: string): string {
+  return `/discovery/runs/${encodeURIComponent(runId)}/raw-evidence/${encodeURIComponent(artifactId)}`;
+}
+
 export function createScanAuthorization(input: {
   previewRunId: string;
   ticket: string;
@@ -2652,13 +2672,71 @@ export type MqttLiveTreeNode = {
 
 export type MqttLiveFocusedPoint = { name: string; value: unknown; unit: string; ts: number };
 
-// The sidecar's buildFocused() object. Only the fields the live focus panel
-// renders are typed; the sidecar sends more (per-topic history, comparison,
-// register meta) which pass through untyped.
+// One payload in a topic's rolling history (oldest-first, as the sidecar emits).
+export type MqttLiveTopicHistoryEntry = { ts: number; raw: string };
+
+// Per-topic detail for a focused asset (server.js buildFocused topicsDetail[]).
+export type MqttLiveTopicDetail = {
+  topic: string;
+  schema: string;
+  count: number;
+  rate: number;
+  retained: boolean;
+  history: MqttLiveTopicHistoryEntry[];
+};
+
+// Register-vs-live point comparison for a focused asset (udmi.js comparePoints).
+export type MqttLiveComparison = {
+  matched: number;
+  missing: number;
+  extra: number;
+  matchedNames: string[];
+  missingNames: string[];
+  extraNames: string[];
+  expected: number;
+};
+
+// The register (expected) row a focused asset maps to, when it is in the register.
+export type MqttLiveRegisterMeta = {
+  asset?: string;
+  type?: string;
+  topic?: string;
+  schema?: string;
+  site?: string;
+  location?: string;
+  description?: string;
+  points?: Array<{ name: string; unit?: string }>;
+};
+
+// UDMI identity block a focused asset advertised in its payloads.
+export type MqttLiveUdmiIdentity = {
+  gatewayId?: string;
+  proxyIds?: string[];
+  site?: string;
+  room?: string;
+  guid?: string;
+  version?: string;
+};
+
+// GAP-M1: the sidecar's full buildFocused() object. The whole detail rides the
+// snapshot stream (focus is fire-and-forget); every field the focused panel
+// renders is typed here. A backend contract test pins the source shape.
 export type MqttLiveFocused = {
   asset: string;
+  key: string;
+  matched: boolean;
+  schema: string;
+  rate: number;
+  count: number;
+  topics: string[];
+  topicsDetail: MqttLiveTopicDetail[];
+  lastTopic: string;
   livePoints: MqttLiveFocusedPoint[];
   lastPayload: string;
+  issues: number;
+  comparison: MqttLiveComparison;
+  meta: MqttLiveRegisterMeta | null;
+  udmi: MqttLiveUdmiIdentity;
   configTopic: string;
   configPayload: string;
 };

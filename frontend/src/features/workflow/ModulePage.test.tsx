@@ -1243,13 +1243,15 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.queryByTitle(/BACnet advanced scanner/i)).toBeNull();
   });
 
-  it("makes the embedded scanner the whole MQTT sidecar module (no native run form)", async () => {
+  it("renders the native MQTT sidecar body (flipped off the embed) with the live tree", async () => {
     stubSidecarModuleFetch();
     renderModule("mqtt-scanner");
 
-    expect(await screen.findByTitle(/MQTT advanced scanner/i)).toBeInTheDocument();
-    expect(screen.queryByRole("navigation", { name: /Module steps/i })).toBeNull();
-    expect(screen.queryByLabelText(/Topic filter/i)).toBeNull();
+    // MQTT has flipped to native (PR-4): the live topic tree section and the
+    // capture topic-filter input are present, and the vendored iframe is gone.
+    expect(await screen.findByRole("heading", { name: /Live Topic Tree/i })).toBeInTheDocument();
+    expect(screen.getByLabelText(/Topic filter/i)).toBeInTheDocument();
+    expect(screen.queryByTitle(/MQTT advanced scanner/i)).toBeNull();
   });
 
   it("sends an MQTT dry-run preview instead of an unauthorized live capture", async () => {

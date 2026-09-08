@@ -47,7 +47,13 @@ from smart_commissioning_core.engines.ip_scanner_sidecar import (
     process_ip_scanner_run,
     register_rows_from_devices,
 )
-from smart_commissioning_core.engines.mqtt_scanner_sidecar import process_mqtt_scanner_run
+from smart_commissioning_core.engines.mqtt_scanner_sidecar import (
+    _register_csv as _mqtt_register_csv,  # shared serializer: rows -> the sidecar's 10-col CSV
+)
+from smart_commissioning_core.engines.mqtt_scanner_sidecar import (
+    process_mqtt_scanner_run,
+    register_rows_from_topics,
+)
 
 from app.api.routes.discovery import (
     _create_run,
@@ -62,6 +68,7 @@ from app.api.routes.discovery import (
 )
 from app.core.auth import AuthPrincipal, get_principal
 from app.core.config import get_settings
+from app.core.db import get_engine
 from app.core.scopes import require_project_site_access
 from app.schemas.imports import ImportBatchSummary
 from app.schemas.jobs import (
@@ -73,6 +80,7 @@ from app.schemas.jobs import (
 from app.services.engine_dispatch import is_dry_run
 from app.services.import_service import ImportService
 from app.services.mqtt_live_session import service as live_session_service
+from app.services.raw_evidence_artifacts import RawEvidenceArtifactStore
 from app.services.sidecar_supervisor import (
     BACNET_SCANNER,
     IP_SCANNER,
@@ -300,7 +308,11 @@ def dispatch_captured_mqtt_scanner_run(
             execution_mode="inline_local_fallback",
             throttle=_settings_throttle(frozen_parameters),
             dry_run=False,
-            persist_records=run_store.replace_devices,
+            # MQTT structured_records are topic-shaped ({topic, message_count,
+            # last_payload, attributes}); replace_topics keeps them (replace_devices
+            # dropped the non-column keys), so list_topics / results.topics / the
+            # reports lane / register-compare all read them.
+            persist_records=run_store.replace_topics,
             sidecar_client=lambda **_: captured,
             import_loader=ImportRepository(service.engine).get_accepted_rows,
         )
@@ -444,12 +456,40 @@ def create_mqtt_scanner_run(
             execution_mode="inline_local_fallback",
             throttle=_settings_throttle(frozen_parameters),
             dry_run=is_dry_run(frozen_parameters),
-            persist_records=run_store.replace_devices,
+            # Topic-shaped records -> topics collection (see the panel path above).
+            persist_records=run_store.replace_topics,
             sidecar_base_url=base_url,
             import_loader=ImportRepository(service.engine).get_accepted_rows,
+            # GAP-M6: attach the raw export ZIP as run raw evidence (best-effort).
+            raw_export_sink=lambda payload: _attach_mqtt_export_evidence(run.run_id, payload),
         )
 
     return _dispatch(run, enqueue=None, run_inline=run_inline, label="MQTT scanner")
+
+
+def _attach_mqtt_export_evidence(run_id: str, payload: bytes) -> str | None:
+    """GAP-M6 sink: persist the MQTT capture's export ZIP as run raw evidence.
+
+    Returns the artifact id (surfaced on ``result_summary.raw_evidence_artifact_id``
+    so the UI can offer a download through the existing raw-evidence route) or
+    ``None`` on any failure — evidence attach never fails the capture. Uses the
+    same protected-evidence store the Nmap lane uses; the run already exists, so
+    the spool binds to it. A payload above the store ceiling raises, which is
+    swallowed here (the parsed topics remain the primary evidence).
+    """
+    try:
+        descriptor = RawEvidenceArtifactStore(get_engine()).import_bytes(
+            run_id=run_id,
+            artifact_type="mqtt_export_archive",
+            media_type="application/zip",
+            payload=payload,
+            capture_complete=True,
+            producer_executor_id="mqtt_scanner_sidecar",
+        )
+        return descriptor.artifact_id
+    except Exception:  # noqa: BLE001 (evidence attach is advisory, never fatal)
+        logger.warning("mqtt export-archive evidence attach failed run_id=%s", run_id, exc_info=True)
+        return None
 
 
 def _optional_int(value: object) -> int | None:
@@ -670,6 +710,59 @@ def save_bacnet_scan_as_register(
     )
     logger.info(
         "bacnet scan saved as register run_id=%s import_id=%s rows=%d by=%s",
+        run_id,
+        summary.import_id,
+        summary.accepted_rows,
+        principal.username,
+    )
+    return summary
+
+
+@router.post(
+    "/mqtt_sidecar/runs/{run_id}/save-as-register",
+    response_model=ImportBatchSummary,
+    dependencies=[Depends(require_engineer)],
+)
+def save_mqtt_scan_as_register(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> ImportBatchSummary:
+    """Turn a succeeded MQTT scanner run's discovered assets into an mqtt_scanner_register.
+
+    GAP-M5, the MQTT mirror of :func:`save_ip_scan_as_register`: a DB read then a
+    DB write, no network I/O and no sidecar, so it skips the scan-authorization
+    consent gate and the inline-only 503 the live routes carry (both untrue here).
+    Rows are projected from the run's persisted topics (one per discovered asset),
+    then run through the same ``ImportService`` pipeline as an upload, so the
+    result is indistinguishable from an uploaded ``mqtt_scanner_register``; a later
+    MQTT capture for this project/site binds and RAG-compares against it.
+    """
+    run = _load_discovery_run(run_id, principal)  # scoped access + 404
+    if run.job_type != "mqtt_scanner":
+        raise HTTPException(status_code=404, detail="MQTT scanner run was not found.")
+    if run.status != "succeeded":
+        raise HTTPException(
+            status_code=409,
+            detail="Save as register requires a succeeded MQTT scanner run.",
+        )
+
+    topics = DiscoveryRepository(service.engine).list_topics(run_id)
+    rows = register_rows_from_topics(topics)
+    if not rows:
+        raise HTTPException(
+            status_code=409,
+            detail="This run recorded no discovered assets to save as a register.",
+        )
+
+    summary, _errors = ImportService(service.engine).create_import(
+        import_type="mqtt_scanner_register",
+        file_name=f"mqtt-scan-register-{run_id}.csv",
+        file_bytes=_mqtt_register_csv(rows).encode("utf-8"),
+        project_id=run.project_id,
+        site_id=run.site_id,
+    )
+    logger.info(
+        "mqtt scan saved as register run_id=%s import_id=%s rows=%d by=%s",
         run_id,
         summary.import_id,
         summary.accepted_rows,
