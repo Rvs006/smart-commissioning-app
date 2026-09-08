@@ -87,7 +87,6 @@ import {
   type ScanAuthorizationV1,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
-import { AdvancedScannerPanel } from "./AdvancedScannerPanel";
 import { MqttFocusedDetail } from "./MqttFocusedDetail";
 import { MqttLiveTopicTree } from "./MqttLiveTopicTree";
 import { MqttPublishModal } from "./MqttPublishModal";
@@ -338,14 +337,6 @@ const DISCOVERY_ROUTES = new Set([
 // inputs (e.g. IP range) and deliberately drop the sealed lanes' dry-run preview
 // step — true for all three whether they render native or embedded.
 const SIDECAR_DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-scanner", "mqtt-scanner"]);
-
-// Sidecar lanes still served by the embedded vendored UI (iframe + reverse
-// proxy). This set SHRINKS one protocol per PR as each goes native; the native
-// body renders for any sidecar route NOT in here. One-line rollback for a
-// protocol = add its route back to this set. IP (PR-1), BACnet (PR-3) and MQTT
-// (PR-4) have all flipped to native, so the set is empty — the embed/proxy path
-// stays intact behind it for a one-line per-protocol rollback.
-const EMBEDDED_SIDECAR_ROUTES = new Set<string>([]);
 
 // A large register can reject hundreds of rows. Render the first N and state the
 // honest remainder count rather than building pagination for a pre-1.0 fix:
@@ -645,10 +636,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // operator inputs (e.g. IP range) and deliberately drop the dry-run preview
   // step the sealed lanes use — true whether the lane renders native or embedded.
   const isSidecarDiscoveryModule = SIDECAR_DISCOVERY_ROUTES.has(module.route);
-  // Whether THIS sidecar lane is still served by the embedded vendored UI. IP,
-  // BACnet and MQTT have all gone native (EMBEDDED_SIDECAR_ROUTES is empty), so
-  // this is always false today; the flag stays for the one-line rollback path.
-  const isEmbeddedSidecarModule = EMBEDDED_SIDECAR_ROUTES.has(module.route);
   const requestedRunId = searchParams.get("run")?.trim() || null;
   const comparisonRunId = searchParams.get("compare")?.trim() || null;
   const setScopedRunUrl = useCallback(
@@ -1069,21 +1056,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryFn: ({ signal }) => getSystemInterfaces({ client: apiClient, signal }),
     queryKey: queryKeys.interfaces(sessionScopeId, workspaceRef),
   });
-  // MQTT config-in: the saved broker settings, to prefill the panel's connect
-  // modal (secrets left for the operator). Only when a broker host is configured.
-  const mqttPanelConfig = useMemo(() => {
-    const values = configurationQuery.data?.mqtt?.values;
-    const host = values?.["MQTT Broker FQDN or IP Address"];
-    if (!values || !host) return undefined;
-    return {
-      host,
-      port: values["Port"] ?? "",
-      tls: (values["Use TLS"] ?? "").toLowerCase().startsWith("enab"),
-      clientId: values["Client ID"] ?? "",
-      username: values["MQTT Username"] ?? "",
-      qos: (values["QoS"] ?? "").trim().charAt(0),
-    };
-  }, [configurationQuery.data]);
   const autoSubnetApplied = useRef(false);
   useEffect(() => {
     if (module.route !== "ip-scanner" || autoSubnetApplied.current) return;
@@ -4826,29 +4798,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   return (
     <div className="app-page">
-      {isEmbeddedSidecarModule ? (
-        // Embed-only single page: for the still-embedded sidecar modules (BACnet,
-        // MQTT) the vendored scanner IS the module - one Scan surface, no
-        // Setup/Run/Results doors. Results-out and compare still persist real runs
-        // behind it, so run history and reports (reached from the Reports module)
-        // stay populated. The native body below is not rendered here, so its
-        // queries never fire. IP has flipped to the native body (see the flip set).
-        <>
-          <h2 className="visually-hidden" ref={pageHeadingRef} tabIndex={-1}>
-            {workspace?.title ?? module.title}
-          </h2>
-          <section className="surface embed-only-scan">
-            <AdvancedScannerPanel
-              proto={module.route.replace("-scanner", "")}
-              projectId={workspaceRef.projectId}
-              siteId={workspaceRef.siteId}
-              sourceInterfaceCidr={sourceInterfaceCidr}
-              mqttConfig={mqttPanelConfig}
-            />
-          </section>
-        </>
-      ) : (
-        <>
+      <>
       <section
         aria-label="Current run summary"
         className={`module-hero${isUdmiValidation ? " module-hero-workbench" : ""}`}
@@ -8717,7 +8667,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         )}
       </div>
         </>
-      )}
     </div>
   );
 }
