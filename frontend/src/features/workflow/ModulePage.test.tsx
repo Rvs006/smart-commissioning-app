@@ -1231,6 +1231,18 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.getByLabelText(/Ignore register for this run/i)).toBeInTheDocument();
   });
 
+  it("renders the native BACnet sidecar body (flipped off the embed) with the run form", async () => {
+    stubSidecarModuleFetch();
+    renderModule("bacnet-scanner");
+
+    // BACnet has flipped to native (PR-3): the GAP-B1 config strip is present and
+    // the vendored iframe is gone.
+    expect(await screen.findByLabelText(/Device instance range — low/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Device instance range — high/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Discovery window/i)).toBeInTheDocument();
+    expect(screen.queryByTitle(/BACnet advanced scanner/i)).toBeNull();
+  });
+
   it("makes the embedded scanner the whole MQTT sidecar module (no native run form)", async () => {
     stubSidecarModuleFetch();
     renderModule("mqtt-scanner");

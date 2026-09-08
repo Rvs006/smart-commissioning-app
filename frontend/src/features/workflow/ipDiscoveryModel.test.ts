@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyScanAuthorization,
   formatBacnetRouters,
+  formatBacnetSidecarSummaryCards,
   formatIpHeadlineMetrics,
   formatIpSidecarSummaryCards,
   serializeIpTargetRows,
@@ -234,5 +235,46 @@ describe("IP sidecar summary cards (GAP-C2)", () => {
     expect(formatIpSidecarSummaryCards({})).toBeNull();
     expect(formatIpSidecarSummaryCards(undefined)).toBeNull();
     expect(formatIpSidecarSummaryCards({ scanner: "ip_scanner_sidecar" })).toBeNull();
+  });
+});
+
+describe("BACnet sidecar summary cards (GAP-C2)", () => {
+  it("reads the four totals the bacnet_scanner engine stamps on result_summary", () => {
+    expect(
+      formatBacnetSidecarSummaryCards({
+        devices_discovered: 8,
+        points_exported: 214,
+        register_matches: 6,
+        register_rogue: 1,
+        scanner: "bacnet_scanner",
+      }),
+    ).toEqual([
+      { heading: "Discovered", value: "8" },
+      { heading: "Points", value: "214" },
+      { heading: "Matches", value: "6" },
+      { heading: "Rogue", value: "1" },
+    ]);
+  });
+
+  it("renders a present-but-null field as a dash, never a fabricated count", () => {
+    expect(
+      formatBacnetSidecarSummaryCards({
+        devices_discovered: 3,
+        points_exported: null,
+        register_matches: null,
+        register_rogue: 0,
+      }),
+    ).toEqual([
+      { heading: "Discovered", value: "3" },
+      { heading: "Points", value: "—" },
+      { heading: "Matches", value: "—" },
+      { heading: "Rogue", value: "0" },
+    ]);
+  });
+
+  it("returns null when no total is present (dry-run / older / failed run: no strip)", () => {
+    expect(formatBacnetSidecarSummaryCards({})).toBeNull();
+    expect(formatBacnetSidecarSummaryCards(undefined)).toBeNull();
+    expect(formatBacnetSidecarSummaryCards({ scanner: "bacnet_scanner" })).toBeNull();
   });
 });

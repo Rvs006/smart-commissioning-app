@@ -40,6 +40,7 @@ import {
   getValidationRun,
   getImportTemplatePath,
   getReportDownloadPath,
+  getBacnetExportAssetsPath,
   getSystemInterfaces,
   REPORTS_EXPORT_PATH,
   getUdmiSchemaTemplatePath,
@@ -55,6 +56,7 @@ import {
   startBacnetPropertyRun,
   browseBacnetScannerObjects,
   saveIpScanRunAsRegister,
+  saveBacnetScanRunAsRegister,
   startDiscoveryPreview,
   startDiscoveryRun,
   startValidationRun,
@@ -103,6 +105,7 @@ import {
 } from "./operatorData";
 import {
   bacnetBackendLabel,
+  bacnetDeviceDetailItems,
   discoveryEmptyStateFor,
   discoveryMetrics,
   discoveryViewFor,
@@ -181,6 +184,7 @@ import {
   formatIpSidecarSummaryCards,
   formatBacnetHeadlineMetrics,
   formatBacnetRouters,
+  formatBacnetSidecarSummaryCards,
   serializeIpTargetRows,
   type IpTargetRow,
   type IpHeadlineMetricDisplay,
@@ -334,8 +338,9 @@ const SIDECAR_DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-scanner", "mqtt-
 // Sidecar lanes still served by the embedded vendored UI (iframe + reverse
 // proxy). This set SHRINKS one protocol per PR as each goes native; the native
 // body renders for any sidecar route NOT in here. One-line rollback for a
-// protocol = add its route back to this set.
-const EMBEDDED_SIDECAR_ROUTES = new Set(["bacnet-scanner", "mqtt-scanner"]);
+// protocol = add its route back to this set. IP (PR-1) and BACnet (PR-3) have
+// flipped to native; MQTT stays embedded until PR-4.
+const EMBEDDED_SIDECAR_ROUTES = new Set(["mqtt-scanner"]);
 
 // A large register can reject hundreds of rows. Render the first N and state the
 // honest remainder count rather than building pagination for a pre-1.0 fix:
@@ -635,8 +640,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // operator inputs (e.g. IP range) and deliberately drop the dry-run preview
   // step the sealed lanes use — true whether the lane renders native or embedded.
   const isSidecarDiscoveryModule = SIDECAR_DISCOVERY_ROUTES.has(module.route);
-  // Whether THIS sidecar lane is still served by the embedded vendored UI. IP has
-  // gone native (removed from EMBEDDED_SIDECAR_ROUTES); BACnet/MQTT still embed.
+  // Whether THIS sidecar lane is still served by the embedded vendored UI. IP and
+  // BACnet have gone native (removed from EMBEDDED_SIDECAR_ROUTES); MQTT still embeds.
   const isEmbeddedSidecarModule = EMBEDDED_SIDECAR_ROUTES.has(module.route);
   const requestedRunId = searchParams.get("run")?.trim() || null;
   const comparisonRunId = searchParams.get("compare")?.trim() || null;
@@ -712,6 +717,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // without RAG. Forwarded as parameters.ignore_register; the route's register
   // binder then skips freezing a register into this run.
   const [ipIgnoreRegister, setIpIgnoreRegister] = useState(false);
+  // GAP-B1: BACnet sidecar per-run inputs the vendored tool exposed. Device
+  // instance range (low/high) narrows the Who-Is; blank = a global Who-Is (the
+  // sidecar default). Discovery window (discoverMs) bounds how long the scan
+  // listens for I-Am replies. All forwarded as run parameters (low/high/discoverMs);
+  // the adapter's _scan_query omits any blank key so the engine default applies.
+  const [bacnetInstanceLow, setBacnetInstanceLow] = useState("");
+  const [bacnetInstanceHigh, setBacnetInstanceHigh] = useState("");
+  const [bacnetDiscoverMs, setBacnetDiscoverMs] = useState("");
   const [scanTargetRows, setScanTargetRows] = useState<IpTargetRow[]>([]);
   const [scanExclusionRows, setScanExclusionRows] = useState<IpTargetRow[]>([]);
   const [scanPreviewRunId, setScanPreviewRunId] = useState<string | null>(null);
@@ -887,6 +900,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const captureExportDownload = useFileDownload(apiClient);
   const generatedAllBundleDownload = useFileDownload(apiClient);
   const validationJsonDownload = useFileDownload(apiClient);
+  // GAP-B3: the BACnet per-asset export ZIP download (rebuilt server-side from the
+  // run's persisted devices+points; no live I/O).
+  const bacnetAssetsDownload = useFileDownload(apiClient);
   const schemaTemplateDownload = useFileDownload(apiClient);
   const activeRunMatchesReservedLiveSubmission = Boolean(
     activeRun &&
@@ -1026,13 +1042,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     return undefined;
   }, [configurationQuery.data]);
-  // No-function-loss: the vendored IP tool showed the selected NIC (IPv4, mask,
-  // gateway, DNS) on its own scan page. The native lane reads the adapter from
-  // Configuration (single source of truth), so surface it read-only on the module
-  // too, so the operator still SEES which NIC scans send from. IP module only —
-  // gated so the query never fires on unrelated module pages.
+  // No-function-loss: the vendored IP and BACnet tools showed the selected NIC
+  // (IPv4, mask, gateway, DNS) on their own scan page. The native lanes read the
+  // adapter from Configuration (single source of truth), so surface it read-only
+  // on the module too, so the operator still SEES which NIC scans send from
+  // (BACnet fails hard on a NIC mismatch, so seeing it matters). IP + BACnet
+  // sidecar modules only — gated so the query never fires on unrelated pages.
   const systemInterfacesQuery = useQuery({
-    enabled: module.route === "ip-scanner",
+    enabled: module.route === "ip-scanner" || module.route === "bacnet-scanner",
     queryFn: ({ signal }) => getSystemInterfaces({ client: apiClient, signal }),
     queryKey: queryKeys.interfaces(sessionScopeId, workspaceRef),
   });
@@ -2456,6 +2473,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               scanRangeEnd: ipScanRangeEnd,
               probeTimeout: ipProbeTimeout,
               ignoreRegister: ipIgnoreRegister,
+              bacnetInstanceLow,
+              bacnetInstanceHigh,
+              bacnetDiscoverMs,
             }),
             runKind: action.runKind,
             workspace: workspaceRef,
@@ -2757,13 +2777,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setObjectBrowseResult(null);
   }, [detailRow]);
 
-  // ip-scanner: turn this scan into a reusable ip_scanner_register. The created
-  // import is byte-identical to an upload, so the next IP scan for this
-  // project/site binds and RAG-compares against it.
+  // ip-scanner / bacnet-scanner: turn this scan into a reusable register import.
+  // The created import is byte-identical to an upload, so the next scan of that
+  // protocol for this project/site binds and RAG-compares against it. GAP-B4
+  // routes the BACnet lane to its own save-as-register endpoint; the two return
+  // the same ImportBatchSummary, so one mutation + one set of panels serve both.
   const saveRegisterMutation = useMutation({
-    mutationKey: mutationKeys.action(sessionScopeId, "ip-scanner.save-register"),
+    mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.save-register`),
     mutationFn: (runId: string) =>
-      saveIpScanRunAsRegister({ context: { client: apiClient }, runId }),
+      module.route === "bacnet-scanner"
+        ? saveBacnetScanRunAsRegister({ context: { client: apiClient }, runId })
+        : saveIpScanRunAsRegister({ context: { client: apiClient }, runId }),
     onSuccess: (summary) => {
       setSavedRegister(summary);
       // Mirror importMutation.onSuccess: refresh the "register on file" note.
@@ -3597,6 +3621,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
 
+  // GAP-C2 (BACnet): the native BACnet sidecar lane's four-card summary strip.
+  // The sidecar engine records its totals directly on result_summary
+  // (devices_discovered / points_exported / register_matches / register_rogue),
+  // not the sealed bacnet_headline_metrics_v1 snapshot, so bacnetHeadlineMetrics
+  // above is null here; read them straight. Gated to a terminal bacnet-scanner run.
+  const bacnetSidecarSummaryCards = useMemo<IpSidecarSummaryCard[] | null>(() => {
+    if (module.route !== "bacnet-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
+      return null;
+    }
+    return formatBacnetSidecarSummaryCards(discoveryResultsQuery.data.result_summary);
+  }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
+
   // Sidecar-only router/BBMD visibility: bacnet_scanner stamps result_summary.routers
   // (the built-in engine never does). null = no router section at all (absent key);
   // [] = the scan heard no router (render the "none responded" note).
@@ -3607,10 +3643,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     return formatBacnetRouters(discoveryResultsQuery.data.result_summary.routers);
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
 
-  // ip-scanner save-as-register is offered only once a scan has succeeded and
-  // recorded responding devices (a failed/empty/dry-run scan has nothing to save).
+  // ip-scanner / bacnet-scanner save-as-register (and BACnet export-assets) are
+  // offered only once a scan has succeeded and recorded devices (a failed/empty/
+  // dry-run scan has nothing to save or export).
   const saveableDeviceCount =
-    module.route === "ip-scanner" && activeRunStatus === "succeeded"
+    (module.route === "ip-scanner" || module.route === "bacnet-scanner") &&
+    activeRunStatus === "succeeded"
       ? (discoveryResultsQuery.data?.devices?.length ?? 0)
       : 0;
 
@@ -4839,6 +4877,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             ))}
           </section>
         )}
+        {bacnetSidecarSummaryCards && (
+          <section className="ip-headline-metrics" aria-label="BACnet scan summary">
+            {bacnetSidecarSummaryCards.map((card) => (
+              <article key={card.heading}>
+                <strong>{card.value}</strong>
+                <span>{card.heading}</span>
+              </article>
+            ))}
+          </section>
+        )}
         {bacnetHeadlineMetrics && (
           <section className="ip-headline-metrics" aria-label="BACnet discovery headline metrics">
             {bacnetHeadlineMetrics.map((metric) => (
@@ -5202,6 +5250,52 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           type="checkbox"
                         />
                         Ignore register for this run (scan without RAG comparison)
+                      </label>
+                    </div>
+                  )}
+                  {module.route === "bacnet-scanner" && (
+                    <div className="form-stack">
+                      <div>
+                        <strong className="eyebrow">Source Interface</strong>
+                        <SourceInterfaceDetails
+                          enumerationFailed={systemInterfacesQuery.isError}
+                          enumerationPending={systemInterfacesQuery.isLoading}
+                          interfaces={
+                            Array.isArray(systemInterfacesQuery.data)
+                              ? systemInterfacesQuery.data
+                              : []
+                          }
+                          value={sourceInterfaceCidr ?? ""}
+                        />
+                      </div>
+                      <label>
+                        Device instance range — low
+                        <input
+                          inputMode="numeric"
+                          onChange={(event) => setBacnetInstanceLow(event.target.value)}
+                          placeholder="e.g. 1000"
+                          value={bacnetInstanceLow}
+                        />
+                      </label>
+                      <label>
+                        Device instance range — high
+                        <input
+                          inputMode="numeric"
+                          onChange={(event) => setBacnetInstanceHigh(event.target.value)}
+                          placeholder="e.g. 1999"
+                          value={bacnetInstanceHigh}
+                        />
+                        <small>Leave both blank for a global Who-Is across all device instances.</small>
+                      </label>
+                      <label>
+                        Discovery window (ms)
+                        <input
+                          inputMode="numeric"
+                          onChange={(event) => setBacnetDiscoverMs(event.target.value)}
+                          placeholder="e.g. 5000"
+                          value={bacnetDiscoverMs}
+                        />
+                        <small>How long to listen for I-Am replies. Blank uses the default window.</small>
                       </label>
                     </div>
                   )}
@@ -7238,19 +7332,48 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <h3>{workspace?.tableTitle ?? "Workflow Results"}</h3>
                 </div>
                 <div className="inline-actions">
-                  {module.route === "ip-scanner" && (
+                  {(module.route === "ip-scanner" || module.route === "bacnet-scanner") && (
                     <button
                       className="secondary-button compact"
                       disabled={!canEngineer || !saveableDeviceCount || saveRegisterMutation.isPending}
                       onClick={() => activeRun && saveRegisterMutation.mutate(activeRun.runId)}
                       title={
                         canEngineer
-                          ? "Turn this scan's responding devices into an expected-device register (their open ports become the expected ports)."
+                          ? module.route === "bacnet-scanner"
+                            ? "Turn this scan's discovered devices into an expected-device register (their reported object counts become the expected objects)."
+                            : "Turn this scan's responding devices into an expected-device register (their open ports become the expected ports)."
                           : ENGINEER_REQUIRED_TOOLTIP
                       }
                       type="button"
                     >
                       {saveRegisterMutation.isPending ? "Saving register..." : "Save scan as register"}
+                    </button>
+                  )}
+                  {module.route === "bacnet-scanner" && (
+                    <button
+                      className="secondary-button compact"
+                      disabled={
+                        !canEngineer || !saveableDeviceCount || bacnetAssetsDownload.pendingKey !== null
+                      }
+                      onClick={() => {
+                        if (activeRun) {
+                          void bacnetAssetsDownload.download({
+                            fallbackFilename: `bacnet-assets-${activeRun.runId}.zip`,
+                            key: "bacnet-assets",
+                            path: getBacnetExportAssetsPath(activeRun.runId),
+                          });
+                        }
+                      }}
+                      title={
+                        canEngineer
+                          ? "Download every discovered device's object list as per-asset JSON + XLSX (one folder each) in a ZIP, rebuilt from this run's saved results."
+                          : ENGINEER_REQUIRED_TOOLTIP
+                      }
+                      type="button"
+                    >
+                      {bacnetAssetsDownload.pendingKey === "bacnet-assets"
+                        ? "Exporting assets..."
+                        : "Export assets"}
                     </button>
                   )}
                   <button
@@ -7275,24 +7398,33 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </div>
               </div>
 
-              {module.route === "ip-scanner" && savedRegister && (
-                <div className="state-panel success" role="status">
-                  <strong>Saved as register</strong>
-                  <span>
-                    {savedRegister.file_name}: {savedRegister.accepted_rows} of{" "}
-                    {savedRegister.total_rows} rows accepted ({savedRegister.import_id}). The next IP
-                    Discovery run for this project and site will compare against it.
-                  </span>
-                </div>
-              )}
-              {module.route === "ip-scanner" && saveRegisterMutation.isError && (
+              {(module.route === "ip-scanner" || module.route === "bacnet-scanner") &&
+                savedRegister && (
+                  <div className="state-panel success" role="status">
+                    <strong>Saved as register</strong>
+                    <span>
+                      {savedRegister.file_name}: {savedRegister.accepted_rows} of{" "}
+                      {savedRegister.total_rows} rows accepted ({savedRegister.import_id}). The next{" "}
+                      {module.route === "bacnet-scanner" ? "BACnet" : "IP"} Discovery run for this
+                      project and site will compare against it.
+                    </span>
+                  </div>
+                )}
+              {(module.route === "ip-scanner" || module.route === "bacnet-scanner") &&
+                saveRegisterMutation.isError && (
+                  <div className="state-panel error" role="alert">
+                    <strong>Save as register failed</strong>
+                    <span>
+                      {saveRegisterMutation.error instanceof Error
+                        ? saveRegisterMutation.error.message
+                        : "The register could not be created."}
+                    </span>
+                  </div>
+                )}
+              {module.route === "bacnet-scanner" && bacnetAssetsDownload.error && (
                 <div className="state-panel error" role="alert">
-                  <strong>Save as register failed</strong>
-                  <span>
-                    {saveRegisterMutation.error instanceof Error
-                      ? saveRegisterMutation.error.message
-                      : "The register could not be created."}
-                  </span>
+                  <strong>Export assets failed</strong>
+                  <span>{bacnetAssetsDownload.error}</span>
                 </div>
               )}
 
@@ -7779,6 +7911,46 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         String((candidate as Record<string, unknown>).address ?? "") === ip,
                     );
                     const items = ipDeviceDetailItems(
+                      device?.attributes as Record<string, unknown> | undefined,
+                    );
+                    if (items.length === 0) {
+                      return null;
+                    }
+                    return (
+                      <div className="detail-actions">
+                        <div className="property-expansion-panel">
+                          <strong>Device attributes</strong>
+                          <div className="detail-list">
+                            {items.map((item) => (
+                              <div className="detail-row" key={item.label}>
+                                <span>{item.label}</span>
+                                <strong>{item.value}</strong>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                {module.route === "bacnet-scanner" &&
+                  (() => {
+                    // GAP-B2: the persisted device record for this row, matched by
+                    // device instance (the row's Address may carry a :port, so the
+                    // instance is the stable key). The results table shows the
+                    // compact columns; the drawer renders the richer identity +
+                    // register-check attributes the engine now persists (Max APDU,
+                    // Segmentation, Protocol Rev, App SW, name check, objectDiff).
+                    // Absent for a row not in devices[], so the panel is omitted.
+                    const instance = detailRow.Instance;
+                    const device = discoveryResultsQuery.data?.devices?.find(
+                      (candidate) =>
+                        String(
+                          ((candidate as Record<string, unknown>).attributes as
+                            | Record<string, unknown>
+                            | undefined)?.device_instance ?? "",
+                        ) === instance,
+                    );
+                    const items = bacnetDeviceDetailItems(
                       device?.attributes as Record<string, unknown> | undefined,
                     );
                     if (items.length === 0) {
@@ -9711,7 +9883,8 @@ function scanPortSpecification(ports: ScanPort[]): string {
 // Builds discovery run parameters, attaching the authorization contract for
 // real scans and the dry_run flag for previews. IP scans also carry the port
 // specification. Mirrors the backend safety contract (parameters.authorized).
-function buildDiscoveryParameters(
+// eslint-disable-next-line react-refresh/only-export-components -- pure param builder exported for buildDiscoveryParameters.test.ts; it renders nothing.
+export function buildDiscoveryParameters(
   action: Extract<ModuleRunAction, { kind: "discovery" }>,
   options: {
     authorized: boolean;
@@ -9728,6 +9901,9 @@ function buildDiscoveryParameters(
     scanRangeEnd?: string;
     probeTimeout?: string;
     ignoreRegister?: boolean;
+    bacnetInstanceLow?: string;
+    bacnetInstanceHigh?: string;
+    bacnetDiscoverMs?: string;
   },
 ): Record<string, unknown> {
   const parameters: Record<string, unknown> = {};
@@ -9808,6 +9984,36 @@ function buildDiscoveryParameters(
     // reads this and skips freezing a register in.
     if (options.ignoreRegister) {
       parameters.ignore_register = true;
+    }
+  }
+  // GAP-B1: BACnet sidecar lane. Forward the operator's device-instance range as
+  // low/high and the discovery window as discoverMs (the adapter's _scan_query
+  // reads exactly these keys). Only positive finite values go on the wire; a blank
+  // or garbage field omits the key so the sidecar's own default applies (a blank
+  // range is a global Who-Is). low/high are BACnet device instances (0 is a valid
+  // instance, so >= 0), discoverMs is a duration (> 0).
+  if (action.runKind === "bacnet_sidecar") {
+    // Number("") === 0, so coercing before the blank check would send low:0 /
+    // high:0 for an untouched field and pin the Who-Is to instance range [0,0]
+    // (the sidecar's normal case is BOTH blank = global Who-Is). Guard on the
+    // raw trimmed string being non-empty FIRST so a blank field omits the key.
+    const lowRaw = (options.bacnetInstanceLow ?? "").trim();
+    if (lowRaw !== "") {
+      const low = Number(lowRaw);
+      if (Number.isInteger(low) && low >= 0) {
+        parameters.low = low;
+      }
+    }
+    const highRaw = (options.bacnetInstanceHigh ?? "").trim();
+    if (highRaw !== "") {
+      const high = Number(highRaw);
+      if (Number.isInteger(high) && high >= 0) {
+        parameters.high = high;
+      }
+    }
+    const discoverMs = Number((options.bacnetDiscoverMs ?? "").trim());
+    if (Number.isFinite(discoverMs) && discoverMs > 0) {
+      parameters.discoverMs = discoverMs;
     }
   }
   // MQTT discovery: forward the operator's topic filter and capture window so

@@ -248,6 +248,48 @@ export function ipDeviceDetailItems(
   return items;
 }
 
+// GAP-B2: the persisted per-device attributes for the BACnet results row-detail
+// drawer (shares the IP drawer pattern). The results table shows the compact
+// columns; the richer identity + register-check fields the bacnet_scanner engine
+// now persists (Max APDU, Segmentation, Protocol Rev, App SW, System Status, the
+// name check expected-vs-reported, objectDiff) nest on the structured device's
+// `attributes`. Blank fields are dropped (no "—" filler), and only these named
+// keys are surfaced — never fabricated. `name` is the reported device name (from
+// the row above); expected_name pairs with name_status for the name check.
+export function bacnetDeviceDetailItems(
+  attributes: Record<string, unknown> | undefined | null,
+): { label: string; value: string }[] {
+  if (!attributes || typeof attributes !== "object") {
+    return [];
+  }
+  const items: { label: string; value: string }[] = [];
+  const scalar = (label: string, key: string) => {
+    const value = attributes[key];
+    if (value !== null && value !== undefined && value !== "") {
+      items.push({ label, value: str(value) });
+    }
+  };
+  scalar("RAG", "rag");
+  scalar("Register", "register_state");
+  scalar("Network", "network");
+  scalar("MAC", "mac");
+  scalar("Vendor ID", "vendor_id");
+  scalar("System status", "system_status");
+  scalar("Max APDU", "max_apdu");
+  scalar("Segmentation", "segmentation");
+  scalar("Protocol revision", "protocol_revision");
+  scalar("Application software", "app_software");
+  scalar("Firmware", "firmware");
+  scalar("Object count", "object_count");
+  scalar("Name check", "name_status");
+  scalar("Expected name", "expected_name");
+  scalar("Object diff", "object_diff");
+  scalar("Register mismatch", "mismatch");
+  scalar("Location", "location");
+  scalar("Description", "description");
+  return items;
+}
+
 // BACnet device rows come from the structured devices[] (with per-engine
 // attributes carrying device_instance / point_count / vendor_id).
 export function bacnetRowsFromResults(

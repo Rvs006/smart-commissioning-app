@@ -266,6 +266,37 @@ export function formatIpSidecarSummaryCards(
   });
 }
 
+// GAP-C2 (BACnet): the four-card summary strip for the native BACnet sidecar
+// lane. The bacnet_scanner engine stamps these totals straight onto
+// result_summary (devices_discovered / points_exported / register_matches /
+// register_rogue), so read them directly, exactly like the IP variant. Same
+// null-when-none / "—"-for-null-field contract so a dry-run or an older run
+// omits the strip rather than faking counts.
+const BACNET_SIDECAR_SUMMARY_FIELDS = [
+  ["Discovered", "devices_discovered"],
+  ["Points", "points_exported"],
+  ["Matches", "register_matches"],
+  ["Rogue", "register_rogue"],
+] as const;
+
+export function formatBacnetSidecarSummaryCards(
+  summary: Record<string, unknown> | null | undefined,
+): IpSidecarSummaryCard[] | null {
+  if (!summary || typeof summary !== "object") {
+    return null;
+  }
+  const anyPresent = BACNET_SIDECAR_SUMMARY_FIELDS.some(
+    ([, key]) => typeof summary[key] === "number",
+  );
+  if (!anyPresent) {
+    return null;
+  }
+  return BACNET_SIDECAR_SUMMARY_FIELDS.map(([heading, key]) => {
+    const value = summary[key];
+    return { heading, value: typeof value === "number" ? String(value) : "—" };
+  });
+}
+
 /**
  * Project `result_summary.routers` (stamped by the bacnet_scanner engine) into
  * display rows. Returns null when the key is absent or not a list — a pre-router

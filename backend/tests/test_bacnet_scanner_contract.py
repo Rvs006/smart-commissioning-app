@@ -25,7 +25,9 @@ from smart_commissioning_core.engines.bacnet_scanner_sidecar import (
     _register_csv,
     _routers_from_fold,
     _scan_query,
+    build_export_assets,
     map_browse_objects,
+    register_rows_from_devices,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -313,6 +315,130 @@ class ScanQueryContractTest(unittest.TestCase):
 
     def test_blank_range_is_global_who_is(self) -> None:
         self.assertEqual(_scan_query({}), {})
+
+
+# The eight device-detail fields the vendored row carries (server.js compare())
+# that GAP-B2 now persists, paired with the snake_case attribute key each maps to.
+GAP_B2_ROW_FIELDS: tuple[tuple[str, str], ...] = (
+    ("maxApdu", "max_apdu"),
+    ("segmentation", "segmentation"),
+    ("protocolRevision", "protocol_revision"),
+    ("appSoftware", "app_software"),
+    ("nameStatus", "name_status"),
+    ("expectedName", "expected_name"),
+    ("objectDiff", "object_diff"),
+    ("mismatch", "mismatch"),
+)
+
+
+class DeviceDetailFieldContractTest(unittest.TestCase):
+    """GAP-B2: the fields the native row-detail drawer renders round-trip."""
+
+    def test_every_field_is_emitted_by_the_vendored_row(self) -> None:
+        # If upstream renames one of these the adapter silently blanks that detail
+        # cell — pin the camelCase source keys so a rename fails here instead.
+        for row_key, _attr_key in GAP_B2_ROW_FIELDS:
+            self.assertIn(row_key, _SERVER_JS, f"row field '{row_key}' missing from server.js")
+
+    def test_adapter_persists_the_eight_fields_into_attributes(self) -> None:
+        rows = [{
+            "instance": 1001, "register": "partial", "rag": "amber", "status": "reachable",
+            "ip": "10.0.0.11", "name": "AHU-1", "vendor": "Acme", "model": "V1", "firmware": "1.2",
+            "maxApdu": 1476, "segmentation": "both", "protocolRevision": 19,
+            "appSoftware": "v3.1", "nameStatus": "mismatch", "expectedName": "AHU-01",
+            "objectDiff": "expected 5, found 4", "mismatch": "name, object count",
+        }]
+        result = _map_result(rows, {}, [], {"project_id": "p", "site_id": "s"})
+        device = next(r for r in result.structured_records if "device_ref" not in r)
+        attributes = device["attributes"]
+        expected = {
+            "max_apdu": 1476, "segmentation": "both", "protocol_revision": 19,
+            "app_software": "v3.1", "name_status": "mismatch", "expected_name": "AHU-01",
+            "object_diff": "expected 5, found 4", "mismatch": "name, object count",
+        }
+        for attr_key, value in expected.items():
+            self.assertEqual(attributes[attr_key], value, attr_key)
+
+    def test_absent_fields_persist_as_none_never_fabricated(self) -> None:
+        rows = [{"instance": 5, "register": "rogue", "rag": "red", "status": "rogue", "ip": "10.0.0.5"}]
+        device = next(
+            r for r in _map_result(rows, {}, [], {}).structured_records if "device_ref" not in r
+        )
+        for _row_key, attr_key in GAP_B2_ROW_FIELDS:
+            self.assertIsNone(device["attributes"][attr_key], attr_key)
+
+
+class SaveAsRegisterContractTest(unittest.TestCase):
+    """GAP-B4: persisted devices -> the 9-column register CSV (round-trip)."""
+
+    def _devices(self) -> list[dict[str, object]]:
+        rows = [
+            {"instance": 1001, "register": "match", "rag": "green", "status": "reachable",
+             "ip": "10.0.0.11:47809", "name": "AHU-1", "vendor": "Acme", "model": "V1",
+             "network": 0, "objectCount": 12, "location": "Roof"},
+            {"instance": 9, "register": "missing", "rag": "red", "status": "unreachable", "ip": "—"},
+        ]
+        return [r for r in _map_result(rows, {}, [], {}).structured_records if "device_ref" not in r]
+
+    def test_rows_use_the_golden_columns_and_strip_port(self) -> None:
+        rows = register_rows_from_devices(self._devices())
+        self.assertEqual(len(rows), 1)  # the missing device is not a saveable row
+        row = rows[0]
+        self.assertEqual(set(row), set(GOLDEN_REGISTER_COLUMNS))
+        self.assertEqual(row["Device Instance"], "1001")
+        self.assertEqual(row["IP Address"], "10.0.0.11")  # port stripped
+        self.assertEqual(row["Network"], "0")
+        self.assertEqual(row["Expected Objects"], "12")  # GAP-B2 object_count
+
+    def test_rows_reserialize_to_the_sidecar_csv(self) -> None:
+        csv_text = _register_csv(register_rows_from_devices(self._devices()))
+        self.assertEqual(csv_text.splitlines()[0], ",".join(GOLDEN_REGISTER_COLUMNS))
+        self.assertIn("1001", csv_text)
+
+
+class ExportAssetsContractTest(unittest.TestCase):
+    """GAP-B3: per-asset export rebuilt from persisted devices+points, no I/O."""
+
+    def _run_records(self) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        rows = [{"instance": 1001, "register": "match", "rag": "green", "status": "reachable",
+                 "ip": "10.0.0.11", "name": "AHU-1", "vendor": "Acme", "model": "V1",
+                 "firmware": "1.2", "network": 0, "objectCount": 2}]
+        device_files = [{"deviceInstance": 1001, "points": [
+            {"objectType": "analog-input", "objectInstance": 1, "name": "SAT",
+             "presentValue": "18.60", "units": "degreesCelsius"},
+            {"objectType": "binary-output", "objectInstance": 1, "name": "FanCmd",
+             "presentValue": "active", "units": ""},
+        ]}]
+        records = _map_result(rows, {}, device_files, {}).structured_records
+        devices = [r for r in records if "device_ref" not in r]
+        points = [r for r in records if "device_ref" in r]
+        return devices, points
+
+    def test_rebuilds_asset_json_from_evidence(self) -> None:
+        devices, points = self._run_records()
+        assets = build_export_assets(devices, points)
+        self.assertEqual(len(assets), 1)
+        asset = assets[0]
+        self.assertEqual(asset["base"], "AHU-1_1001")
+        doc = asset["json"]
+        # The rebuilt JSON matches the vendored buildDeviceFiles shape.
+        self.assertLessEqual(GOLDEN_ASSET_FIELDS - {"truncated", "exportedAt"}, set(doc))
+        self.assertEqual(doc["deviceInstance"], 1001)
+        self.assertEqual(doc["pointsExported"], 2)
+        self.assertEqual(doc["points"][0]["presentValue"], "18.60")  # unwrapped from observed_value
+        self.assertEqual(set(doc["points"][0]), GOLDEN_POINT_FIELDS)
+
+    def test_xlsx_rows_carry_the_points_header(self) -> None:
+        devices, points = self._run_records()
+        rows = build_export_assets(devices, points)[0]["xlsx_rows"]
+        self.assertIn(["Object Type", "Instance", "Object Name", "Present Value", "Units"], rows)
+
+    def test_device_with_no_points_still_exports(self) -> None:
+        rows = [{"instance": 7, "register": "rogue", "rag": "red", "status": "rogue", "ip": "10.0.0.7"}]
+        devices = [r for r in _map_result(rows, {}, [], {}).structured_records if "device_ref" not in r]
+        assets = build_export_assets(devices, [])
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0]["json"]["pointsExported"], 0)
 
 
 if __name__ == "__main__":

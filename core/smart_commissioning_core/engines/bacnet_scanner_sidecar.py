@@ -338,6 +338,21 @@ def _map_result(
                             "vendor_id": row.get("vendorId"),
                             "system_status": row.get("systemStatus"),
                             "object_count": row.get("objectCount"),
+                            # GAP-B2: the identity + register-check fields the
+                            # vendored device-detail panel showed (server.js row)
+                            # that the SCT projection was dropping. Persisted
+                            # snake_case, matching the siblings above, so the
+                            # native row-detail drawer can render them and
+                            # save-as-register keys Expected Objects off
+                            # object_count. Pure mapping; scan/RAG logic unchanged.
+                            "max_apdu": row.get("maxApdu"),
+                            "segmentation": row.get("segmentation"),
+                            "protocol_revision": row.get("protocolRevision"),
+                            "app_software": row.get("appSoftware"),
+                            "name_status": row.get("nameStatus"),
+                            "expected_name": row.get("expectedName"),
+                            "object_diff": row.get("objectDiff"),
+                            "mismatch": row.get("mismatch"),
                             "location": row.get("location"),
                             "description": row.get("description"),
                         },
@@ -468,6 +483,140 @@ def _register_csv(register_rows: Sequence[Mapping[str, Any]]) -> str:
     for row in register_rows:
         writer.writerow([str(row.get(column, "") or "") for column in REGISTER_TEMPLATE_COLUMNS])
     return buffer.getvalue()
+
+
+def register_rows_from_devices(devices: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    """Project persisted bacnet_scanner device dicts into bacnet_scanner_register rows.
+
+    Parity port of the vendored app's Save-as-Register (``app.js:787-801``): each
+    discovered device's instance, reported name, network, ip (port stripped),
+    vendor/model, location and ACTUAL object count become its expected baseline,
+    keyed by ``REGISTER_TEMPLATE_COLUMNS`` so
+    ``_register_csv(register_rows_from_devices(...))`` yields exactly the sidecar's
+    register CSV, which the ``bacnet_scanner_register`` import profile then accepts
+    and re-serialises back into the sidecar on the next scan (round-trip).
+
+    ``_map_result`` already keeps ``missing``/``unreachable`` rows out of the
+    persisted device set (only reachable + rogue devices are stored), so a saved
+    register only ever lists devices that actually answered; the ``missing`` guard
+    below is defensive. Every cell is a ``str`` by construction (the import
+    pipeline re-parses them from CSV anyway).
+    """
+
+    def _cell(value: Any) -> str:
+        return "" if value is None else str(value)
+
+    rows: list[dict[str, str]] = []
+    for device in devices:
+        attributes = device.get("attributes") or {}
+        if attributes.get("register_state") == "missing":
+            continue
+        # The vendored save takes ip.split(':')[0] — the register's IP Address
+        # column carries no port (the sidecar re-derives its own default port).
+        ip = str(device.get("address") or "").split(":")[0]
+        network = attributes.get("network")
+        rows.append(
+            {
+                "Device Instance": _cell(attributes.get("device_instance")),
+                "Device Name": _cell(device.get("name")),
+                # The vendored app writes network || 0, so a local (network 0 /
+                # unset) device records 0, not blank.
+                "Network": "0" if network in (None, "") else _cell(network),
+                "IP Address": ip,
+                "Vendor": _cell(device.get("vendor")),
+                "Model": _cell(device.get("model")),
+                "Location": _cell(attributes.get("location")),
+                # Expected Objects = the count the device actually reported this
+                # scan (GAP-B2 persists object_count), so a future scan flags a
+                # device whose object set drifted from this baseline.
+                "Expected Objects": _cell(attributes.get("object_count")),
+                "Description": _cell(attributes.get("description")),
+            }
+        )
+    return rows
+
+
+# Sanitize a device name into a ZIP-safe folder/file base (vendored
+# archive.sanitizeFilename: keep word chars, dash and dot; collapse the rest to _).
+def _sanitize_filename(value: str) -> str:
+    return "".join(ch if (ch.isalnum() or ch in "-_.") else "_" for ch in value) or "device"
+
+
+def build_export_assets(
+    devices: Sequence[Mapping[str, Any]],
+    points: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Rebuild the vendored per-asset export from a run's PERSISTED devices+points.
+
+    GAP-B3: the whole-scan ``/api/export`` ZIP the vendored tool produced live is
+    reconstructed here after the fact from the sealed run evidence — no sidecar,
+    no network I/O — so it is evidence-bound and works long after the scan. Each
+    returned item is ``{"base", "json", "xlsx_rows"}``: ``json`` is the per-asset
+    export dict (same shape as ``buildDeviceFiles`` in server.js), ``xlsx_rows`` is
+    the sheet's row list the backend hands to openpyxl (kept as pure data so this
+    stays openpyxl-free and unit-testable in core). Points are grouped to their
+    device by ``device_ref`` (``bacnet-device-<instance>``), exactly the key
+    ``_map_result`` stamped when it persisted them.
+    """
+    points_by_ref: dict[str, list[Mapping[str, Any]]] = {}
+    for point in points:
+        ref = str(point.get("device_ref") or "")
+        if ref:
+            points_by_ref.setdefault(ref, []).append(point)
+
+    assets: list[dict[str, Any]] = []
+    for device in devices:
+        if device.get("device_type") != "bacnet_device":
+            continue
+        attributes = device.get("attributes") or {}
+        instance = attributes.get("device_instance")
+        name = device.get("name") or ""
+        device_points = points_by_ref.get(f"bacnet-device-{instance}", [])
+        point_rows = [
+            {
+                "objectType": (p.get("attributes") or {}).get("object_type"),
+                "objectInstance": (p.get("attributes") or {}).get("object_instance"),
+                "name": p.get("point_name"),
+                # observed_value nests the json-safe scalar under "value"
+                # (_map_result), so unwrap it back to the vendored presentValue.
+                "presentValue": (p.get("observed_value") or {}).get("value"),
+                "units": p.get("units"),
+            }
+            for p in device_points
+        ]
+        json_doc = {
+            "asset": name,
+            "deviceInstance": instance,
+            "address": device.get("address") or "",
+            "network": attributes.get("network") or 0,
+            "vendor": device.get("vendor") or "",
+            "model": device.get("model") or "",
+            "firmware": attributes.get("firmware") or "",
+            "objectCount": attributes.get("object_count"),
+            "pointsExported": len(point_rows),
+            "points": point_rows,
+        }
+        xlsx_rows: list[list[Any]] = [
+            ["BACnet Asset Export"],
+            ["Asset", name],
+            ["Device Instance", instance],
+            ["Address", json_doc["address"]],
+            ["Network", json_doc["network"]],
+            ["Vendor", json_doc["vendor"]],
+            ["Model", json_doc["model"]],
+            ["Firmware", json_doc["firmware"]],
+            ["Object Count", json_doc["objectCount"]],
+            ["Points Exported", len(point_rows)],
+            [],
+            ["Object Type", "Instance", "Object Name", "Present Value", "Units"],
+        ]
+        xlsx_rows.extend(
+            [p["objectType"], p["objectInstance"], p["name"], p["presentValue"], p["units"]]
+            for p in point_rows
+        )
+        base = f"{_sanitize_filename(name or f'device_{instance}')}_{instance}"
+        assets.append(json_safe_value({"base": base, "json": json_doc, "xlsx_rows": xlsx_rows}))
+    return assets
 
 
 def _scan_query(parameters: Mapping[str, Any]) -> dict[str, str]:
@@ -806,7 +955,10 @@ def _demo() -> None:
     """Assert-based self-check for the pure mapping + register serialization."""
     rows = [
         {"instance": 1001, "register": "match", "rag": "green", "status": "reachable",
-         "ip": "10.0.0.11", "name": "AHU-1", "vendor": "Acme", "model": "V1", "firmware": "1.2"},
+         "ip": "10.0.0.11", "name": "AHU-1", "vendor": "Acme", "model": "V1", "firmware": "1.2",
+         "maxApdu": 1476, "segmentation": "both", "protocolRevision": 19,
+         "appSoftware": "v3.1", "nameStatus": "match", "expectedName": "AHU-1",
+         "objectDiff": "", "mismatch": "", "network": 0, "objectCount": 2, "location": "Roof"},
         {"instance": 1002, "register": "partial", "rag": "amber", "status": "reachable",
          "ip": "10.0.0.12", "name": "VAV-3", "objectDiff": "expected 5, found 4"},
         {"instance": 9, "register": "missing", "rag": "red", "status": "unreachable",
@@ -851,6 +1003,36 @@ def _demo() -> None:
     assert ahu["attributes"]["asset_id"] == "bacnet-device-1001", ahu
     assert ahu["attributes"]["register_state"] == "match", ahu
     assert ahu["attributes"]["firmware"] == "1.2", ahu
+    # GAP-B2: the eight formerly-dropped identity/check fields round-trip into
+    # attributes under snake_case keys.
+    assert ahu["attributes"]["max_apdu"] == 1476, ahu
+    assert ahu["attributes"]["segmentation"] == "both", ahu
+    assert ahu["attributes"]["protocol_revision"] == 19, ahu
+    assert ahu["attributes"]["app_software"] == "v3.1", ahu
+    assert ahu["attributes"]["name_status"] == "match", ahu
+    assert ahu["attributes"]["expected_name"] == "AHU-1", ahu
+    assert ahu["attributes"]["object_diff"] == "", ahu
+    assert ahu["attributes"]["mismatch"] == "", ahu
+
+    # GAP-B4: persisted devices project back into the 9-column register rows, ip
+    # port-stripped, Expected Objects taken from the persisted object_count.
+    reg_rows = register_rows_from_devices(devices)
+    assert {r["Device Instance"] for r in reg_rows} == {"1001", "1002", "2050"}, reg_rows
+    ahu_reg = next(r for r in reg_rows if r["Device Instance"] == "1001")
+    assert ahu_reg["Expected Objects"] == "2", ahu_reg
+    assert ahu_reg["Network"] == "0", ahu_reg
+    assert ahu_reg["IP Address"] == "10.0.0.11", ahu_reg
+    assert set(ahu_reg) == set(REGISTER_TEMPLATE_COLUMNS), ahu_reg
+    assert _register_csv(reg_rows).splitlines()[0] == ",".join(REGISTER_TEMPLATE_COLUMNS)
+
+    # GAP-B3: per-asset export rebuilt from persisted devices+points (no I/O). The
+    # AHU device's two points come back grouped, present values unwrapped.
+    exported = build_export_assets(devices, points)
+    ahu_asset = next(a for a in exported if a["json"]["deviceInstance"] == 1001)
+    assert ahu_asset["base"] == "AHU-1_1001", ahu_asset
+    assert ahu_asset["json"]["pointsExported"] == 2, ahu_asset
+    assert ahu_asset["json"]["points"][0]["presentValue"] == "18.60", ahu_asset
+    assert ["Object Type", "Instance", "Object Name", "Present Value", "Units"] in ahu_asset["xlsx_rows"]
 
     # Routers are summary-only, folded per ip with sorted networks, never devices.
     fold: dict[str, list[int]] = {}
