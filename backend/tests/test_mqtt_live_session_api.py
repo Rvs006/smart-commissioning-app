@@ -251,6 +251,68 @@ class MqttLiveSessionApiTest(ApiTestCase):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertIn("run-mqtt-x", response.text)
 
+    # -- register bind (scoped to the workspace, not the shared process) ------
+
+    def _record_posts(self):
+        calls: list[tuple[str, dict]] = []
+
+        def fake_post_json(_base, path, body):
+            calls.append((path, dict(body)))
+            return {"ok": True, "status": {"status": "connected"}}
+
+        return calls, fake_post_json
+
+    def test_connect_pushes_scoped_register_before_connect(self) -> None:
+        # This workspace HAS a register: the live lane must push it to the shared
+        # sidecar before /api/connect so matched flags compare against THIS scope.
+        calls, fake_post_json = self._record_posts()
+        with patch.object(self.live_routes, "_connect_config", lambda _p, _r: {"host": "broker.example.local"}), \
+                patch.object(self.live_routes, "_load_register_rows", lambda *_a: [{"Asset": "AHU-1", "Topic": "udmi/x/AHU-1"}]), \
+                patch.object(self.live_routes, "_post_json", fake_post_json):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/connect",
+                json={"project_id": "p", "site_id": "s", "authorized": True},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([c[0] for c in calls], ["/api/register", "/api/connect"], calls)
+        self.assertIn("AHU-1", calls[0][1]["csv"])
+
+    def test_connect_clears_register_when_workspace_has_none(self) -> None:
+        # No accepted mqtt_scanner_register for this workspace in the real test DB,
+        # so the bind resolves nothing and the route pushes a header-only CSV that
+        # empties the shared sidecar's register (no stale cross-workspace taint),
+        # still before /api/connect.
+        calls, fake_post_json = self._record_posts()
+        with patch.object(self.live_routes, "_connect_config", lambda _p, _r: {"host": "broker.example.local"}), \
+                patch.object(self.live_routes, "_post_json", fake_post_json):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/connect",
+                json={"project_id": "p", "site_id": "s", "authorized": True},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([c[0] for c in calls], ["/api/register", "/api/connect"], calls)
+        # Header-only CSV: the column header line and no data rows.
+        self.assertEqual(calls[0][1]["csv"].strip().count("\n"), 0, calls[0][1]["csv"])
+
+    def test_register_push_failure_releases_the_lease(self) -> None:
+        # A dead register push must release the lease, exactly like a dead connect,
+        # so a failed push never wedges the single live lane.
+        import urllib.error
+
+        def fail_on_register(_base, path, _body):
+            if path == "/api/register":
+                raise urllib.error.URLError("sidecar down")
+            return {"ok": True, "status": {"status": "connected"}}
+
+        with patch.object(self.live_routes, "_connect_config", lambda _p, _r: {"host": "broker.example.local"}), \
+                patch.object(self.live_routes, "_post_json", fail_on_register):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/connect",
+                json={"project_id": "p", "site_id": "s", "authorized": True},
+            )
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertIsNone(self.live_service.current(), "a failed register push must not leave a lease")
+
     # -- create-run reverse 409 ----------------------------------------------
 
     def test_create_capture_run_is_blocked_while_a_live_session_is_held(self) -> None:

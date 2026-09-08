@@ -3,14 +3,15 @@ import { describe, expect, it } from "vitest";
 import type { ModuleRunAction } from "./moduleData";
 import { buildDiscoveryParameters } from "./ModulePage";
 
-// GAP-B1: the BACnet sidecar blank-field guard. Number("") === 0, so coercing a
-// blank instance-range field before the emptiness check leaked low:0 / high:0
-// onto the wire and pinned the sidecar's Who-Is to instance range [0,0] — the
-// normal scan (both fields blank) then discovered almost nothing. These tests
-// lock the boundary in buildDiscoveryParameters, where the 0/0 originated (the
-// engine-side _scan_query test only proves the wire is honoured, not that the
-// frontend omits the keys).
-describe("buildDiscoveryParameters — BACnet sidecar instance range (GAP-B1)", () => {
+// GAP-B1 / F1: the BACnet device-instance range is pair-or-neither. The sidecar
+// sends a bounded Who-Is only when BOTH low and high arrive; a lone bound falls
+// through to a global Who-Is. So buildDiscoveryParameters must emit low/high only
+// as a validated pair (both present, integers, 0 <= low <= high <= 4194303) and
+// otherwise omit BOTH keys, or a half-filled/invalid form silently scans every
+// instance while the UI shows the operator's bound as accepted. These tests lock
+// the boundary at the builder, the last place before the wire (the engine-side
+// _scan_query test only proves the wire is honoured, not that the frontend omits).
+describe("buildDiscoveryParameters — BACnet sidecar instance range (GAP-B1/F1)", () => {
   // The bacnet-scanner run action exactly as moduleData wires it.
   const bacnetSidecarAction: Extract<ModuleRunAction, { kind: "discovery" }> = {
     id: "bacnet-scanner.run",
@@ -45,13 +46,63 @@ describe("buildDiscoveryParameters — BACnet sidecar instance range (GAP-B1)", 
     expect(params.high).toBe(200);
   });
 
-  it("does not synthesize an inverted range when only low is filled", () => {
+  it("omits BOTH keys when only low is filled (pair-or-neither)", () => {
     const params = buildDiscoveryParameters(bacnetSidecarAction, {
       ...baseOptions,
       bacnetInstanceLow: "100",
       bacnetInstanceHigh: "",
     });
-    expect(params.low).toBe(100);
+    expect(params).not.toHaveProperty("low");
+    expect(params).not.toHaveProperty("high");
+  });
+
+  it("omits BOTH keys when only high is filled (pair-or-neither)", () => {
+    const params = buildDiscoveryParameters(bacnetSidecarAction, {
+      ...baseOptions,
+      bacnetInstanceLow: "",
+      bacnetInstanceHigh: "200",
+    });
+    expect(params).not.toHaveProperty("low");
+    expect(params).not.toHaveProperty("high");
+  });
+
+  it("omits BOTH keys for an inverted range (low > high)", () => {
+    const params = buildDiscoveryParameters(bacnetSidecarAction, {
+      ...baseOptions,
+      bacnetInstanceLow: "200",
+      bacnetInstanceHigh: "100",
+    });
+    expect(params).not.toHaveProperty("low");
+    expect(params).not.toHaveProperty("high");
+  });
+
+  it("omits BOTH keys when a bound is out of range (0..4194303)", () => {
+    const params = buildDiscoveryParameters(bacnetSidecarAction, {
+      ...baseOptions,
+      bacnetInstanceLow: "0",
+      bacnetInstanceHigh: "4194304", // one past 2^22-1
+    });
+    expect(params).not.toHaveProperty("low");
+    expect(params).not.toHaveProperty("high");
+  });
+
+  it("accepts the inclusive boundary pair 0..4194303", () => {
+    const params = buildDiscoveryParameters(bacnetSidecarAction, {
+      ...baseOptions,
+      bacnetInstanceLow: "0",
+      bacnetInstanceHigh: "4194303",
+    });
+    expect(params.low).toBe(0);
+    expect(params.high).toBe(4194303);
+  });
+
+  it("omits BOTH keys for a non-integer bound", () => {
+    const params = buildDiscoveryParameters(bacnetSidecarAction, {
+      ...baseOptions,
+      bacnetInstanceLow: "10.5",
+      bacnetInstanceHigh: "200",
+    });
+    expect(params).not.toHaveProperty("low");
     expect(params).not.toHaveProperty("high");
   });
 });

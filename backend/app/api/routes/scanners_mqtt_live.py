@@ -26,12 +26,15 @@ from functools import partial
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from smart_commissioning_core.db.repositories import ImportRepository
 from smart_commissioning_core.engines.mqtt_publish_sidecar import process_mqtt_publish_run
 from smart_commissioning_core.engines.mqtt_scanner_sidecar import (
     _connect_config,
     _get_json,
+    _load_register_rows,
     _post_disconnect,
     _post_json,
+    _register_csv,
     _root_filter,
 )
 from smart_commissioning_core.mqtt_settings import MqttSettingsError, build_mqtt_connection_settings
@@ -47,6 +50,7 @@ from app.api.routes.discovery import (
     require_engineer,
     service,
 )
+from app.api.routes.scanners import _bind_scanner_register
 from app.core.auth import AuthPrincipal, get_principal
 from app.core.config import get_settings
 from app.core.scopes import load_scoped_run, require_project_site_access
@@ -169,6 +173,20 @@ def connect_mqtt_live(
             ),
         ) from error
 
+    # Bind THIS workspace's MQTT register the same way the capture lane does
+    # (create_mqtt_scanner_run). The sidecar is one shared process across every
+    # project/site, and /api/connect's resetState leaves the register in place, so
+    # without this the live snapshot's matched flags, matched-only filter, focused
+    # metadata, and status register_summary would compare against whatever register
+    # the process last held - empty on a cold start, or another workspace's after
+    # any prior capture. Resolve rows now (DB reads only, no lease held yet) so a
+    # lookup failure is a clean 500 that never wedges the lane.
+    reg_params: dict[str, object] = {}
+    _bind_scanner_register(
+        request.project_id, request.site_id, reg_params, import_type="mqtt_scanner_register"
+    )
+    register_rows = _load_register_rows(reg_params, ImportRepository(service.engine).get_accepted_rows)
+
     # Close the run-vs-live race under the single lease lock: no mqtt_scanner run
     # may be queued/running, and no live session may already be held (unless
     # taking over). Both lanes drive the sidecar's one connection.
@@ -201,9 +219,13 @@ def connect_mqtt_live(
             take_over=request.take_over,
         )
 
-    # Lock released before any network I/O. Drive the sidecar connect; on any
-    # failure the lease is released so a dead session never wedges the lane.
+    # Lock released before any network I/O. Push this workspace's register (or a
+    # header-only CSV, which empties the sidecar's register and resets every
+    # asset's matched/meta - server.js applyRegister), THEN connect, so the fresh
+    # subscription compares against the scoped register and never a stale one. On
+    # any failure the lease is released so a dead session never wedges the lane.
     try:
+        _post_json(base_url, "/api/register", {"csv": _register_csv(register_rows)})
         result = _post_json(base_url, "/api/connect", config)
     except urllib.error.HTTPError as error:
         live_service.release(session.session_id)

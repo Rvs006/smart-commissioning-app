@@ -16,6 +16,10 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from app.schemas.jobs import (
+    DiscoveryAssetObservation,
+    DiscoveryResultsResponse,
+)
 from smart_commissioning_core.engines.ip_scanner_sidecar import (
     _RAG_SEVERITY,
     REGISTER_TEMPLATE_COLUMNS,
@@ -199,6 +203,45 @@ class SaveAsRegisterContractTest(unittest.TestCase):
         self.assertEqual(csv_text.splitlines()[0], ",".join(GOLDEN_REGISTER_COLUMNS))
         self.assertIn("10.0.0.5", csv_text)
         self.assertIn("502", csv_text)
+
+
+class ObservedPortReadbackContractTest(unittest.TestCase):
+    """The readback gap that shipped: the mapper emitted raw int ports, so
+    GET /runs/{id}/results (response_model=DiscoveryResultsResponse) raised a
+    ValidationError coercing ints into ObservedPort. Pin the object shape at the
+    exact seam that broke."""
+
+    def _sidecar_assets(self) -> list[dict[str, object]]:
+        rows = [
+            {"ip": "192.0.2.10", "register": "match", "rag": "green", "status": "reachable",
+             "hostname": "h-a", "openPorts": [80, 443], "expectedPorts": [80, 443]},
+            {"ip": "192.0.2.20", "register": "rogue", "rag": "red", "status": "rogue",
+             "openPorts": [47808], "openUdp": [47808]},
+        ]
+        return _map_result(rows, {}, {"project_id": "p", "site_id": "s"}).discovered_assets
+
+    def test_every_asset_parses_against_readback_schema(self) -> None:
+        for asset in self._sidecar_assets():
+            DiscoveryAssetObservation(**asset)  # would raise ValidationError pre-fix
+
+    def test_observed_ports_are_port_protocol_objects(self) -> None:
+        assets = {a["ip_address"]: a for a in self._sidecar_assets()}
+        self.assertEqual(
+            assets["192.0.2.10"]["observed_ports"][0], {"port": 80, "protocol": "tcp"}
+        )
+        udp = assets["192.0.2.20"]["observed_ports"]
+        self.assertEqual(udp, [{"port": 47808, "protocol": "udp"}])
+
+    def test_full_results_response_accepts_sidecar_output(self) -> None:
+        # The literal readback path: coerce the persisted summary into the
+        # GET-results response model. Raised 500 pre-fix; must be clean now.
+        response = DiscoveryResultsResponse(
+            run_id="run_1",
+            job_type="ip_scanner",
+            status="succeeded",
+            discovered_assets=self._sidecar_assets(),
+        )
+        self.assertEqual(response.discovered_assets[0].observed_ports[0].protocol, "tcp")
 
 
 class ScanQueryContractTest(unittest.TestCase):
