@@ -1251,6 +1251,12 @@ describe("ModulePage discovery wiring", () => {
     const high = screen.getByLabelText(/Device instance range — high/i);
     const rangeMessage = /Enter both bounds or leave both blank/i;
 
+    // P2b: the native sidecar Run is also gated on scan authorization, which this
+    // deployment enforces (mePayload omits authorization_enforced). Confirm it once
+    // so the rest of this test isolates the instance-range gate; the auth gate
+    // itself is covered in the test below.
+    fireEvent.click(await screen.findByLabelText(/I am authorized to scan this network/i));
+
     // Both blank -> a global Who-Is is allowed: once the engineer role loads Run
     // is enabled and no range message shows.
     await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled());
@@ -1270,6 +1276,23 @@ describe("ModulePage discovery wiring", () => {
     fireEvent.change(high, { target: { value: "999" } });
     expect(await screen.findByText(rangeMessage)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
+  });
+
+  it("gates the native sidecar Run on scan authorization until confirmed (P2b)", async () => {
+    // mePayload omits authorization_enforced, so this deployment enforces it. The
+    // native IP/BACnet/MQTT scanner runs post authorized=scanAuthorized and the
+    // server rejects an unauthorized run, so Run must stay disabled until the
+    // operator confirms authorization rather than clicking through to a failure.
+    stubSidecarModuleFetch();
+    renderModule("bacnet-scanner");
+
+    const authorize = await screen.findByLabelText(/I am authorized to scan this network/i);
+    expect(authorize).not.toBeChecked();
+    // Blank range is valid, so only the auth gate holds Run down here.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeDisabled());
+
+    fireEvent.click(authorize);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled());
   });
 
   it("renders the native MQTT sidecar body (flipped off the embed) with the live tree", async () => {

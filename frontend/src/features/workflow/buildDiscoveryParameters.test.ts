@@ -106,3 +106,58 @@ describe("buildDiscoveryParameters — BACnet sidecar instance range (GAP-B1/F1)
     expect(params).not.toHaveProperty("high");
   });
 });
+
+// P2a: the "Ignore register for this run" toggle must forward
+// parameters.ignore_register on the BACnet sidecar lane, exactly like the IP
+// lane already does. The route's shared register binder reads this key to skip
+// freezing a register into the run; a dropped key silently RAG-compares the scan
+// against whatever register the route binds, so the toggle would look accepted
+// while doing nothing. Lock the forward at the builder for both sidecar lanes.
+describe("buildDiscoveryParameters — sidecar ignore_register forward (P2a)", () => {
+  const bacnetSidecarAction: Extract<ModuleRunAction, { kind: "discovery" }> = {
+    id: "bacnet-scanner.run",
+    kind: "discovery",
+    label: "Run BACnet Discovery",
+    helper: "",
+    runKind: "bacnet_sidecar",
+    jobType: "bacnet_scanner",
+  };
+  const ipSidecarAction: Extract<ModuleRunAction, { kind: "discovery" }> = {
+    id: "ip-scanner.run",
+    kind: "discovery",
+    label: "Run IP Discovery",
+    helper: "",
+    runKind: "ip_sidecar",
+    jobType: "ip_scanner",
+  };
+  const baseOptions = { authorized: true, dryRun: false, scanPorts: [] };
+
+  it("forwards ignore_register on the BACnet lane when the toggle is set", () => {
+    const params = buildDiscoveryParameters(bacnetSidecarAction, {
+      ...baseOptions,
+      ignoreRegister: true,
+    });
+    expect(params.ignore_register).toBe(true);
+  });
+
+  it("omits ignore_register on the BACnet lane when the toggle is off", () => {
+    const params = buildDiscoveryParameters(bacnetSidecarAction, {
+      ...baseOptions,
+      ignoreRegister: false,
+    });
+    expect(params).not.toHaveProperty("ignore_register");
+  });
+
+  it("omits ignore_register on the BACnet lane when the option is absent", () => {
+    const params = buildDiscoveryParameters(bacnetSidecarAction, { ...baseOptions });
+    expect(params).not.toHaveProperty("ignore_register");
+  });
+
+  it("forwards ignore_register on the IP lane when the toggle is set", () => {
+    const params = buildDiscoveryParameters(ipSidecarAction, {
+      ...baseOptions,
+      ignoreRegister: true,
+    });
+    expect(params.ignore_register).toBe(true);
+  });
+});

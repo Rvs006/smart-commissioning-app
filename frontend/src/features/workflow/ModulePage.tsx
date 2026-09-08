@@ -718,6 +718,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [bacnetInstanceLow, setBacnetInstanceLow] = useState("");
   const [bacnetInstanceHigh, setBacnetInstanceHigh] = useState("");
   const [bacnetDiscoverMs, setBacnetDiscoverMs] = useState("");
+  // GAP-C1 parity for the BACnet lane: opt this run out of register RAG
+  // comparison, exactly like the IP lane's ipIgnoreRegister. Forwarded as
+  // parameters.ignore_register; the shared register binder then skips freezing.
+  const [bacnetIgnoreRegister, setBacnetIgnoreRegister] = useState(false);
   // Validate the range as the operator types so Run can gate on a half-filled or
   // out-of-range pair instead of silently degrading to a global Who-Is.
   const bacnetInstanceRange = resolveBacnetInstanceRange(bacnetInstanceLow, bacnetInstanceHigh);
@@ -2463,7 +2467,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               scanRangeStart: ipScanRangeStart,
               scanRangeEnd: ipScanRangeEnd,
               probeTimeout: ipProbeTimeout,
-              ignoreRegister: ipIgnoreRegister,
+              ignoreRegister:
+                action.runKind === "bacnet_sidecar" ? bacnetIgnoreRegister : ipIgnoreRegister,
               bacnetInstanceLow,
               bacnetInstanceHigh,
               bacnetDiscoverMs,
@@ -4646,6 +4651,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       // Frictionless deployments need no sealed preview/authorization ids.
       (!scanAuthorized || (authorizationEnforced && (!scanPreviewRunId || !scanAuthorizationId)))) ||
     (module.route === "mqtt-discovery-sct" && !scanDryRun && !scanAuthorized) ||
+    // Native IP/BACnet/MQTT scanner runs post authorized=scanAuthorized and are
+    // rejected server-side; gate Run on the same flag so the disabled state is
+    // honest instead of a click that fails at the backend. Dry-run is hidden for
+    // these lanes (scanDryRun stays false), so no dry-run escape hatch is needed.
+    (isSidecarDiscoveryModule && !scanAuthorized) ||
     nmapSelectionBlocked;
 
   // Import warnings are informational (their rows stay accepted), so they get
@@ -5298,6 +5308,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         />
                         <small>How long to listen for I-Am replies. Blank uses the default window.</small>
                       </label>
+                      <label className="confirm-row">
+                        <input
+                          checked={bacnetIgnoreRegister}
+                          onChange={(event) => setBacnetIgnoreRegister(event.target.checked)}
+                          type="checkbox"
+                        />
+                        Ignore register for this run (scan without RAG comparison)
+                      </label>
                     </div>
                   )}
                   {!isSidecarDiscoveryModule && (
@@ -5487,7 +5505,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           : scanBlocked
                             ? isSealedNetworkDiscoveryModule
                               ? "Confirm scan authorization and select a sealed preview (or enable dry run) before starting a real scan."
-                              : "Confirm broker-capture authorization (or enable dry run) before starting a real capture."
+                              : isSidecarDiscoveryModule
+                                ? "Confirm scan authorization before starting this scan."
+                                : "Confirm broker-capture authorization (or enable dry run) before starting a real capture."
                             : mqttOverCapBlocked
                               ? module.route === "mqtt-scanner"
                                 ? "Run time exceeds the 15-minute scanner capture limit."
@@ -10111,6 +10131,10 @@ export function buildDiscoveryParameters(
     const discoverMs = Number((options.bacnetDiscoverMs ?? "").trim());
     if (Number.isFinite(discoverMs) && discoverMs > 0) {
       parameters.discoverMs = discoverMs;
+    }
+    // GAP-C1: opt this run out of register RAG-comparison, same as ip_sidecar.
+    if (options.ignoreRegister) {
+      parameters.ignore_register = true;
     }
   }
   // MQTT discovery: forward the operator's topic filter and capture window so
