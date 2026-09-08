@@ -296,6 +296,14 @@ def _map_result(
     structured_records: list[dict[str, Any]] = []
     issues: list[ValidationIssueRecord] = []
 
+    # A device whose object count exceeds the sidecar's 2000-object export cap
+    # comes back truncated=true on its per-asset export entry (server.js
+    # buildDeviceFiles): the ZIP still reaches `ready` so export_complete stays
+    # True, but its points are silently capped. Collect those instances so the
+    # per-device record and the run-level export_complete both record the read as
+    # incomplete rather than reporting a partial export as whole.
+    truncated_instances = {a.get("deviceInstance") for a in device_files if a.get("truncated")}
+
     for row in rows:
         instance = row.get("instance")
         rag = row.get("rag")
@@ -359,6 +367,10 @@ def _map_result(
                             "mismatch": row.get("mismatch"),
                             "location": row.get("location"),
                             "description": row.get("description"),
+                            # True when this device's point export hit the sidecar's
+                            # 2000-object cap; persisted so build_export_assets can
+                            # rebuild pointsExportComplete=False from evidence alone.
+                            "points_truncated": instance in truncated_instances,
                         },
                     }
                 )
@@ -403,10 +415,11 @@ def _map_result(
             "register_rogue": summary.get("rogue"),
             "points_exported": sum(len(a.get("points") or []) for a in device_files),
             # Did point acquisition finish? False means the export deadline hit /
-            # stream ended before `ready`, so points_exported is an artefact of an
-            # abandoned export, NOT a genuine zero. Consumers must read the two
-            # together (build_export_assets / the export-assets endpoint do).
-            "export_complete": export_complete,
+            # stream ended before `ready`, OR at least one device exceeded the
+            # 2000-object cap and returned a truncated point set, so points_exported
+            # is a partial artefact, NOT a genuine complete zero. Consumers must read
+            # the two together (build_export_assets / the export-assets endpoint do).
+            "export_complete": export_complete and not truncated_instances,
             "routers": [dict(router) for router in routers],
             "scanner": ENGINE_NAME,
         }
@@ -616,10 +629,14 @@ def build_export_assets(
             "firmware": attributes.get("firmware") or "",
             "objectCount": object_count,
             "pointsExported": len(point_rows),
-            # False when the run's export never completed, or when this device
-            # looks like a truncated read - so pointsExported:0 is not misread as
-            # a genuine no-point device.
-            "pointsExportComplete": bool(export_complete) and not suspect_zero,
+            # False when the run's export never completed, when this device looks
+            # like a truncated read (objectCount>0 but zero points), or when the
+            # persisted evidence marks it capped at the sidecar's 2000-object export
+            # limit - so a partial point set is never rebuilt as a complete export.
+            # Older runs lack points_truncated (falsy -> treated non-truncated).
+            "pointsExportComplete": (
+                bool(export_complete) and not suspect_zero and not bool(attributes.get("points_truncated"))
+            ),
             "points": point_rows,
         }
         xlsx_rows: list[list[Any]] = [
@@ -1099,6 +1116,28 @@ def _demo() -> None:
         [{"device_type": "bacnet_device", "address": "10.0.0.8", "name": "D8",
           "attributes": {"device_instance": 8, "object_count": 0}}], [])
     assert genuine[0]["json"]["pointsExportComplete"] is True, genuine
+
+    # P1b: a device past the sidecar's 2000-object export cap returns
+    # truncated=true WITH a partial (non-empty) point set inside a ZIP that still
+    # reached `ready`, so export_complete is True and suspect_zero is False. The
+    # run-level export_complete must still fold to False, the persisted device must
+    # carry points_truncated=True, and the rebuilt asset must read incomplete while
+    # keeping the partial points (never zeroed).
+    trunc = _map_result(
+        [{"instance": 1001, "register": "match", "rag": "green", "status": "reachable",
+          "ip": "10.0.0.11", "name": "AHU-1", "objectCount": 2500}],
+        {},
+        [{"deviceInstance": 1001, "truncated": True, "points": [
+            {"objectType": "analog-input", "objectInstance": 1, "name": "SAT",
+             "presentValue": "18.60", "units": "degreesCelsius"}]}],
+        {}, export_complete=True)
+    assert trunc.result_summary_extra["export_complete"] is False, trunc.result_summary_extra
+    trunc_devices = [r for r in trunc.structured_records if "device_ref" not in r]
+    trunc_points = [r for r in trunc.structured_records if "device_ref" in r]
+    assert trunc_devices[0]["attributes"]["points_truncated"] is True, trunc_devices[0]
+    trunc_asset = build_export_assets(trunc_devices, trunc_points, export_complete=True)[0]
+    assert trunc_asset["json"]["pointsExportComplete"] is False, trunc_asset
+    assert trunc_asset["json"]["pointsExported"] == 1, trunc_asset  # partial set kept, not zeroed
 
     # Routers are summary-only, folded per ip with sorted networks, never devices.
     fold: dict[str, list[int]] = {}

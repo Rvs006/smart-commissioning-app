@@ -313,6 +313,115 @@ class MqttLiveSessionApiTest(ApiTestCase):
         self.assertEqual(response.status_code, 503, response.text)
         self.assertIsNone(self.live_service.current(), "a failed register push must not leave a lease")
 
+    # -- connect ceremony atomicity (P1a) ------------------------------------
+
+    def test_overlapping_takeovers_keep_register_and_connect_contiguous(self) -> None:
+        # Two operators race to take over the single live lane. The register push
+        # and the broker connect are two coupled mutations of the one shared
+        # sidecar, so they must run as one ceremony that cannot interleave: the
+        # sidecar's register and its connection must both belong to the final
+        # lease holder, never a mix (B-register, A-register, A-connect, B-connect).
+        import threading
+        import time
+
+        from app.schemas.mqtt_live import MqttLiveConnectRequest
+
+        calls: list[tuple[str, str]] = []
+        calls_lock = threading.Lock()
+        a_in_register = threading.Event()
+        b_reached_prelock = threading.Event()
+        release_a = threading.Event()
+        results: dict[str, object] = {}
+        errors: dict[str, BaseException] = {}
+
+        def fake_bind(project_id, _site_id, params, **_kw):
+            # No mqtt_scanner_register exists in the test DB, so stamp the project so
+            # the fake loader below can hand back a workspace-distinct register.
+            params["register_import_id"] = project_id
+
+        def fake_load(params, _getter):
+            proj = params["register_import_id"]
+            if proj == "pB":
+                b_reached_prelock.set()  # B has resolved its register, ceremony lock next
+            return [{"Asset": f"AHU-{proj}", "Topic": f"udmi/{proj}/x"}]
+
+        def fake_post_json(_base, path, body):
+            marker = ""
+            if path == "/api/register":
+                marker = "A" if "AHU-pA" in body.get("csv", "") else "B"
+            with calls_lock:
+                calls.append((path, marker))
+            if path == "/api/register" and marker == "A":
+                a_in_register.set()
+                release_a.wait(5.0)  # hold A mid-ceremony; bounded so a bug cannot hang CI
+            return {"ok": True, "status": {"status": "connected"}}
+
+        def run_connect(owner: str, project: str) -> None:
+            principal = SimpleNamespace(username=owner, user_id=None, role=None)
+            http_request = SimpleNamespace(app=self.app)
+            request = MqttLiveConnectRequest(project_id=project, site_id="s", authorized=True, take_over=True)
+            try:
+                results[owner] = self.live_routes.connect_mqtt_live(request, http_request, principal)
+            except BaseException as exc:  # noqa: BLE001 - re-asserted on the main thread
+                errors[owner] = exc
+
+        with patch.object(self.live_routes, "require_project_site_access", lambda *a, **k: None), \
+                patch.object(self.live_routes.service, "list_runs", return_value=[]), \
+                patch.object(self.live_routes, "_connect_config", lambda _p, _r: {"host": "broker.example.local"}), \
+                patch.object(self.live_routes, "_bind_scanner_register", fake_bind), \
+                patch.object(self.live_routes, "_load_register_rows", fake_load), \
+                patch.object(self.live_routes, "_post_json", fake_post_json):
+            ta = threading.Thread(target=run_connect, args=("alice", "pA"))
+            ta.start()
+            self.assertTrue(a_in_register.wait(5.0), "A never reached its register POST")
+            # A holds the ceremony lock, blocked mid-register. Launch B's take-over.
+            tb = threading.Thread(target=run_connect, args=("bob", "pB"))
+            tb.start()
+            self.assertTrue(b_reached_prelock.wait(5.0), "B never reached the ceremony lock")
+            time.sleep(0.1)  # let B actually block on the ceremony lock
+            # Killer invariant: acquire is INSIDE the ceremony lock, so B cannot have
+            # taken the lease while A holds it. Without the fix, B's take-over acquire
+            # (under live_service.lock only) would already have flipped the lease.
+            held = self.live_service.current()
+            self.assertIsNotNone(held)
+            self.assertEqual(
+                held.owner, "alice", "B took the lease mid-ceremony: acquire is not inside the connect lock"
+            )
+            release_a.set()
+            ta.join(5.0)
+            tb.join(5.0)
+
+        self.assertFalse(ta.is_alive() or tb.is_alive(), "a connect thread hung")
+        self.assertEqual(errors, {}, errors)
+        # POSTs are contiguous per session: a full [register, connect] for A, then B.
+        self.assertEqual(
+            [p for p, _ in calls],
+            ["/api/register", "/api/connect", "/api/register", "/api/connect"],
+            calls,
+        )
+        reg_markers = [m for p, m in calls if p == "/api/register"]
+        # The buggy interleave (register pushes not paired with their own connect) is
+        # impossible; and the last register belongs to the final lease holder.
+        self.assertEqual(reg_markers, ["A", "B"], calls)
+        final = self.live_service.current()
+        self.assertIsNotNone(final)
+        self.assertEqual(final.owner, "bob")
+        self.assertEqual(reg_markers[-1], "B", "the last register push must be the final lease-holder's")
+
+    def test_connect_ceremony_lock_is_distinct_and_never_blocks_lease_reads(self) -> None:
+        # Guards the freeze-the-relay mis-fix: the ceremony lock must NOT be
+        # live_service.lock, and holding it must not block live_service.current()
+        # (the async relay calls current() on the event loop while a connect
+        # ceremony may be mid-POST).
+        self.assertIsNot(self.live_routes._connect_ceremony_lock, self.live_service.lock)
+        with self.live_routes._connect_ceremony_lock:
+            # These take only live_service.lock; they would hang if current()/acquire
+            # waited on the ceremony lock.
+            self.assertIsNone(self.live_service.current())
+            session = self._acquire(owner="carol")
+            self.assertEqual(self.live_service.current().owner, "carol")
+            self.assertEqual(session.owner, "carol")
+
     # -- create-run reverse 409 ----------------------------------------------
 
     def test_create_capture_run_is_blocked_while_a_live_session_is_held(self) -> None:

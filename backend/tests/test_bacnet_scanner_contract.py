@@ -498,6 +498,47 @@ class ExportCompletenessContractTest(unittest.TestCase):
         assets = build_export_assets(devices, points, export_complete=True)
         self.assertIs(assets[0]["json"]["pointsExportComplete"], False)
 
+    def test_truncated_device_is_incomplete_despite_ready_and_points(self) -> None:
+        # P1b: a device past the sidecar's 2000-object export cap returns
+        # truncated=true WITH a partial (non-empty) point set inside a ZIP that
+        # still reached `ready`, so export_complete is True and suspect_zero is
+        # False. The run-level export_complete must still fold to False, the device
+        # must persist points_truncated=True, and the rebuilt asset must read
+        # incomplete while keeping the partial points (never zeroed).
+        rows = [{"instance": 1001, "register": "match", "rag": "green", "status": "reachable",
+                 "ip": "10.0.0.11", "name": "AHU-1", "objectCount": 2500}]
+        device_files = [{"deviceInstance": 1001, "truncated": True, "points": [
+            {"objectType": "analog-input", "objectInstance": 1, "name": "SAT",
+             "presentValue": "18.60", "units": "degreesCelsius"}]}]
+        result = _map_result(rows, {}, device_files, {}, export_complete=True)
+        self.assertIs(result.result_summary_extra["export_complete"], False)
+        records = result.structured_records
+        devices = [r for r in records if "device_ref" not in r]
+        points = [r for r in records if "device_ref" in r]
+        self.assertIs(devices[0]["attributes"]["points_truncated"], True)
+        asset = build_export_assets(devices, points, export_complete=True)[0]
+        self.assertIs(asset["json"]["pointsExportComplete"], False)
+        self.assertEqual(asset["json"]["pointsExported"], 1)  # partial set kept
+
+    def test_non_truncated_device_persists_points_truncated_false(self) -> None:
+        # Regression guard: a normal completed device is stamped points_truncated
+        # False and stays pointsExportComplete True (the fold changes nothing for
+        # the common case), and older evidence lacking the key rebuilds complete.
+        devices, points = self._reachable_device_records(
+            2, [{"objectType": "analog-input", "objectInstance": 1, "name": "SAT",
+                 "presentValue": "18.6", "units": "degreesCelsius"}])
+        self.assertIs(devices[0]["attributes"]["points_truncated"], False)
+        assets = build_export_assets(devices, points, export_complete=True)
+        self.assertIs(assets[0]["json"]["pointsExportComplete"], True)
+        # An older persisted device with no points_truncated key rebuilds complete.
+        legacy = {"device_type": "bacnet_device", "address": "10.0.0.9", "name": "D9",
+                  "attributes": {"device_instance": 9, "object_count": 1}}
+        legacy_points = [{"device_ref": "bacnet-device-9", "point_name": "P",
+                          "observed_value": {"value": "1"}, "units": "",
+                          "attributes": {"object_type": "analog-input", "object_instance": 1}}]
+        legacy_asset = build_export_assets([legacy], legacy_points, export_complete=True)[0]
+        self.assertIs(legacy_asset["json"]["pointsExportComplete"], True)
+
 
 _SCANNERS_PY = (
     _REPO_ROOT / "backend" / "app" / "api" / "routes" / "scanners.py"
