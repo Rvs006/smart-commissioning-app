@@ -2519,10 +2519,127 @@ input.field-expired {
   }
 }
 
-.mqtt-config-payload {
+/* GAP-M1 focused-asset detail. Every colour is a shared token, so the
+   electracom-theme.css [data-theme="dark"] overrides carry through untouched. */
+.mqtt-focus-kv {
+  display: grid;
+  grid-template-columns: minmax(110px, max-content) 1fr;
+  gap: 4px 16px;
+  margin: 8px 0 12px;
+}
+
+.mqtt-focus-kv dt {
+  color: var(--muted);
+}
+
+.mqtt-focus-kv dd {
+  margin: 0;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.mqtt-focus-tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+  margin: 12px 0;
+}
+
+.mqtt-focus-tab {
+  background: transparent;
+  padding: 8px 12px;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.mqtt-focus-tab[aria-selected="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.mqtt-topic-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 4px 0;
+}
+
+.mqtt-topic-line .tl-path {
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.mqtt-topic-line .tl-rate {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.mqtt-cmp-bar {
+  display: flex;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface-3);
+  margin: 8px 0 6px;
+}
+
+.mqtt-cmp-seg {
+  height: 100%;
+}
+
+.mqtt-cmp-seg.matched {
+  background: var(--green);
+}
+
+.mqtt-cmp-seg.missing {
+  background: var(--red);
+}
+
+.mqtt-cmp-seg.extra {
+  background: var(--amber);
+}
+
+.mqtt-cmp-legend {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  color: var(--text);
+}
+
+.mqtt-hist-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+
+.mqtt-hist-chip {
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.mqtt-hist-chip[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.mqtt-payload-view {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: monospace;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  max-height: 320px;
+  overflow: auto;
+  margin: 8px 0;
 }
 
 .asset-summary-toggle[aria-expanded="true"] .asset-summary-caret,

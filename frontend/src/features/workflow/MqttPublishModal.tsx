@@ -22,6 +22,10 @@ type Props = {
   apiClient?: SessionBoundApiClient;
   authorizationEnforced?: boolean;
   defaultTopic?: string;
+  // GAP-M7: "Write config…" opens this modal prefilled from the focused asset's
+  // config topic + last-seen config payload, with retain defaulting on.
+  defaultPayload?: string;
+  defaultRetain?: boolean;
   onClose: () => void;
 };
 
@@ -51,14 +55,16 @@ export function MqttPublishModal({
   apiClient,
   authorizationEnforced = true,
   defaultTopic,
+  defaultPayload,
+  defaultRetain,
   onClose,
 }: Props) {
   const context = apiClient ? { client: apiClient } : undefined;
   const [stage, setStage] = useState<Stage>("compose");
   const [topic, setTopic] = useState(defaultTopic ?? "");
-  const [payload, setPayload] = useState("");
+  const [payload, setPayload] = useState(defaultPayload ?? "");
   const [qos, setQos] = useState(0);
-  const [retain, setRetain] = useState(false);
+  const [retain, setRetain] = useState(defaultRetain ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

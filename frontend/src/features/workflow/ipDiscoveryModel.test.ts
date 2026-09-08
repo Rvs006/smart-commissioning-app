@@ -3,6 +3,7 @@ import {
   classifyScanAuthorization,
   formatBacnetRouters,
   formatBacnetSidecarSummaryCards,
+  formatMqttSidecarSummaryCards,
   formatIpHeadlineMetrics,
   formatIpSidecarSummaryCards,
   serializeIpTargetRows,
@@ -276,5 +277,46 @@ describe("BACnet sidecar summary cards (GAP-C2)", () => {
     expect(formatBacnetSidecarSummaryCards({})).toBeNull();
     expect(formatBacnetSidecarSummaryCards(undefined)).toBeNull();
     expect(formatBacnetSidecarSummaryCards({ scanner: "bacnet_scanner" })).toBeNull();
+  });
+});
+
+describe("MQTT sidecar summary cards (GAP-C2)", () => {
+  it("reads the four totals the mqtt_scanner engine stamps on result_summary", () => {
+    expect(
+      formatMqttSidecarSummaryCards({
+        topics_discovered: 42,
+        assets_discovered: 9,
+        register_matches: 6,
+        register_rogue: 3,
+        scanner: "mqtt_scanner",
+      }),
+    ).toEqual([
+      { heading: "Topics", value: "42" },
+      { heading: "Assets", value: "9" },
+      { heading: "Matches", value: "6" },
+      { heading: "Rogue", value: "3" },
+    ]);
+  });
+
+  it("renders a present-but-null field as a dash, never a fabricated count", () => {
+    expect(
+      formatMqttSidecarSummaryCards({
+        topics_discovered: 5,
+        assets_discovered: null,
+        register_matches: null,
+        register_rogue: 0,
+      }),
+    ).toEqual([
+      { heading: "Topics", value: "5" },
+      { heading: "Assets", value: "—" },
+      { heading: "Matches", value: "—" },
+      { heading: "Rogue", value: "0" },
+    ]);
+  });
+
+  it("returns null when no total is present (dry-run / older / failed run: no strip)", () => {
+    expect(formatMqttSidecarSummaryCards({})).toBeNull();
+    expect(formatMqttSidecarSummaryCards(undefined)).toBeNull();
+    expect(formatMqttSidecarSummaryCards({ scanner: "mqtt_scanner" })).toBeNull();
   });
 });

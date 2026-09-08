@@ -25,6 +25,7 @@ from smart_commissioning_core.engines.mqtt_scanner_sidecar import (
     _norm_point,
     _register_csv,
     _root_filter,
+    register_rows_from_topics,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -200,6 +201,97 @@ class LiveStreamContractTest(unittest.TestCase):
 
     def test_activity_frame_carries_paths(self) -> None:
         self.assertIn("type: 'activity', paths", _SERVER_JS)
+
+
+class FocusedContractTest(unittest.TestCase):
+    """Pin the buildFocused() object the live focus panel (GAP-M1) types verbatim.
+
+    The whole focused detail rides the snapshot stream, so the TS
+    ``MqttLiveFocused`` / ``MqttLiveTopicDetail`` / ``MqttLiveComparison`` types
+    are the only contract between the sidecar and the native panel. If a re-import
+    renames a focused key, this fails loudly instead of the panel silently
+    rendering blanks.
+    """
+
+    def test_focused_object_keys(self) -> None:
+        # buildFocused returns exactly this key set (server.js).
+        for token in (
+            "asset:",
+            "key:",
+            "matched:",
+            "schema:",
+            "rate:",
+            "count:",
+            "topics:",
+            "topicsDetail,",
+            "lastTopic:",
+            "livePoints,",
+            "lastPayload:",
+            "issues,",
+            "comparison,",
+            "meta:",
+            "udmi:",
+            "configTopic:",
+            "configPayload,",
+        ):
+            self.assertIn(token, _SERVER_JS, f"focused key '{token}' missing from server.js")
+
+    def test_topics_detail_entry_keys(self) -> None:
+        # topicsDetail[] entry shape (server.js buildFocused).
+        for token in ("topic:", "schema:", "count:", "rate:", "retained:", "history:"):
+            self.assertIn(token, _SERVER_JS, f"topicsDetail key '{token}' missing from server.js")
+
+    def test_comparison_keys(self) -> None:
+        # comparePoints result shape (udmi.js) the comparison bar + points RAG read.
+        for token in ("matchedNames:", "missingNames:", "extraNames:", "expected:"):
+            self.assertIn(token, _UDMI_JS, f"comparison key '{token}' missing from udmi.js")
+
+
+class RegisterRowsFromTopicsTest(unittest.TestCase):
+    """GAP-M5: the save-as-register projection from a run's persisted topics.
+
+    The route reads ``DiscoveryRepository.list_topics(run_id)`` (topic-shaped
+    records) and hands them here; the pure projection is the tested seam (the
+    route is a thin mirror of the IP/BACnet save-as-register, which follow the
+    same no-TestClient convention).
+    """
+
+    def test_one_row_per_asset_keyed_on_device_ref(self) -> None:
+        rows = register_rows_from_topics(
+            [
+                {
+                    "topic": "udmi/site/x/ahu/01/events/pointset",
+                    "attributes": {"device_ref": "AHU-01", "schema": "udmi-v2", "site": "S", "room": "Plant"},
+                },
+                {  # same asset, a second topic — must NOT create a second row
+                    "topic": "udmi/site/x/ahu/01/state",
+                    "attributes": {"device_ref": "AHU-01", "schema": "", "site": "", "room": ""},
+                },
+                {"topic": "site/x/vav/09/state", "attributes": {"device_ref": "VAV-09"}},
+            ]
+        )
+        self.assertEqual([r["Asset"] for r in rows], ["AHU-01", "VAV-09"])  # sorted by asset id
+        ahu = rows[0]
+        self.assertEqual(ahu["Topic"], "udmi/site/x/ahu/01/events/pointset")  # first-seen topic
+        self.assertEqual(ahu["Schema"], "udmi-v2")
+        self.assertEqual(ahu["Site"], "S")
+        self.assertEqual(ahu["Location"], "Plant")
+        # Presence-only rows: no per-point breakdown is persisted to rebuild.
+        self.assertEqual(ahu["Point"], "")
+        self.assertEqual(ahu["Unit"], "")
+        # Every row carries the full golden column set (round-trips into the CSV).
+        self.assertEqual(set(ahu), set(REGISTER_TEMPLATE_COLUMNS))
+
+    def test_topic_without_asset_is_dropped(self) -> None:
+        self.assertEqual(register_rows_from_topics([{"topic": "orphan", "attributes": {}}]), [])
+        self.assertEqual(register_rows_from_topics([]), [])
+
+    def test_rows_serialize_to_the_golden_ten_columns(self) -> None:
+        rows = register_rows_from_topics(
+            [{"topic": "t", "attributes": {"device_ref": "AHU-01"}}]
+        )
+        self.assertEqual(_register_csv(rows).splitlines()[0], ",".join(GOLDEN_REGISTER_COLUMNS))
+        self.assertIn("AHU-01", _register_csv(rows))
 
 
 class RunParameterSeamTest(unittest.TestCase):

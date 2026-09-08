@@ -297,6 +297,36 @@ export function formatBacnetSidecarSummaryCards(
   });
 }
 
+// GAP-C2 (MQTT): the four-card summary strip for the native MQTT sidecar lane.
+// The mqtt_scanner engine stamps these onto result_summary
+// (topics_discovered / assets_discovered / register_matches / register_rogue),
+// so read them directly like the IP/BACnet variants. Same null-when-none /
+// "—"-for-null-field contract so a dry-run or an older run omits the strip.
+const MQTT_SIDECAR_SUMMARY_FIELDS = [
+  ["Topics", "topics_discovered"],
+  ["Assets", "assets_discovered"],
+  ["Matches", "register_matches"],
+  ["Rogue", "register_rogue"],
+] as const;
+
+export function formatMqttSidecarSummaryCards(
+  summary: Record<string, unknown> | null | undefined,
+): IpSidecarSummaryCard[] | null {
+  if (!summary || typeof summary !== "object") {
+    return null;
+  }
+  const anyPresent = MQTT_SIDECAR_SUMMARY_FIELDS.some(
+    ([, key]) => typeof summary[key] === "number",
+  );
+  if (!anyPresent) {
+    return null;
+  }
+  return MQTT_SIDECAR_SUMMARY_FIELDS.map(([heading, key]) => {
+    const value = summary[key];
+    return { heading, value: typeof value === "number" ? String(value) : "—" };
+  });
+}
+
 /**
  * Project `result_summary.routers` (stamped by the bacnet_scanner engine) into
  * display rows. Returns null when the key is absent or not a list — a pre-router

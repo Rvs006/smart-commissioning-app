@@ -109,6 +109,7 @@ def process_mqtt_scanner_run(
     sidecar_base_url: str | None = None,
     sidecar_client: SidecarClient | None = None,
     import_loader: Callable[[str], list[dict[str, Any]]] | None = None,
+    raw_export_sink: Callable[[bytes], str | None] | None = None,
 ) -> Any:
     """Run a sidecar-backed MQTT capture through the shared engine lifecycle.
 
@@ -122,6 +123,14 @@ def process_mqtt_scanner_run(
         sidecar_client: transport override for tests.
         import_loader: accepted-row loader used to fetch the bound register rows
             by import id.
+        raw_export_sink: GAP-M6 evidence hook. Given the raw export-archive ZIP
+            bytes, it persists them as run raw evidence and returns the artifact
+            id (or ``None`` on any failure). Called best-effort AFTER a non-empty
+            capture; a sink error never fails the capture. The returned id is
+            surfaced on ``result_summary.raw_evidence_artifact_id`` so the UI can
+            offer a download. The default sidecar client is the only client that
+            returns the raw bytes, so an injected test client (no ``export_zip``)
+            simply never triggers the sink.
     """
     is_cancelled = make_cancel_checker(run_store, run_id)
     ctx = EngineContext(
@@ -140,6 +149,7 @@ def process_mqtt_scanner_run(
             base_url=sidecar_base_url,
             client=sidecar_client,
             import_loader=import_loader,
+            raw_export_sink=raw_export_sink,
         )
 
     if persist_records is None:
@@ -153,6 +163,7 @@ async def _run_mqtt_scanner(
     base_url: str | None,
     client: SidecarClient | None,
     import_loader: Callable[[str], list[dict[str, Any]]] | None,
+    raw_export_sink: Callable[[bytes], str | None] | None = None,
 ) -> EngineResult:
     root_filter = _root_filter(ctx.parameters)
     capture_seconds = _capture_seconds(ctx.parameters)
@@ -236,7 +247,28 @@ async def _run_mqtt_scanner(
 
     manifest = payload.get("manifest") or {}
     payloads = payload.get("payloads") or {}
-    return _map_manifest(manifest, payloads, register_rows, ctx.parameters, cancelled=ctx.is_cancelled())
+
+    # GAP-M6: attach the raw export-archive ZIP as run raw evidence (best-effort).
+    # Only the default sidecar client returns the bytes; a captured/test client
+    # omits them, so the sink simply never fires. A sink failure must never fail
+    # the capture — the parsed topics are the primary evidence, the ZIP is a
+    # bonus that keeps the per-topic history the projection floors to a count.
+    raw_evidence_artifact_id: str | None = None
+    export_zip = payload.get("export_zip")
+    if raw_export_sink is not None and isinstance(export_zip, (bytes, bytearray)) and export_zip:
+        try:
+            raw_evidence_artifact_id = raw_export_sink(bytes(export_zip))
+        except Exception:  # noqa: BLE001 (evidence attach is advisory, never fatal)
+            raw_evidence_artifact_id = None
+
+    return _map_manifest(
+        manifest,
+        payloads,
+        register_rows,
+        ctx.parameters,
+        cancelled=ctx.is_cancelled(),
+        raw_evidence_artifact_id=raw_evidence_artifact_id,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -251,6 +283,7 @@ def _map_manifest(
     parameters: Mapping[str, Any],
     *,
     cancelled: bool = False,
+    raw_evidence_artifact_id: str | None = None,
 ) -> EngineResult:
     """Project the sidecar's export archive into the shared record shapes."""
     now = datetime.now(UTC)
@@ -304,18 +337,29 @@ def _map_manifest(
 
     issues = _issues_from_comparison(manifest_assets, register_rows, now)
 
-    result_summary_extra = json_safe_value(
-        {
-            "topics_discovered": manifest.get("topicCount", len(payloads)),
-            "assets_discovered": manifest.get("assetCount", len(manifest_assets)),
-            "register_expected": _expected_asset_count(register_rows),
-            "capture_mode": "bounded",
-            "scanner": ENGINE_NAME,
-            "broker_status_detail": (
-                "cancelled" if cancelled else ("messages_captured" if payloads else "capture_window_empty")
-            ),
-        }
-    )
+    # GAP-C2 summary counts: register match verdicts, straight from the manifest's
+    # own matched flag (matched = observed asset in the register; rogue = observed
+    # asset absent from it). Mirrors the IP/BACnet register_matches/register_rogue
+    # summary keys so the native strip reads one shape across all three lanes.
+    register_matches = sum(1 for asset in manifest_assets if asset.get("matched"))
+    register_rogue = len(manifest_assets) - register_matches
+
+    summary_fields: dict[str, Any] = {
+        "topics_discovered": manifest.get("topicCount", len(payloads)),
+        "assets_discovered": manifest.get("assetCount", len(manifest_assets)),
+        "register_expected": _expected_asset_count(register_rows),
+        "register_matches": register_matches,
+        "register_rogue": register_rogue,
+        "capture_mode": "bounded",
+        "scanner": ENGINE_NAME,
+        "broker_status_detail": (
+            "cancelled" if cancelled else ("messages_captured" if payloads else "capture_window_empty")
+        ),
+    }
+    # GAP-M6: only surface the evidence id when the ZIP was actually attached.
+    if raw_evidence_artifact_id:
+        summary_fields["raw_evidence_artifact_id"] = raw_evidence_artifact_id
+    result_summary_extra = json_safe_value(summary_fields)
 
     # Empty capture fails honestly: nothing on the wire is a real "no result",
     # not a silent success (unless the operator cancelled it).
@@ -476,6 +520,44 @@ def _register_csv(register_rows: Sequence[Mapping[str, Any]]) -> str:
     return buffer.getvalue()
 
 
+def register_rows_from_topics(topics: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    """GAP-M5: project a run's persisted MQTT topic records into register rows.
+
+    The MQTT save-as-register port, mirroring ``register_rows_from_devices`` in
+    the IP/BACnet engines and the vendored ``generateRegisterCsv`` (server.js):
+    one register row per discovered asset, keyed by the topic record's
+    ``attributes.device_ref`` (the asset id the manifest assigned). Asset
+    identity, schema, site and location come from the persisted topic
+    attributes; the representative Topic is the asset's first-seen topic.
+
+    ponytail: presence-only rows (Point / Unit / Data Type blank). The sidecar
+    engine persists topics, not extracted per-point rows, so the point breakdown
+    the vendored live tool wrote from ``a.livePoints`` is not in the run's
+    evidence to rebuild. A later cut could persist points and fill these; for now
+    the honest projection is one row per asset. Assets are ordered by id so the
+    generated CSV is stable across re-saves.
+    """
+    by_asset: dict[str, dict[str, str]] = {}
+    for topic in topics:
+        attributes = topic.get("attributes")
+        attributes = attributes if isinstance(attributes, Mapping) else {}
+        asset = str(attributes.get("device_ref") or "").strip()
+        if not asset:
+            continue  # a topic with no owning asset cannot form a register row
+        row = by_asset.get(asset)
+        if row is None:
+            row = {column: "" for column in REGISTER_TEMPLATE_COLUMNS}
+            row["Asset"] = asset
+            row["Topic"] = str(topic.get("topic") or "").strip()
+            by_asset[asset] = row
+        # First non-empty value wins for each descriptive field (asset topics
+        # share these; a later blank must not clobber an earlier real value).
+        for column, key in (("Schema", "schema"), ("Site", "site"), ("Location", "room")):
+            if not row[column]:
+                row[column] = str(attributes.get(key) or "").strip()
+    return [by_asset[asset] for asset in sorted(by_asset)]
+
+
 def _root_filter(parameters: Mapping[str, Any]) -> str:
     """The subscription filter(s) for /api/connect (comma-split by the sidecar)."""
     topics = parameters.get("topics")
@@ -565,7 +647,7 @@ def _default_sidecar_client(
             raise SidecarTransportError("The MQTT broker connection was refused during the capture.")
         connected = True
         _capture_window(base, capture_seconds, is_cancelled, progress)
-        manifest, payloads = _export_archive(base)
+        manifest, payloads, export_zip = _export_archive(base)
     except urllib.error.HTTPError as error:
         # A non-2xx from connect (502) or register — reached the sidecar, but the
         # broker/handshake failed. Honest failure, no raw error text surfaced.
@@ -579,7 +661,9 @@ def _default_sidecar_client(
     finally:
         if connected:
             _post_disconnect(base)  # always release the broker session, even on error
-    return {"manifest": manifest, "payloads": payloads}
+    # export_zip carries the raw archive bytes for GAP-M6 evidence (b"" when the
+    # capture was empty). The projection is still driven off manifest/payloads.
+    return {"manifest": manifest, "payloads": payloads, "export_zip": export_zip}
 
 
 def _capture_window(
@@ -604,17 +688,22 @@ def _capture_window(
             time.sleep(min(1.0, remaining))
 
 
-def _export_archive(base: str) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-    """GET /api/export-archive; unzip in-memory. 409 => empty capture (honest)."""
+def _export_archive(base: str) -> tuple[dict[str, Any], dict[str, dict[str, Any]], bytes]:
+    """GET /api/export-archive; unzip in-memory. 409 => empty capture (honest).
+
+    Returns ``(manifest, payloads, raw_zip_bytes)``; the raw bytes are kept for
+    GAP-M6 evidence attach and are ``b""`` on an empty (409) capture.
+    """
     request = urllib.request.Request(f"{base}/api/export-archive", headers={"Accept": "application/zip"})  # noqa: S310
     try:
         with urllib.request.urlopen(request, timeout=30.0) as response:  # noqa: S310
             data = response.read()
     except urllib.error.HTTPError as error:
         if error.code == 409:
-            return {}, {}  # "Nothing discovered yet" — an empty capture, not a transport error
+            return {}, {}, b""  # "Nothing discovered yet" — an empty capture, not a transport error
         raise
-    return _read_export_zip(data)
+    manifest, payloads = _read_export_zip(data)
+    return manifest, payloads, data
 
 
 def _read_export_zip(data: bytes) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
@@ -748,6 +837,32 @@ def _demo() -> None:
     assert severities == ["high", "medium"], severities  # missing asset high, missing point medium
     kinds = {i.issue_type for i in result.issues}
     assert kinds == {"mqtt_scanner_missing_asset", "mqtt_scanner_missing_point"}, kinds
+
+    # GAP-C2 summary counts: 1 matched (AHU-01), 1 rogue (VAV-09, matched=False).
+    assert result.result_summary_extra["register_matches"] == 1, result.result_summary_extra
+    assert result.result_summary_extra["register_rogue"] == 1, result.result_summary_extra
+    # GAP-M6: the evidence id is only present when a sink returned one.
+    assert "raw_evidence_artifact_id" not in result.result_summary_extra
+    with_evidence = _map_manifest(manifest, payloads, register_rows, {}, raw_evidence_artifact_id="artifact_abc")
+    assert with_evidence.result_summary_extra["raw_evidence_artifact_id"] == "artifact_abc"
+
+    # GAP-M5: persisted topics -> one register row per asset, sorted by asset id.
+    reg_rows = register_rows_from_topics(
+        [
+            {"topic": "udmi/site/x/ahu/01/events/pointset",
+             "attributes": {"device_ref": "AHU-01", "schema": "udmi-v2", "site": "S", "room": "Plant"}},
+            {"topic": "udmi/site/x/ahu/01/state",
+             "attributes": {"device_ref": "AHU-01", "schema": "", "site": "", "room": ""}},
+            {"topic": "site/x/vav/09/state", "attributes": {"device_ref": "VAV-09"}},
+            {"topic": "orphan/topic", "attributes": {}},  # no asset -> dropped
+        ]
+    )
+    assert [r["Asset"] for r in reg_rows] == ["AHU-01", "VAV-09"], reg_rows
+    ahu = reg_rows[0]
+    assert ahu["Topic"] == "udmi/site/x/ahu/01/events/pointset", ahu  # first-seen topic
+    assert ahu["Schema"] == "udmi-v2" and ahu["Site"] == "S" and ahu["Location"] == "Plant", ahu
+    assert set(ahu) == set(REGISTER_TEMPLATE_COLUMNS), ahu
+    assert _register_csv(reg_rows).splitlines()[0] == ",".join(REGISTER_TEMPLATE_COLUMNS)
 
     # empty capture fails honestly.
     empty = _map_manifest({"assets": []}, {}, [], {})

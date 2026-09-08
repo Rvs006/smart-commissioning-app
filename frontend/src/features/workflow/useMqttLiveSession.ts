@@ -42,7 +42,7 @@ export type MqttLiveSessionState = {
   stop: () => Promise<void>;
   focus: (asset: string) => Promise<void>;
   subscribe: (rootFilter: string, qos?: number) => Promise<void>;
-  search: (q: string) => Promise<void>;
+  search: (q: string, matchedOnly?: boolean) => Promise<void>;
   refreshStatus: () => Promise<void>;
 };
 
@@ -297,14 +297,14 @@ export function useMqttLiveSession(
   );
 
   const search = useCallback(
-    async (q: string) => {
+    async (q: string, matchedOnly?: boolean) => {
       const sessionId = state.session?.session_id;
       if (!sessionId) {
         return;
       }
       try {
         // The filtered tree rides the snapshot stream, so ignore the response.
-        await searchMqttLive({ sessionId, q, context: context() });
+        await searchMqttLive({ sessionId, q, matchedOnly, context: context() });
       } catch {
         // Search is best-effort; a failure leaves the current filter unchanged.
       }

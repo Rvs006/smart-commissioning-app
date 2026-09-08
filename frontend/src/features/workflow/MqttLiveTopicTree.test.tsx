@@ -73,9 +73,48 @@ describe("MqttLiveTopicTree", () => {
     const { container } = render(
       <MqttLiveTopicTree lastActivity={null} totalTopics={3} tree={rateDescTree} treeShown={3} />,
     );
-    const names = Array.from(container.querySelectorAll("tbody tr td:first-child")).map((cell) =>
-      cell.textContent?.trim(),
+    // Read the name element only — the row cell also carries the copy-topic button.
+    const names = Array.from(container.querySelectorAll("tbody tr td:first-child > strong")).map(
+      (element) => element.textContent?.trim(),
     );
     expect(names).toEqual(["alpha", "mike", "zulu"]);
+  });
+
+  it("ranks by rate on demand (GAP-M2), then holds the order as rates drift", () => {
+    const readNames = (container: HTMLElement) =>
+      Array.from(container.querySelectorAll("tbody tr td:first-child > strong")).map((element) =>
+        element.textContent?.trim(),
+      );
+    const rateTree: MqttLiveTreeNode[] = [
+      { n: "zulu", p: "zulu", t: 1, m: 90, r: 9, mt: 0 },
+      { n: "alpha", p: "alpha", t: 1, m: 10, r: 1, mt: 0 },
+      { n: "mike", p: "mike", t: 1, m: 50, r: 5, mt: 0 },
+    ];
+    const { container, rerender } = render(
+      <MqttLiveTopicTree lastActivity={null} totalTopics={3} tree={rateTree} treeShown={3} />,
+    );
+    expect(readNames(container)).toEqual(["alpha", "mike", "zulu"]); // default A-Z
+
+    fireEvent.click(screen.getByRole("button", { name: "Rate ↻" }));
+    expect(readNames(container)).toEqual(["zulu", "mike", "alpha"]); // rate-desc
+
+    // Rates drift so alpha is now busiest, but the ranking was frozen on the
+    // press, so the row order must NOT reshuffle underneath the operator.
+    rerender(
+      <MqttLiveTopicTree
+        lastActivity={null}
+        totalTopics={3}
+        tree={[
+          { n: "zulu", p: "zulu", t: 1, m: 91, r: 0.1, mt: 0 },
+          { n: "alpha", p: "alpha", t: 1, m: 999, r: 99, mt: 0 },
+          { n: "mike", p: "mike", t: 1, m: 50, r: 5, mt: 0 },
+        ]}
+        treeShown={3}
+      />,
+    );
+    expect(readNames(container)).toEqual(["zulu", "mike", "alpha"]); // held
+
+    fireEvent.click(screen.getByRole("button", { name: "Rate ↻" }));
+    expect(readNames(container)).toEqual(["alpha", "mike", "zulu"]); // re-ranked on demand
   });
 });
