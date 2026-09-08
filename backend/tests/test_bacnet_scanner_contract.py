@@ -441,5 +441,39 @@ class ExportAssetsContractTest(unittest.TestCase):
         self.assertEqual(assets[0]["json"]["pointsExported"], 0)
 
 
+_SCANNERS_PY = (
+    _REPO_ROOT / "backend" / "app" / "api" / "routes" / "scanners.py"
+).read_text(encoding="utf-8")
+
+
+class PersistWiringContractTest(unittest.TestCase):
+    """BACnet builds ONE mixed ``structured_records`` list — device rows, then
+    point rows carrying ``point_id``/``device_ref`` (see ExportShapeContractTest
+    above). The native run route must persist it with the splitting writer
+    (``replace_devices_and_points``); ``replace_devices`` funnels every record
+    into ``_devices`` and never writes ``_points``, so discovered points vanish
+    from the refreshed Points/Live Data view. Guards the regression where the
+    BACnet route was wired to ``run_store.replace_devices``.
+    """
+
+    def _bacnet_dispatch(self) -> str:
+        start = _SCANNERS_PY.index("process_bacnet_scanner_run(")
+        end = _SCANNERS_PY.index('label="BACnet scanner"', start)
+        return _SCANNERS_PY[start:end]
+
+    def test_bacnet_run_persists_points_via_splitting_writer(self) -> None:
+        self.assertIn(
+            "persist_records=run_store.replace_devices_and_points",
+            self._bacnet_dispatch(),
+        )
+
+    def test_bacnet_run_does_not_use_device_only_writer(self) -> None:
+        # The device-only writer would drop the point rows.
+        self.assertNotIn(
+            "persist_records=run_store.replace_devices,",
+            self._bacnet_dispatch(),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

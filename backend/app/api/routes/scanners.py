@@ -263,7 +263,13 @@ def create_bacnet_scanner_run(
             execution_mode="inline_local_fallback",
             throttle=_settings_throttle(frozen_parameters),
             dry_run=is_dry_run(frozen_parameters),
-            persist_records=run_store.replace_devices,
+            # BACnet builds ONE mixed structured_records list (devices, then
+            # point rows carrying point_id/device_ref). replace_devices funnels
+            # everything into _devices and never writes _points, so discovered
+            # points vanish from the refreshed Points/Live Data view. Use the
+            # splitting writer so point rows land in _points. IP stays on
+            # replace_devices (device-only records, no point rows).
+            persist_records=run_store.replace_devices_and_points,
             sidecar_base_url=base_url,
             import_loader=ImportRepository(service.engine).get_accepted_rows,
         )
