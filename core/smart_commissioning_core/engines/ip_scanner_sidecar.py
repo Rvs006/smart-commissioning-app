@@ -209,6 +209,16 @@ def _map_result(
 
         if is_device:
             open_ports = list(row.get("openPorts") or [])
+            # openPorts is a raw numeric list; the readback schema (ObservedPort)
+            # needs {port, protocol} objects. Tag UDP from openUdp membership and
+            # default the rest to tcp (matches ip_scan._build_observed_ports), and
+            # drop out-of-range values so GET results can never re-break on them.
+            udp_ports = set(row.get("openUdp") or [])
+            observed_ports = [
+                {"port": p, "protocol": "udp" if p in udp_ports else "tcp"}
+                for p in open_ports
+                if isinstance(p, int) and not isinstance(p, bool) and 1 <= p <= 65_535
+            ]
             discovered_assets.append(
                 json_safe_value(
                     {
@@ -216,7 +226,7 @@ def _map_result(
                         "ip_address": ip,
                         "mac_address": row.get("mac"),
                         "hostname": row.get("discoveredHostname") or row.get("hostname"),
-                        "observed_ports": open_ports,
+                        "observed_ports": observed_ports,
                         "match_basis": "ip",
                         "status_detail": _status_detail(row),
                         "last_seen_at": now,
@@ -530,7 +540,7 @@ def _demo() -> None:
         {"ip": "192.0.2.12", "register": "missing", "rag": "red", "status": "unreachable",
          "expectedPorts": [102], "openPorts": []},
         {"ip": "192.0.2.99", "register": "rogue", "rag": "red", "status": "rogue",
-         "openPorts": [23], "extraPorts": [23]},
+         "openPorts": [23, 47808], "openUdp": [47808], "extraPorts": [23]},
     ]
     summary = {"expected": 3, "reachable": 3, "expectedReachable": 2,
                "matches": 1, "partial": 1, "missing": 1, "rogue": 1}
@@ -539,6 +549,16 @@ def _demo() -> None:
     # missing (unreachable) is an issue, not a device; the other 3 are devices.
     assert len(result.discovered_assets) == 3, result.discovered_assets
     assert len(result.structured_records) == 3, result.structured_records
+    # observed_ports must be {port, protocol} objects (readback schema shape),
+    # never raw ints - the exact gap that shipped once. udp is tagged from openUdp.
+    for asset in result.discovered_assets:
+        for entry in asset["observed_ports"]:
+            assert set(entry) == {"port", "protocol"}, entry
+            assert isinstance(entry["port"], int) and 1 <= entry["port"] <= 65_535, entry
+            assert entry["protocol"] in ("tcp", "udp"), entry
+    rogue_asset = next(a for a in result.discovered_assets if a["ip_address"] == "192.0.2.99")
+    rogue_protocols = {e["port"]: e["protocol"] for e in rogue_asset["observed_ports"]}
+    assert rogue_protocols == {23: "tcp", 47808: "udp"}, rogue_protocols
     addresses = {r["address"] for r in result.structured_records}
     assert "192.0.2.12" not in addresses, addresses
     # green raises no issue; amber + 2 reds do.

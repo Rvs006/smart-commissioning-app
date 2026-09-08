@@ -730,7 +730,15 @@ def export_bacnet_scan_assets(
         )
 
     repository = DiscoveryRepository(service.engine)
-    assets = build_export_assets(repository.list_devices(run_id), repository.list_points(run_id))
+    # A succeeded scan can still carry an abandoned point export (deadline hit
+    # before `ready`); the summary records that so the rebuilt assets are stamped
+    # pointsExportComplete:false instead of reading as a genuine zero-point ZIP.
+    export_complete = bool(run.result_summary.get("export_complete", True))
+    assets = build_export_assets(
+        repository.list_devices(run_id),
+        repository.list_points(run_id),
+        export_complete=export_complete,
+    )
     if not assets:
         raise HTTPException(
             status_code=409,

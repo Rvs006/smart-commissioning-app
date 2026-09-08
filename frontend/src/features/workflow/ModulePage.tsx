@@ -718,6 +718,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [bacnetInstanceLow, setBacnetInstanceLow] = useState("");
   const [bacnetInstanceHigh, setBacnetInstanceHigh] = useState("");
   const [bacnetDiscoverMs, setBacnetDiscoverMs] = useState("");
+  // Validate the range as the operator types so Run can gate on a half-filled or
+  // out-of-range pair instead of silently degrading to a global Who-Is.
+  const bacnetInstanceRange = resolveBacnetInstanceRange(bacnetInstanceLow, bacnetInstanceHigh);
   const [scanTargetRows, setScanTargetRows] = useState<IpTargetRow[]>([]);
   const [scanExclusionRows, setScanExclusionRows] = useState<IpTargetRow[]>([]);
   const [scanPreviewRunId, setScanPreviewRunId] = useState<string | null>(null);
@@ -5280,6 +5283,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         />
                         <small>Leave both blank for a global Who-Is across all device instances.</small>
                       </label>
+                      {bacnetInstanceRange.error && (
+                        <p className="error-text" role="alert">
+                          {bacnetInstanceRange.error}
+                        </p>
+                      )}
                       <label>
                         Discovery window (ms)
                         <input
@@ -5451,12 +5459,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     // One confirmed live run owns the monitor and Stop action. A
                     // restored run blocks another start exactly like one submitted
                     // in this session.
+                    // Honest feedback for a half-filled / out-of-range BACnet
+                    // instance range: gate Run instead of letting it degrade to a
+                    // global Who-Is (the builder omits the pair, so a submit here
+                    // would silently scan everything).
+                    const bacnetRangeBlocked =
+                      action.kind === "discovery" &&
+                      action.runKind === "bacnet_sidecar" &&
+                      bacnetInstanceRange.error !== null;
                     const blocked =
                       scanBlocked ||
                       !canEngineer ||
                       overCapBlocked ||
                       startedRunActive ||
-                      runAccessClosed;
+                      runAccessClosed ||
+                      bacnetRangeBlocked;
                     // Role gate takes priority in the tooltip; otherwise the existing
                     // scan-authorization hint is shown for a blocked real scan.
                     const blockedTooltip = !canEngineer
@@ -5477,7 +5494,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                 : "Run time exceeds the 48-hour capture limit."
                               : overCapBlocked
                                 ? "Run time exceeds the 48-hour capture limit."
-                                : undefined;
+                                : bacnetRangeBlocked
+                                  ? (bacnetInstanceRange.error ?? undefined)
+                                  : undefined;
                     return (
                       <div className="run-card" key={action.id}>
                         <div>
@@ -9931,6 +9950,43 @@ function scanPortSpecification(ports: ScanPort[]): string {
     .join(", ");
 }
 
+// BACnet device-instance bounds (0 .. 2^22-1). A device-instance range is
+// pair-or-neither: the vendored scanner sends a bounded Who-Is only when BOTH
+// low and high arrive; a lone bound falls through to a global Who-Is. So a
+// half-filled or invalid range must never reach the wire (it would silently
+// degrade to "scan everything" while the UI showed the operator's bound as
+// accepted). One rule, shared by the builder and the Run gate.
+const BACNET_INSTANCE_MIN = 0;
+const BACNET_INSTANCE_MAX = 4_194_303;
+
+function resolveBacnetInstanceRange(
+  lowRaw: string | undefined,
+  highRaw: string | undefined,
+): { low?: number; high?: number; error: string | null } {
+  const lo = (lowRaw ?? "").trim();
+  const hi = (highRaw ?? "").trim();
+  if (lo === "" && hi === "") {
+    return { error: null }; // both blank -> global Who-Is (the sidecar default)
+  }
+  const low = Number(lo);
+  const high = Number(hi);
+  const valid =
+    lo !== "" &&
+    hi !== "" &&
+    Number.isInteger(low) &&
+    Number.isInteger(high) &&
+    low >= BACNET_INSTANCE_MIN &&
+    high <= BACNET_INSTANCE_MAX &&
+    low <= high;
+  if (!valid) {
+    return {
+      error:
+        "Enter both bounds or leave both blank. Low must be a whole number no greater than high, within 0 to 4194303.",
+    };
+  }
+  return { low, high, error: null };
+}
+
 // Builds discovery run parameters, attaching the authorization contract for
 // real scans and the dry_run flag for previews. IP scans also carry the port
 // specification. Mirrors the backend safety contract (parameters.authorized).
@@ -10039,28 +10095,18 @@ export function buildDiscoveryParameters(
   }
   // GAP-B1: BACnet sidecar lane. Forward the operator's device-instance range as
   // low/high and the discovery window as discoverMs (the adapter's _scan_query
-  // reads exactly these keys). Only positive finite values go on the wire; a blank
-  // or garbage field omits the key so the sidecar's own default applies (a blank
-  // range is a global Who-Is). low/high are BACnet device instances (0 is a valid
-  // instance, so >= 0), discoverMs is a duration (> 0).
+  // reads exactly these keys). The range is a validated pair (see below); a blank
+  // range omits both keys so the sidecar's global Who-Is default applies.
+  // discoverMs is a duration (> 0) and stays per-key.
   if (action.runKind === "bacnet_sidecar") {
-    // Number("") === 0, so coercing before the blank check would send low:0 /
-    // high:0 for an untouched field and pin the Who-Is to instance range [0,0]
-    // (the sidecar's normal case is BOTH blank = global Who-Is). Guard on the
-    // raw trimmed string being non-empty FIRST so a blank field omits the key.
-    const lowRaw = (options.bacnetInstanceLow ?? "").trim();
-    if (lowRaw !== "") {
-      const low = Number(lowRaw);
-      if (Number.isInteger(low) && low >= 0) {
-        parameters.low = low;
-      }
-    }
-    const highRaw = (options.bacnetInstanceHigh ?? "").trim();
-    if (highRaw !== "") {
-      const high = Number(highRaw);
-      if (Number.isInteger(high) && high >= 0) {
-        parameters.high = high;
-      }
+    // Pair-or-neither: emit low/high only as a validated range, otherwise omit
+    // BOTH. A lone or inverted bound would fall through to a global Who-Is on the
+    // sidecar while looking accepted. This also catches a saved draft or deep link
+    // carrying a half-filled range that never passed through the live Run gate.
+    const range = resolveBacnetInstanceRange(options.bacnetInstanceLow, options.bacnetInstanceHigh);
+    if (range.low !== undefined && range.high !== undefined) {
+      parameters.low = range.low;
+      parameters.high = range.high;
     }
     const discoverMs = Number((options.bacnetDiscoverMs ?? "").trim());
     if (Number.isFinite(discoverMs) && discoverMs > 0) {

@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 import time
 import urllib.error
 from collections.abc import AsyncIterator, Mapping
@@ -26,12 +27,15 @@ from functools import partial
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from smart_commissioning_core.db.repositories import ImportRepository
 from smart_commissioning_core.engines.mqtt_publish_sidecar import process_mqtt_publish_run
 from smart_commissioning_core.engines.mqtt_scanner_sidecar import (
     _connect_config,
     _get_json,
+    _load_register_rows,
     _post_disconnect,
     _post_json,
+    _register_csv,
     _root_filter,
 )
 from smart_commissioning_core.mqtt_settings import MqttSettingsError, build_mqtt_connection_settings
@@ -47,6 +51,7 @@ from app.api.routes.discovery import (
     require_engineer,
     service,
 )
+from app.api.routes.scanners import _bind_scanner_register
 from app.core.auth import AuthPrincipal, get_principal
 from app.core.config import get_settings
 from app.core.scopes import load_scoped_run, require_project_site_access
@@ -73,6 +78,16 @@ from app.services.sidecar_supervisor import MQTT_SCANNER, SidecarUnavailable
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Serialises the whole connect ceremony (lease acquire + register push + broker
+# connect) so two concurrent take-overs cannot interleave their POSTs against the
+# single shared sidecar and leave its register belonging to one workspace while
+# the lease/connection belong to another. Deliberately NOT live_service.lock: the
+# async relay and reaper take that, and the POSTs below can block for seconds
+# (sidecar doConnect), which would freeze every SSE stream.
+# ponytail: one process-global ceremony lock; the sidecar is single-tenant so
+# there is nothing finer worth locking.
+_connect_ceremony_lock = threading.Lock()
 
 # Wall-clock cap on one browser stream; the frontend reconnects on timeout (same
 # value as events.py MAX_STREAM_SECONDS).
@@ -169,56 +184,83 @@ def connect_mqtt_live(
             ),
         ) from error
 
-    # Close the run-vs-live race under the single lease lock: no mqtt_scanner run
-    # may be queued/running, and no live session may already be held (unless
-    # taking over). Both lanes drive the sidecar's one connection.
-    with live_service.lock:
-        active = service.list_runs(job_types={"mqtt_scanner"}, status="running", limit=1) or service.list_runs(
-            job_types={"mqtt_scanner"}, status="queued", limit=1
-        )
-        if active:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"An MQTT capture run is in progress (run {active[0].run_id}). Wait for it to "
-                    "finish or stop it before starting a live session."
-                ),
-            )
-        held = live_service.current_locked()
-        if held is not None and not request.take_over:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"An MQTT live session is already open (started by {held.owner} at "
-                    f"{held.since.isoformat()}). Use take over to replace it."
-                ),
-            )
-        session = live_service.acquire(
-            owner=principal.username,
-            project_id=request.project_id,
-            site_id=request.site_id,
-            disconnect=partial(_post_disconnect, base_url),
-            take_over=request.take_over,
-        )
+    # Bind THIS workspace's MQTT register the same way the capture lane does
+    # (create_mqtt_scanner_run). The sidecar is one shared process across every
+    # project/site, and /api/connect's resetState leaves the register in place, so
+    # without this the live snapshot's matched flags, matched-only filter, focused
+    # metadata, and status register_summary would compare against whatever register
+    # the process last held - empty on a cold start, or another workspace's after
+    # any prior capture. Resolve rows now (DB reads only, no lease held yet) so a
+    # lookup failure is a clean 500 that never wedges the lane.
+    reg_params: dict[str, object] = {}
+    _bind_scanner_register(
+        request.project_id, request.site_id, reg_params, import_type="mqtt_scanner_register"
+    )
+    register_rows = _load_register_rows(reg_params, ImportRepository(service.engine).get_accepted_rows)
 
-    # Lock released before any network I/O. Drive the sidecar connect; on any
-    # failure the lease is released so a dead session never wedges the lane.
-    try:
-        result = _post_json(base_url, "/api/connect", config)
-    except urllib.error.HTTPError as error:
-        live_service.release(session.session_id)
-        raise HTTPException(
-            status_code=502,
-            detail=f"The MQTT broker connection was refused: {_sidecar_error_text(error)}",
-        ) from error
-    except (urllib.error.URLError, OSError) as error:
-        live_service.release(session.session_id)
-        raise HTTPException(status_code=503, detail="MQTT discovery sidecar is not available.") from error
+    # The register push and the connect are two coupled mutations of the one shared
+    # sidecar, so they run as a single ceremony that no concurrent take-over can
+    # interleave. Acquire happens inside the same lock, so the last session to
+    # acquire the lease is also the last to push register+connect: the sidecar's
+    # register AND its broker connection always end up the final lease-holder's,
+    # never a mix of two workspaces'.
+    with _connect_ceremony_lock:
+        # Close the run-vs-live race under the single lease lock: no mqtt_scanner
+        # run may be queued/running, and no live session may already be held
+        # (unless taking over). Both lanes drive the sidecar's one connection.
+        with live_service.lock:
+            active = service.list_runs(job_types={"mqtt_scanner"}, status="running", limit=1) or service.list_runs(
+                job_types={"mqtt_scanner"}, status="queued", limit=1
+            )
+            if active:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"An MQTT capture run is in progress (run {active[0].run_id}). Wait for it to "
+                        "finish or stop it before starting a live session."
+                    ),
+                )
+            held = live_service.current_locked()
+            if held is not None and not request.take_over:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"An MQTT live session is already open (started by {held.owner} at "
+                        f"{held.since.isoformat()}). Use take over to replace it."
+                    ),
+                )
+            session = live_service.acquire(
+                owner=principal.username,
+                project_id=request.project_id,
+                site_id=request.site_id,
+                disconnect=partial(_post_disconnect, base_url),
+                take_over=request.take_over,
+            )
 
-    if isinstance(result, dict) and result.get("ok") is False:
-        live_service.release(session.session_id)
-        detail = str((result.get("status") or {}).get("error") or result.get("error") or "no detail")
-        raise HTTPException(status_code=502, detail=f"The MQTT broker connection was refused: {detail}")
+        # live_service.lock released (so the relay/reaper stay responsive); the
+        # ceremony lock is still held across the POSTs. Push this workspace's
+        # register (or a header-only CSV, which empties the sidecar's register and
+        # resets every asset's matched/meta - server.js applyRegister), THEN
+        # connect, so the fresh subscription compares against the scoped register
+        # and never a stale one. On any failure the lease is released so a dead
+        # session never wedges the lane.
+        try:
+            _post_json(base_url, "/api/register", {"csv": _register_csv(register_rows)})
+            result = _post_json(base_url, "/api/connect", config)
+        except urllib.error.HTTPError as error:
+            live_service.release(session.session_id)
+            raise HTTPException(
+                status_code=502,
+                detail=f"The MQTT broker connection was refused: {_sidecar_error_text(error)}",
+            ) from error
+        except (urllib.error.URLError, OSError) as error:
+            live_service.release(session.session_id)
+            raise HTTPException(status_code=503, detail="MQTT discovery sidecar is not available.") from error
+
+        if isinstance(result, dict) and result.get("ok") is False:
+            live_service.release(session.session_id)
+            detail = str((result.get("status") or {}).get("error") or result.get("error") or "no detail")
+            raise HTTPException(status_code=502, detail=f"The MQTT broker connection was refused: {detail}")
 
     connection = result.get("status") if isinstance(result, dict) else {}
     return MqttLiveConnectResponse(ok=True, session=_session_info(session), connection=connection or {})

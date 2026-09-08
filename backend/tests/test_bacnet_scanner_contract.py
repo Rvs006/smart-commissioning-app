@@ -441,6 +441,105 @@ class ExportAssetsContractTest(unittest.TestCase):
         self.assertEqual(assets[0]["json"]["pointsExported"], 0)
 
 
+class ExportCompletenessContractTest(unittest.TestCase):
+    """An abandoned point export (deadline hit before `ready`) must not be
+    laundered into an all-zero success. ``_map_result`` records the completion
+    fact and ``build_export_assets`` stamps each asset so pointsExported:0 is
+    distinguishable from a genuine no-point device."""
+
+    def _reachable_device_records(
+        self, object_count: int, points: list[dict[str, object]]
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        rows = [{"instance": 1001, "register": "match", "rag": "green", "status": "reachable",
+                 "ip": "10.0.0.11", "name": "AHU-1", "objectCount": object_count}]
+        device_files = [{"deviceInstance": 1001, "points": points}] if points else []
+        records = _map_result(rows, {}, device_files, {}).structured_records
+        return (
+            [r for r in records if "device_ref" not in r],
+            [r for r in records if "device_ref" in r],
+        )
+
+    def test_map_result_stamps_export_complete(self) -> None:
+        self.assertIs(_map_result([], {}, [], {}).result_summary_extra["export_complete"], True)
+        self.assertIs(
+            _map_result([], {}, [], {}, export_complete=False).result_summary_extra["export_complete"],
+            False,
+        )
+
+    def test_abandoned_export_is_not_a_clean_zero(self) -> None:
+        # Reachable device, objectCount 5, but export never returned any files.
+        devices, points = self._reachable_device_records(5, [])
+        self.assertEqual(points, [])
+        assets = build_export_assets(devices, points, export_complete=False)
+        self.assertEqual(len(assets), 1)
+        self.assertIs(assets[0]["json"]["pointsExportComplete"], False)
+        self.assertEqual(assets[0]["json"]["pointsExported"], 0)
+
+    def test_genuine_zero_point_device_reads_as_complete(self) -> None:
+        # Export completed and the device legitimately exposed zero readable
+        # points (objectCount 0). Must be distinguishable from the abandoned case.
+        devices, points = self._reachable_device_records(0, [])
+        assets = build_export_assets(devices, points, export_complete=True)
+        self.assertEqual(assets[0]["json"]["pointsExported"], 0)
+        self.assertIs(assets[0]["json"]["pointsExportComplete"], True)
+
+    def test_completed_export_with_points_is_complete(self) -> None:
+        devices, points = self._reachable_device_records(
+            2, [{"objectType": "analog-input", "objectInstance": 1, "name": "SAT",
+                 "presentValue": "18.6", "units": "degreesCelsius"}])
+        assets = build_export_assets(devices, points, export_complete=True)
+        self.assertEqual(assets[0]["json"]["pointsExported"], 1)
+        self.assertIs(assets[0]["json"]["pointsExportComplete"], True)
+
+    def test_object_count_tie_breaker_flags_suspect_device(self) -> None:
+        # Run completed, but this device advertised objects and returned none:
+        # suspect (per-device tie-breaker), even though export_complete is True.
+        devices, points = self._reachable_device_records(5, [])
+        assets = build_export_assets(devices, points, export_complete=True)
+        self.assertIs(assets[0]["json"]["pointsExportComplete"], False)
+
+    def test_truncated_device_is_incomplete_despite_ready_and_points(self) -> None:
+        # P1b: a device past the sidecar's 2000-object export cap returns
+        # truncated=true WITH a partial (non-empty) point set inside a ZIP that
+        # still reached `ready`, so export_complete is True and suspect_zero is
+        # False. The run-level export_complete must still fold to False, the device
+        # must persist points_truncated=True, and the rebuilt asset must read
+        # incomplete while keeping the partial points (never zeroed).
+        rows = [{"instance": 1001, "register": "match", "rag": "green", "status": "reachable",
+                 "ip": "10.0.0.11", "name": "AHU-1", "objectCount": 2500}]
+        device_files = [{"deviceInstance": 1001, "truncated": True, "points": [
+            {"objectType": "analog-input", "objectInstance": 1, "name": "SAT",
+             "presentValue": "18.60", "units": "degreesCelsius"}]}]
+        result = _map_result(rows, {}, device_files, {}, export_complete=True)
+        self.assertIs(result.result_summary_extra["export_complete"], False)
+        records = result.structured_records
+        devices = [r for r in records if "device_ref" not in r]
+        points = [r for r in records if "device_ref" in r]
+        self.assertIs(devices[0]["attributes"]["points_truncated"], True)
+        asset = build_export_assets(devices, points, export_complete=True)[0]
+        self.assertIs(asset["json"]["pointsExportComplete"], False)
+        self.assertEqual(asset["json"]["pointsExported"], 1)  # partial set kept
+
+    def test_non_truncated_device_persists_points_truncated_false(self) -> None:
+        # Regression guard: a normal completed device is stamped points_truncated
+        # False and stays pointsExportComplete True (the fold changes nothing for
+        # the common case), and older evidence lacking the key rebuilds complete.
+        devices, points = self._reachable_device_records(
+            2, [{"objectType": "analog-input", "objectInstance": 1, "name": "SAT",
+                 "presentValue": "18.6", "units": "degreesCelsius"}])
+        self.assertIs(devices[0]["attributes"]["points_truncated"], False)
+        assets = build_export_assets(devices, points, export_complete=True)
+        self.assertIs(assets[0]["json"]["pointsExportComplete"], True)
+        # An older persisted device with no points_truncated key rebuilds complete.
+        legacy = {"device_type": "bacnet_device", "address": "10.0.0.9", "name": "D9",
+                  "attributes": {"device_instance": 9, "object_count": 1}}
+        legacy_points = [{"device_ref": "bacnet-device-9", "point_name": "P",
+                          "observed_value": {"value": "1"}, "units": "",
+                          "attributes": {"object_type": "analog-input", "object_instance": 1}}]
+        legacy_asset = build_export_assets([legacy], legacy_points, export_complete=True)[0]
+        self.assertIs(legacy_asset["json"]["pointsExportComplete"], True)
+
+
 _SCANNERS_PY = (
     _REPO_ROOT / "backend" / "app" / "api" / "routes" / "scanners.py"
 ).read_text(encoding="utf-8")
@@ -473,6 +572,23 @@ class PersistWiringContractTest(unittest.TestCase):
             "persist_records=run_store.replace_devices,",
             self._bacnet_dispatch(),
         )
+
+
+class ExportAssetsEndpointWiringTest(unittest.TestCase):
+    """The export-assets endpoint must forward the run's ``export_complete`` fact
+    into ``build_export_assets`` so an abandoned export's rebuilt ZIP is stamped
+    pointsExportComplete:false rather than shipping a clean all-zero artefact."""
+
+    def _endpoint(self) -> str:
+        # export_bacnet_scan_assets is the last route in the module.
+        start = _SCANNERS_PY.index("def export_bacnet_scan_assets(")
+        return _SCANNERS_PY[start:]
+
+    def test_endpoint_reads_export_complete_from_summary(self) -> None:
+        self.assertIn('run.result_summary.get("export_complete"', self._endpoint())
+
+    def test_endpoint_passes_export_complete_to_builder(self) -> None:
+        self.assertIn("export_complete=export_complete", self._endpoint())
 
 
 if __name__ == "__main__":

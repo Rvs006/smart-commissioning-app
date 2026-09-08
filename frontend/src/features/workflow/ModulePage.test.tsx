@@ -1243,6 +1243,35 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.queryByTitle(/BACnet advanced scanner/i)).toBeNull();
   });
 
+  it("gates Run on a half-filled or inverted BACnet instance range (F1)", async () => {
+    stubSidecarModuleFetch();
+    renderModule("bacnet-scanner");
+
+    const low = await screen.findByLabelText(/Device instance range — low/i);
+    const high = screen.getByLabelText(/Device instance range — high/i);
+    const rangeMessage = /Enter both bounds or leave both blank/i;
+
+    // Both blank -> a global Who-Is is allowed: once the engineer role loads Run
+    // is enabled and no range message shows.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled());
+    expect(screen.queryByText(rangeMessage)).toBeNull();
+
+    // Only the low bound filled -> half a range: gate Run with an inline message.
+    fireEvent.change(low, { target: { value: "1000" } });
+    expect(await screen.findByText(rangeMessage)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
+
+    // Completing the pair clears the gate.
+    fireEvent.change(high, { target: { value: "1999" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled());
+    expect(screen.queryByText(rangeMessage)).toBeNull();
+
+    // An inverted range (low > high) is gated too.
+    fireEvent.change(high, { target: { value: "999" } });
+    expect(await screen.findByText(rangeMessage)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
+  });
+
   it("renders the native MQTT sidecar body (flipped off the embed) with the live tree", async () => {
     stubSidecarModuleFetch();
     renderModule("mqtt-scanner");

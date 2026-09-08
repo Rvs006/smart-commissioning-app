@@ -224,6 +224,9 @@ async def _run_bacnet_scanner(
         payload.get("device_files") or [],
         ctx.parameters,
         routers=payload.get("routers") or [],
+        # A client that omits the key predates this fact; treat as complete so an
+        # older injected transport is never retro-flagged (real client always sets it).
+        export_complete=bool(payload.get("export_complete", True)),
     )
 
 
@@ -269,6 +272,7 @@ def _map_result(
     parameters: Mapping[str, Any],
     *,
     routers: Sequence[Mapping[str, Any]] = (),
+    export_complete: bool = True,
 ) -> EngineResult:
     """Project the sidecar's scan + export output into the shared record shapes.
 
@@ -291,6 +295,14 @@ def _map_result(
     discovered_assets: list[dict[str, Any]] = []
     structured_records: list[dict[str, Any]] = []
     issues: list[ValidationIssueRecord] = []
+
+    # A device whose object count exceeds the sidecar's 2000-object export cap
+    # comes back truncated=true on its per-asset export entry (server.js
+    # buildDeviceFiles): the ZIP still reaches `ready` so export_complete stays
+    # True, but its points are silently capped. Collect those instances so the
+    # per-device record and the run-level export_complete both record the read as
+    # incomplete rather than reporting a partial export as whole.
+    truncated_instances = {a.get("deviceInstance") for a in device_files if a.get("truncated")}
 
     for row in rows:
         instance = row.get("instance")
@@ -355,6 +367,10 @@ def _map_result(
                             "mismatch": row.get("mismatch"),
                             "location": row.get("location"),
                             "description": row.get("description"),
+                            # True when this device's point export hit the sidecar's
+                            # 2000-object cap; persisted so build_export_assets can
+                            # rebuild pointsExportComplete=False from evidence alone.
+                            "points_truncated": instance in truncated_instances,
                         },
                     }
                 )
@@ -398,6 +414,12 @@ def _map_result(
             "register_missing": summary.get("missing"),
             "register_rogue": summary.get("rogue"),
             "points_exported": sum(len(a.get("points") or []) for a in device_files),
+            # Did point acquisition finish? False means the export deadline hit /
+            # stream ended before `ready`, OR at least one device exceeded the
+            # 2000-object cap and returned a truncated point set, so points_exported
+            # is a partial artefact, NOT a genuine complete zero. Consumers must read
+            # the two together (build_export_assets / the export-assets endpoint do).
+            "export_complete": export_complete and not truncated_instances,
             "routers": [dict(router) for router in routers],
             "scanner": ENGINE_NAME,
         }
@@ -545,6 +567,8 @@ def _sanitize_filename(value: str) -> str:
 def build_export_assets(
     devices: Sequence[Mapping[str, Any]],
     points: Sequence[Mapping[str, Any]],
+    *,
+    export_complete: bool = True,
 ) -> list[dict[str, Any]]:
     """Rebuild the vendored per-asset export from a run's PERSISTED devices+points.
 
@@ -584,6 +608,17 @@ def build_export_assets(
             }
             for p in device_points
         ]
+        object_count = attributes.get("object_count")
+        # Suspect zero: the device advertised objects but no point rows came back.
+        # object_count counts ALL BACnet objects (incl. the Device object), so it
+        # can legitimately exceed points; treat this only as a per-device tie-
+        # breaker, with export_complete as the authoritative run-level signal.
+        suspect_zero = (
+            isinstance(object_count, int)
+            and not isinstance(object_count, bool)
+            and object_count > 0
+            and not point_rows
+        )
         json_doc = {
             "asset": name,
             "deviceInstance": instance,
@@ -592,8 +627,16 @@ def build_export_assets(
             "vendor": device.get("vendor") or "",
             "model": device.get("model") or "",
             "firmware": attributes.get("firmware") or "",
-            "objectCount": attributes.get("object_count"),
+            "objectCount": object_count,
             "pointsExported": len(point_rows),
+            # False when the run's export never completed, when this device looks
+            # like a truncated read (objectCount>0 but zero points), or when the
+            # persisted evidence marks it capped at the sidecar's 2000-object export
+            # limit - so a partial point set is never rebuilt as a complete export.
+            # Older runs lack points_truncated (falsy -> treated non-truncated).
+            "pointsExportComplete": (
+                bool(export_complete) and not suspect_zero and not bool(attributes.get("points_truncated"))
+            ),
             "points": point_rows,
         }
         xlsx_rows: list[list[Any]] = [
@@ -654,7 +697,7 @@ def _default_sidecar_client(
         adapter_index = _resolve_adapter_index(base, source_ip)
         _post_register(base, register_csv)
         rows, summary, devices, routers = _stream_scan(base, adapter_index, scan_query, is_cancelled)
-        device_files = _export_devices(base, devices, is_cancelled, export_deadline_s)
+        device_files, export_complete = _export_devices(base, devices, is_cancelled, export_deadline_s)
     except SidecarTransportError:
         _delete_register(base)  # best-effort; never masks the primary error
         raise
@@ -664,7 +707,13 @@ def _default_sidecar_client(
             "The BACnet scanner sidecar could not be reached during the scan."
         ) from error
     _delete_register(base)
-    return {"rows": rows, "summary": summary, "device_files": device_files, "routers": routers}
+    return {
+        "rows": rows,
+        "summary": summary,
+        "device_files": device_files,
+        "routers": routers,
+        "export_complete": export_complete,
+    }
 
 
 def _resolve_adapter_index(base: str, source_ip: str) -> int:
@@ -776,16 +825,22 @@ def _export_devices(
     devices: Sequence[Mapping[str, Any]],
     is_cancelled: Callable[[], bool],
     export_deadline_s: float,
-) -> list[dict[str, Any]]:
-    """POST discovered devices to ``/api/export``; return per-asset JSON dicts.
+) -> tuple[list[dict[str, Any]], bool]:
+    """POST discovered devices to ``/api/export``; return ``(per-asset JSON dicts,
+    export_complete)``.
 
     The ``ready`` event carries the whole ZIP base64-inline; we unzip it in
     memory and parse each ``*.json`` entry (the per-asset export shape). Bounded
     by an adapter-side deadline and abandoned on cancel — the sidecar cannot stop
     an in-flight device enumeration itself (driving contract §5).
+
+    ``export_complete`` records the one adapter-observable completion fact: did
+    the ``ready`` event arrive before the deadline/EOF. An empty device set is
+    complete (nothing to acquire); devices submitted with no ``ready`` reached is
+    NOT — so a silent deadline hit is never laundered into an all-zero success.
     """
     if not devices:
-        return []
+        return [], True
     body = json.dumps({"devices": [dict(device) for device in devices]}).encode("utf-8")
     request = urllib.request.Request(  # noqa: S310 (fixed loopback URL)
         f"{base}/api/export",
@@ -807,8 +862,11 @@ def _export_devices(
                     f"({event.get('message') or 'no detail'})."
                 )
     if not zip_b64:
-        return []  # cancelled / deadline / no ready event: honest empty point set
-    return _decode_export_zip(zip_b64)
+        # cancelled / deadline / no ready event: honest empty point set, but the
+        # export did NOT complete — mark it so downstream cannot read the empty
+        # result as a genuine zero-point network.
+        return [], False
+    return _decode_export_zip(zip_b64), True
 
 
 def _decode_export_zip(zip_b64: str) -> list[dict[str, Any]]:
@@ -1033,6 +1091,53 @@ def _demo() -> None:
     assert ahu_asset["json"]["pointsExported"] == 2, ahu_asset
     assert ahu_asset["json"]["points"][0]["presentValue"] == "18.60", ahu_asset
     assert ["Object Type", "Instance", "Object Name", "Present Value", "Units"] in ahu_asset["xlsx_rows"]
+
+    # Export completeness: a finished export stamps True and the AHU (objectCount
+    # 2, two points) reads as a genuine complete device.
+    assert result.result_summary_extra["export_complete"] is True, result.result_summary_extra
+    assert ahu_asset["json"]["pointsExportComplete"] is True, ahu_asset
+    # An abandoned export (no `ready`) must not be laundered into an all-zero
+    # success: the flag is False and points_exported is a bare 0.
+    incomplete = _map_result(rows, summary, [], {}, export_complete=False)
+    assert incomplete.result_summary_extra["export_complete"] is False, incomplete.result_summary_extra
+    assert incomplete.result_summary_extra["points_exported"] == 0, incomplete.result_summary_extra
+    inc_devices = [r for r in incomplete.structured_records if "device_ref" not in r]
+    assert all(
+        a["json"]["pointsExportComplete"] is False
+        for a in build_export_assets(inc_devices, [], export_complete=False)
+    ), "incomplete export flags every asset"
+    # Per-device tie-breaker: objectCount>0 but zero points is suspect even when
+    # the run completed; a truly-no-object device stays a legitimate zero.
+    suspect = build_export_assets(
+        [{"device_type": "bacnet_device", "address": "10.0.0.9", "name": "D9",
+          "attributes": {"device_instance": 9, "object_count": 5}}], [])
+    assert suspect[0]["json"]["pointsExportComplete"] is False, suspect
+    genuine = build_export_assets(
+        [{"device_type": "bacnet_device", "address": "10.0.0.8", "name": "D8",
+          "attributes": {"device_instance": 8, "object_count": 0}}], [])
+    assert genuine[0]["json"]["pointsExportComplete"] is True, genuine
+
+    # P1b: a device past the sidecar's 2000-object export cap returns
+    # truncated=true WITH a partial (non-empty) point set inside a ZIP that still
+    # reached `ready`, so export_complete is True and suspect_zero is False. The
+    # run-level export_complete must still fold to False, the persisted device must
+    # carry points_truncated=True, and the rebuilt asset must read incomplete while
+    # keeping the partial points (never zeroed).
+    trunc = _map_result(
+        [{"instance": 1001, "register": "match", "rag": "green", "status": "reachable",
+          "ip": "10.0.0.11", "name": "AHU-1", "objectCount": 2500}],
+        {},
+        [{"deviceInstance": 1001, "truncated": True, "points": [
+            {"objectType": "analog-input", "objectInstance": 1, "name": "SAT",
+             "presentValue": "18.60", "units": "degreesCelsius"}]}],
+        {}, export_complete=True)
+    assert trunc.result_summary_extra["export_complete"] is False, trunc.result_summary_extra
+    trunc_devices = [r for r in trunc.structured_records if "device_ref" not in r]
+    trunc_points = [r for r in trunc.structured_records if "device_ref" in r]
+    assert trunc_devices[0]["attributes"]["points_truncated"] is True, trunc_devices[0]
+    trunc_asset = build_export_assets(trunc_devices, trunc_points, export_complete=True)[0]
+    assert trunc_asset["json"]["pointsExportComplete"] is False, trunc_asset
+    assert trunc_asset["json"]["pointsExported"] == 1, trunc_asset  # partial set kept, not zeroed
 
     # Routers are summary-only, folded per ip with sorted networks, never devices.
     fold: dict[str, list[int]] = {}
