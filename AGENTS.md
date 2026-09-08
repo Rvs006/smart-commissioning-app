@@ -70,8 +70,8 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-09-08. The latest public release is
-  still v0.1.55; field acceptance for it stays open until recorded privately, and
+- **Current handoff**: status as of 2026-08-27, last updated 2026-09-08.
+  The latest public release is v0.1.55; field acceptance for it stays open until recorded privately, and
   nothing newer has been published. Since then, main has taken the scanner work
   the rest of the way. All three standalone scanners (IP, BACnet, MQTT) now render
   as native SCT module bodies (PRs #201, #203, #204), each one configure-and-scan
