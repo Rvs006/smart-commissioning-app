@@ -43,32 +43,29 @@ Status meanings:
 
 | Area | Status | Documents |
 | --- | --- | --- |
-| Internal portable release | v0.1.56 (latest) | [Release notes](release-notes-v0.1.56.md), [validation](release-validation-v0.1.56.md), and [rollback](migration-rollback-v0.1.56.md) |
-| Hosted Docker | v0.1.56 (latest) | [Docker deployment and rollback](docker-deployment-rollback-v0.1.56.md) |
+| Internal portable release | v0.1.57 (latest) | [Release notes](release-notes-v0.1.57.md), [validation](release-validation-v0.1.57.md), and [rollback](migration-rollback-v0.1.57.md) |
+| Hosted Docker | v0.1.57 (latest) | [Docker deployment and rollback](docker-deployment-rollback-v0.1.57.md) |
 | Portable rebuild | Current | [Portable bundle rebuild](portable-bundle-rebuild.md) |
 | MQTT identities and ACLs | Versioned for v0.1.26 | [MQTT client IDs and broker ACLs](mqtt-client-id-and-acl.md) |
 | Inline ownership | Versioned for v0.1.27 | [Inline heartbeat](inline-heartbeat-v0.1.27.md) |
 | Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md), [v0.1.31](migration-rollback-v0.1.31.md), [v0.1.36](migration-rollback-v0.1.36.md), [v0.1.37](migration-rollback-v0.1.37.md), [v0.1.38](migration-rollback-v0.1.38.md), [v0.1.39](migration-rollback-v0.1.39.md), [v0.1.40](migration-rollback-v0.1.40.md), [v0.1.41](migration-rollback-v0.1.41.md), and [v0.1.42](migration-rollback-v0.1.42.md) |
 | Sync design | Current | [Architecture](sync-architecture.md), [wire format](sync-v2-wire-format.md), [credential scope](sync-v2-credential-scope.md), [operations](sync-v2-operations.md) |
 
-## v0.1.56 release record
+## v0.1.57 release record
 
-v0.1.56 is the latest published release. It makes the IP, BACnet, and MQTT
-scanners native SCT screens instead of the embedded standalone tools, and deletes
-the old Advanced-panel reverse proxy and its `/scanners/{proto}/raw` routes. A
-completed scan still saves as a real scanner run, so Results, run history, and
-reports fill in, and IP/BACnet re-compare, save-as-register, BACnet object browse,
-and the BACnet asset export all carry over. It also raises the MQTT discovery
-topic cap to the memory-safe ceiling, persists BACnet discovered points, hardens
-scanner evidence integrity, and lays the durable emission foundation for
-live-updating scan rows. It adds no database migration.
+v0.1.57 is the latest published release. It is a presentation-only change: the
+IP, BACnet, and MQTT native scanner screens now show as one configure-and-scan
+page instead of the Setup / Run / Results step wizard. No engine, route, API
+call, run parameter, or discovery logic changed, a completed scan still saves as
+a real scanner run, and the sealed built-in discovery lanes keep their stepped
+layout. It adds no database migration.
 
-- [Release notes](release-notes-v0.1.56.md)
-- [Release validation record](release-validation-v0.1.56.md)
-- [Migration and rollback](migration-rollback-v0.1.56.md)
-- [Docker deployment and rollback](docker-deployment-rollback-v0.1.56.md)
-- [Field acceptance checklist](v0.1.56-field-acceptance-checklist.md)
-- [Evidence manifest](v0.1.56-evidence-manifest.md)
+- [Release notes](release-notes-v0.1.57.md)
+- [Release validation record](release-validation-v0.1.57.md)
+- [Migration and rollback](migration-rollback-v0.1.57.md)
+- [Docker deployment and rollback](docker-deployment-rollback-v0.1.57.md)
+- [Field acceptance checklist](v0.1.57-field-acceptance-checklist.md)
+- [Evidence manifest](v0.1.57-evidence-manifest.md)
 - [Nmap operator guide](nmap-one-click-operator-guide.md)
 
 ## v0.1.53 release record
