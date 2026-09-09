@@ -136,7 +136,7 @@ def main() -> int:
         failures.append(
             "v0.1.56 field checklist does not complete the approved UDMI run before report generation"
         )
-    changelog_v0156 = changelog[changelog.index("## [0.1.56]") : changelog.index("## [0.1.53]")]
+    changelog_v0156 = changelog[changelog.index("## [0.1.56]") : changelog.index("## [0.1.55]")]
     if "scanner_raw_write" not in changelog_v0156:
         failures.append("v0.1.56 changelog omits the Advanced-panel scanner surface")
     if "scanner_raw_write" not in release_notes:

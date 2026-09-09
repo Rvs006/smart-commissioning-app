@@ -38,7 +38,8 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 - The Advanced scanner panel and its reverse-proxy routes (`/scanners/{proto}/raw`)
   are gone, together with the panel session and per-write confirmation token
   behind them; the native scanners replace them. Scans recorded by the old panel
-  stay readable in Run History, since their evidence rows and job types are kept.
+  stay readable in Run History, since their evidence rows and the
+  `scanner_raw_action` / `scanner_raw_write` job types are kept.
 
 ### Fixed
 

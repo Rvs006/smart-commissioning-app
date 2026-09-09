@@ -70,7 +70,9 @@ capability.
 ## Validation boundary
 
 CI builds and boot-smokes the portable bundle on a Windows Server 2022 runner.
-Field acceptance for this release is recorded privately.
+Field acceptance for this release remains open (UNPROVEN); it will be recorded
+privately once the field-acceptance checklist, evidence hashes, and owner
+sign-off are complete.
 
 ## Release artifacts
 
