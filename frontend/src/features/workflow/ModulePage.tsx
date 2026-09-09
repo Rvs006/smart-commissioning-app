@@ -2345,10 +2345,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // prefers-reduced-motion needs no handling. jsdom has no scrollIntoView; the
   // test setup installs a no-op.
   useEffect(() => {
-    if (step === "results") {
+    // The native single-page scanner lanes show results inline below setup, so
+    // snapping to the hero (top of the setup page) on success would scroll the
+    // operator AWAY from the results they just waited for. Only the stepped
+    // lanes, where Results is a separate view, snap to the top.
+    if (step === "results" && !isSidecarDiscoveryModule) {
       heroRef.current?.scrollIntoView({ behavior: "auto", block: "start" });
     }
-  }, [step]);
+  }, [step, isSidecarDiscoveryModule]);
 
   const importMutation = useMutation({
     mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.import`),
@@ -5776,7 +5780,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       )}
                     {canEngineer &&
                       activeRunAuthoritativelyTerminal &&
-                      runController.phase !== "submitting" && (
+                      runController.phase !== "submitting" &&
+                      !isSidecarDiscoveryModule && (
                       <ReportFromRunControls
                         format={reportExportFormat}
                         isUdmiRun={
