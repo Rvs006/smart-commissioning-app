@@ -7,6 +7,8 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.56] - 2026-09-09
+
 ### Added
 
 - MQTT register import now accepts an optional `Section` column (UDMI

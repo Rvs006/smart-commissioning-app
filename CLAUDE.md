@@ -70,31 +70,32 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-27, last updated 2026-09-08.
-  The latest public release is v0.1.55; field acceptance for it stays open until recorded privately, and
-  nothing newer has been published. Since then, main has taken the scanner work
-  the rest of the way. All three standalone scanners (IP, BACnet, MQTT) now render
-  as native SCT module bodies (PRs #201, #203, #204), each one configure-and-scan
-  surface, with the built-in discovery modules unchanged. A completed scan still
-  persists as a real `ip_scanner` / `bacnet_scanner` / `mqtt_scanner` run, so the
-  Results tab, run history, and reports fill in; IP and BACnet re-compare,
-  save-as-register, per-row object browse, and the BACnet export-assets rebuild
-  are all native, and the full MQTT live lane (`scanners_mqtt_live`) is intact.
-  PR #205 then deleted the old embed stack: the Advanced-panel reverse proxy, the
-  `/scanners/{proto}/raw` routes, the panel-session and write-token services, the
-  injected `sct-bridge.js` / `sct-theme.css`, and the iframe UI are gone. Kept so
-  no evidence is lost: the three sidecar engines and their run path, register
-  binding, the source-interface freeze, and the historical `scanner_raw_action` /
-  `scanner_raw_write` job types (still registered in jobs.py, client.ts, and
-  runFormat.ts so old Run History rows render). Recent fixes harden scanner
-  evidence: BACnet discovered points now persist to the points table (#206), and
-  #207 covers IP `observed_ports` readback, the BACnet instance-range
-  pair-or-neither gate, MQTT live register scoping, BACnet export completeness,
-  atomic MQTT live connect, and truncated-export flagging. This adds no database
-  migration; the Alembic head is unchanged from v0.1.55 (a6b7c8d9e0f1). Built-in
-  TCP connect remains the default; Nmap stays optional, locally installed, and
-  unbundled. Keep source, raw evidence, report bytes, EXE identity, Docker labels,
-  and release SHA bound to the same run or commit.
+- **Current handoff**: status as of 2026-09-09. The latest public release is
+  v0.1.56, which takes the scanner work the rest of the way; field acceptance for
+  it stays open until recorded privately. All three standalone scanners (IP,
+  BACnet, MQTT) now render as native SCT module bodies (PRs #201, #203, #204),
+  each one configure-and-scan surface, with the built-in discovery modules
+  unchanged. A completed scan still persists as a real `ip_scanner` /
+  `bacnet_scanner` / `mqtt_scanner` run, so the Results tab, run history, and
+  reports fill in; IP and BACnet re-compare, save-as-register, per-row object
+  browse, and the BACnet export-assets rebuild are all native, and the full MQTT
+  live lane (`scanners_mqtt_live`) is intact. PR #205 deleted the old embed stack:
+  the Advanced-panel reverse proxy, the `/scanners/{proto}/raw` routes, the
+  panel-session and write-token services, the injected `sct-bridge.js` /
+  `sct-theme.css`, and the iframe UI are gone. Kept so no evidence is lost: the
+  three sidecar engines and their run path, register binding, the source-interface
+  freeze, and the historical `scanner_raw_action` / `scanner_raw_write` job types
+  (still registered in jobs.py, client.ts, and runFormat.ts so old Run History
+  rows render). Scanner evidence is hardened: BACnet discovered points now persist
+  to the points table (#206), and #207 covers IP `observed_ports` readback, the
+  BACnet instance-range pair-or-neither gate, MQTT live register scoping, BACnet
+  export completeness, atomic MQTT live connect, and truncated-export flagging.
+  Live IP and BACnet scans now emit progressive observations to the durable store
+  as they run (#202), the persistence foundation for live-updating result rows.
+  This adds no database migration; the Alembic head is unchanged from v0.1.55
+  (a6b7c8d9e0f1). Built-in TCP connect remains the default; Nmap stays optional,
+  locally installed, and unbundled. Keep source, raw evidence, report bytes, EXE
+  identity, Docker labels, and release SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
   release is published, update this handoff in both `AGENTS.md` and `CLAUDE.md`
   in the same commit. Keep the two files byte-for-byte identical, and record the
