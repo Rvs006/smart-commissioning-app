@@ -7,6 +7,19 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.57] - 2026-09-09
+
+### Changed
+
+- The IP, BACnet, and MQTT native scanner screens are now a single-page
+  configure-and-scan layout instead of the Setup / Run / Results step wizard
+  (#210). Configuration, live progress, and results show together on one
+  scrolling page; the Run Controls heading reads "Scan setup" and a footer line
+  points at the saved run in Run History and Reports. This is presentation only:
+  no engine, backend route, API call, run parameter, or discovery logic changed,
+  and the sealed built-in discovery lanes, the dry-run preview, and the reports
+  page keep their stepped layout.
+
 ## [0.1.56] - 2026-09-09
 
 ### Added
