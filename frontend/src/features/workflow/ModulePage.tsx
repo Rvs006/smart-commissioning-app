@@ -4958,7 +4958,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         </section>
       )}
 
-      {module.route !== "reports" && (
+      {/* The native scanner lanes (IP / BACnet / MQTT sidecars) present as one
+          scrolling page, so they drop the Setup / Run / Results wizard. The
+          sealed built-in lanes and every other module keep it. */}
+      {!isSidecarDiscoveryModule && module.route !== "reports" && (
         <StepNav
           step={step}
           onStep={setStep}
@@ -4968,7 +4971,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       )}
 
       <div
-        className={`module-steps${module.route === "reports" ? " reports-module-steps" : ""}`}
+        className={`module-steps${module.route === "reports" ? " reports-module-steps" : ""}${
+          isSidecarDiscoveryModule ? " single-page-module-steps" : ""
+        }`}
         data-step={step}
       >
         {module.route !== "reports" && (
@@ -5197,7 +5202,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             <article className="surface">
               <div className="surface-heading">
                 <div>
-                  <h3>Run Controls</h3>
+                  <h3>{isSidecarDiscoveryModule ? "Scan setup" : "Run Controls"}</h3>
                 </div>
               </div>
 
@@ -8703,6 +8708,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
             </form>
           </dialog>
+        )}
+        {/* Single-page footer: the native scanner run is a real saved SCT job, so
+            point the operator at where its evidence lives. Only shown once a run
+            exists on this page (the row is in Run History from the moment it is
+            created). */}
+        {isSidecarDiscoveryModule && activeRun && (
+          <p className="native-run-footer">
+            Saved as <code>{activeRun.ref.jobType}</code> run{" "}
+            <code>#{activeRun.runId}</code>. It feeds{" "}
+            <Link to="/run-history">Run History</Link> and{" "}
+            <Link to="/reports">Reports</Link>.
+          </p>
         )}
       </div>
         </>

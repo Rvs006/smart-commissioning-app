@@ -1306,6 +1306,40 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.queryByTitle(/MQTT advanced scanner/i)).toBeNull();
   });
 
+  it("presents the native sidecar as one page — no Setup/Run/Results wizard, config and results together", async () => {
+    stubSidecarModuleFetch();
+    renderModule("ip-scanner");
+
+    // The scan setup config renders on arrival.
+    expect(await screen.findByLabelText(/Start IP/i)).toBeInTheDocument();
+
+    // The Setup / Run / Results step wizard is gone for the native lanes.
+    expect(screen.queryByRole("navigation", { name: /Module steps/i })).toBeNull();
+    expect(document.querySelector(".step-nav")).toBeNull();
+    // The container is flagged single-page so its grouped sections all show at
+    // once (jsdom applies no theme CSS, so pin the class that drives it, not
+    // computed visibility — see the step-gating note below).
+    expect(document.querySelector(".module-steps")).toHaveClass("single-page-module-steps");
+
+    // Setup (renamed to "Scan setup") and the results table are present together,
+    // with no step click required.
+    expect(screen.getByRole("heading", { name: "Scan setup" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Network Scan Results" })).toBeInTheDocument();
+  });
+
+  it("keeps the Setup/Run/Results wizard on the sealed built-in discovery lanes", async () => {
+    stubSidecarModuleFetch();
+    renderModule("ip-scanner-sct");
+
+    // The built-in engine lane is unchanged: the stepped wizard still renders and
+    // the single-page flag is absent.
+    expect(
+      await screen.findByRole("navigation", { name: /Module steps/i }),
+    ).toBeInTheDocument();
+    expect(document.querySelector(".module-steps")).not.toHaveClass("single-page-module-steps");
+    expect(screen.getByRole("heading", { name: "Run Controls" })).toBeInTheDocument();
+  });
+
   it("sends an MQTT dry-run preview instead of an unauthorized live capture", async () => {
     let postedBody: { parameters: Record<string, unknown> } | null = null;
     stubMqttRunFetch((body) => {
