@@ -124,12 +124,13 @@ class DiscoveryObservationLifecycleTests(unittest.TestCase):
         self,
         protocol: str = "ip",
         *,
+        job_type: str | None = None,
         claimed_at: datetime | None = None,
         observation_rows: int | None = None,
         observation_payload_bytes: int | None = None,
     ):
         envelope = self.repository.create_run_with_context(
-            job_type=f"{protocol}_discovery",
+            job_type=job_type or f"{protocol}_discovery",
             context=_context(
                 protocol,
                 observation_rows=observation_rows,
@@ -146,6 +147,58 @@ class DiscoveryObservationLifecycleTests(unittest.TestCase):
         )
         self.assertIsNotNone(lease)
         return envelope.run_id, lease
+
+    def test_sidecar_scanner_run_accepts_progressive_observations_off_the_discovery_finalize_path(
+        self,
+    ) -> None:
+        """GAP-C3 append foundation: the ip_scanner / bacnet_scanner sidecar lanes
+        may durably append viewer-safe progressive observations WHILE a scan runs,
+        yet the run never resolves a discovery protocol -- so its terminal flip
+        stays on the plain finalize_run path and the sealed result is never folded
+        from the observation stream."""
+
+        for job_type, protocol, entity_kind, entity_key, phase in (
+            ("ip_scanner", "ip", "host", "host:192.0.2.20", "reachability"),
+            ("bacnet_scanner", "bacnet", "device", "device:4001", "enrichment"),
+        ):
+            with self.subTest(job_type=job_type):
+                run_id, lease = self.create_claimed_run(protocol, job_type=job_type)
+                observation = DiscoveryObservationInputV1(
+                    protocol=protocol,
+                    entity_kind=entity_kind,
+                    entity_key=entity_key,
+                    entity_version=1,
+                    event_key=f"{entity_key}:v1",
+                    phase=phase,
+                    outcome="observed",
+                    payload_schema_version="1.0",
+                    payload={
+                        "projection_v1": {
+                            "collection": "devices",
+                            "position": 0,
+                            "present": True,
+                            "record": {"address": entity_key},
+                        }
+                    },
+                    observed_at=datetime(2026, 8, 11, 9, 0, tzinfo=UTC),
+                )
+                # Previously rejected with unsupported_discovery_job_or_protocol
+                # (the emitter latched off after one conflict-audit row per run).
+                outcome = self.repository.append_discovery_observation(
+                    run_id, lease.owner_token, lease.attempt, observation
+                )
+                self.assertFalse(outcome.idempotent)
+                stored = self.repository.list_discovery_observations(run_id, lease.attempt)
+                self.assertEqual([row.entity_key for row in stored], [entity_key])
+                # The load-bearing safety invariant: a scanner job resolves NO
+                # discovery protocol, so OwnedRunStore.update_run_status routes its
+                # terminal flip through plain finalize_run, never the observation
+                # fold -- final devices / RAG come only from _map_result.
+                self.assertIsNone(
+                    self.repository.get_owned_discovery_protocol(
+                        run_id, lease.owner_token, lease.attempt
+                    )
+                )
 
     def test_real_sealed_ip_run_keeps_max_provider_identity_projections_within_preview(self) -> None:
         """The runtime identity seam cannot exceed the immutable preview budget."""

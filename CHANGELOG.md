@@ -16,6 +16,11 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 - The BACnet scanner gained the same "Ignore register for this run (scan without
   RAG comparison)" toggle the IP scanner already had, so a BACnet scan can run
   without freezing a register into it.
+- Live IP and BACnet sidecar scans now emit progressive device observations to
+  the durable observation store as they run (`ip_scanner` / `bacnet_scanner` runs
+  are accepted by the lifecycle append gate), laying the persistence foundation
+  for live-updating result rows. Final results and RAG are unchanged; the
+  read/render path for those live rows lands in a follow-up.
 
 ### Changed
 

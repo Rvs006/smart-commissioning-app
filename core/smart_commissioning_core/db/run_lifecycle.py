@@ -83,6 +83,25 @@ _DISCOVERY_PROTOCOL_BY_JOB_TYPE = MappingProxyType(
         "bacnet_discovery": "bacnet",
     }
 )
+# Append-only allow-set. The sidecar scanner lanes (ip_scanner / bacnet_scanner)
+# emit best-effort progressive device observations while a scan runs, but they
+# finalize through the PLAIN finalize_run path (buffered devices), never
+# finalize_discovery_run -- so their observation stream is accepted and stored,
+# yet is never folded into the sealed result or RAG. This map is deliberately
+# separate from _DISCOVERY_PROTOCOL_BY_JOB_TYPE: only the observation-append gate
+# reads it, so it never reaches _resolve_discovery_protocol /
+# get_owned_discovery_protocol (which would reroute finalize through the fold and
+# change the sealed result) or _discovery_finalization_denial_reason. Reading
+# these rows back (the GET route and the frontend fold, which also need a
+# terminal-observation marker for a stream that plain finalize never seals) is a
+# separate, reviewed follow-up.
+_APPENDABLE_DISCOVERY_PROTOCOL_BY_JOB_TYPE = MappingProxyType(
+    {
+        **_DISCOVERY_PROTOCOL_BY_JOB_TYPE,
+        "ip_scanner": "ip",
+        "bacnet_scanner": "bacnet",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -2134,7 +2153,7 @@ class RunLifecycleRepository:
             return fence_reason
         if session.get(RunResult, run.id) is not None or session.get(RunSeal, run.id) is not None:
             return "stale_owner_attempt_or_terminal"
-        expected_protocol = _DISCOVERY_PROTOCOL_BY_JOB_TYPE.get(run.job_type)
+        expected_protocol = _APPENDABLE_DISCOVERY_PROTOCOL_BY_JOB_TYPE.get(run.job_type)
         if expected_protocol is None or protocol != expected_protocol:
             return "unsupported_discovery_job_or_protocol"
         context_row = session.get(RunExecutionContext, run.id)
