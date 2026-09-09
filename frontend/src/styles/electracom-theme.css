@@ -1371,6 +1371,31 @@
   display: grid;
 }
 
+/* Native scanner lanes (IP / BACnet / MQTT sidecars) present as one scrolling
+   page — configure and results together, no Setup / Run / Results wizard — so
+   every grouped section shows at once, the same way the reports page does. */
+.module-steps.single-page-module-steps > [data-stepgroup] {
+  display: block;
+}
+
+.module-steps.single-page-module-steps > .app-grid[data-stepgroup] {
+  display: grid;
+}
+
+/* Closing line on the single-page scanners: the run is a real saved SCT job and
+   this points at where its evidence lives. */
+.native-run-footer {
+  margin: 0;
+  padding-top: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.native-run-footer code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  color: var(--ink);
+}
+
 /* ============================================================================
    Workflow-stage grouped nav — clusters the module tabs under the stage they
    belong to (Configure / Discover / Validate / Report / Operate) so the nav
