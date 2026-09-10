@@ -9493,7 +9493,7 @@ describe("ModulePage progressive discovery observations", () => {
     );
     expect(screen.getAllByRole("status", { name: "Discovery connection" })).toHaveLength(1);
     const heading = screen.getByRole("heading", { name: "IP Discovery", level: 2 });
-    expect(heading).toHaveFocus();
+    await waitFor(() => expect(heading).toHaveFocus());
     fireEvent.click(screen.getByLabelText(/Dry run/i));
     const previewButton = screen.getByRole("button", { name: "Preview" });
     expect(previewButton).toBeDisabled();
