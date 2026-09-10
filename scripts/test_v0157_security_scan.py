@@ -189,6 +189,21 @@ class V0154SecurityScanTests(unittest.TestCase):
                 self.assertEqual(scan.main(["--path", str(root)]), 1)
             scan_files.assert_not_called()
 
+    def test_mixed_populated_and_empty_paths_fails_closed(self) -> None:
+        # Two explicit --path values, one populated and one empty: the empty one
+        # must fail the scan, not be masked by the populated one (REV-1 mixed).
+        with tempfile.TemporaryDirectory() as directory:
+            populated = Path(directory) / "readable"
+            populated.mkdir()
+            (populated / "release-notes.md").write_text("no secrets here\n", encoding="utf-8")
+            empty = Path(directory) / "empty"
+            empty.mkdir()
+            with patch.object(scan.base, "scan", return_value=[]) as scan_files:
+                self.assertEqual(
+                    scan.main(["--path", str(populated), "--path", str(empty)]), 1
+                )
+            scan_files.assert_not_called()
+
     def test_clean_nested_archive_is_accepted(self) -> None:
         inner = io.BytesIO()
         with zipfile.ZipFile(inner, "w") as archive:

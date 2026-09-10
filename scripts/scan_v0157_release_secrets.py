@@ -29,12 +29,19 @@ def main(argv: list[str] | None = None) -> int:
             for raw in missing:
                 print(f"FAIL: requested scan path is missing or unreadable: {raw}", file=sys.stderr)
             return 1
-        paths = [
-            path.resolve() for raw in args.path for path in base._files(raw.resolve(), explicit=True)
-        ]
-        if not paths:
-            joined = ", ".join(str(raw) for raw in args.path)
-            print(f"FAIL: requested scan path(s) expanded to zero files: {joined}", file=sys.stderr)
+        # Guard each requested path on its own: one empty directory must fail the
+        # scan even when another path contributed files. An aggregate emptiness
+        # check would let a populated path mask an empty one (REV-1 mixed paths).
+        paths: list[Path] = []
+        empty = []
+        for raw in args.path:
+            expanded = [path.resolve() for path in base._files(raw.resolve(), explicit=True)]
+            if not expanded:
+                empty.append(raw)
+            paths.extend(expanded)
+        if empty:
+            for raw in empty:
+                print(f"FAIL: requested scan path expanded to zero files: {raw}", file=sys.stderr)
             return 1
     else:
         paths = base._files(args.root.resolve(), explicit=False)
