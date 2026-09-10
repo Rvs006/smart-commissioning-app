@@ -167,6 +167,43 @@ class V0154SecurityScanTests(unittest.TestCase):
         self.assertTrue(failures)
         self.assertTrue(any("archive nesting exceeds" in failure for failure in failures))
 
+    def test_missing_explicit_path_fails_closed(self) -> None:
+        # A requested bundle path that does not exist must fail nonzero, not
+        # report "OK (0 files)" (REV missing-bundle). os.walk over a missing
+        # root yields nothing, so the wrapper must reject it before scanning.
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "does-not-exist"
+            with patch.object(scan.base, "scan", return_value=[]) as scan_files:
+                self.assertEqual(scan.main(["--path", str(missing)]), 1)
+            scan_files.assert_not_called()
+
+    def test_existing_path_expanding_to_zero_files_fails_closed(self) -> None:
+        # A path that exists but expands to no scannable files (e.g. it vanished
+        # mid-walk, or held nothing) must also fail closed rather than pass empty.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch.object(scan.base, "_files", return_value=[]),
+                patch.object(scan.base, "scan", return_value=[]) as scan_files,
+            ):
+                self.assertEqual(scan.main(["--path", str(root)]), 1)
+            scan_files.assert_not_called()
+
+    def test_mixed_populated_and_empty_paths_fails_closed(self) -> None:
+        # Two explicit --path values, one populated and one empty: the empty one
+        # must fail the scan, not be masked by the populated one (REV-1 mixed).
+        with tempfile.TemporaryDirectory() as directory:
+            populated = Path(directory) / "readable"
+            populated.mkdir()
+            (populated / "release-notes.md").write_text("no secrets here\n", encoding="utf-8")
+            empty = Path(directory) / "empty"
+            empty.mkdir()
+            with patch.object(scan.base, "scan", return_value=[]) as scan_files:
+                self.assertEqual(
+                    scan.main(["--path", str(populated), "--path", str(empty)]), 1
+                )
+            scan_files.assert_not_called()
+
     def test_clean_nested_archive_is_accepted(self) -> None:
         inner = io.BytesIO()
         with zipfile.ZipFile(inner, "w") as archive:

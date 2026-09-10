@@ -7,6 +7,15 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Fixed
+
+- The release secret scan (`scripts/scan_v0157_release_secrets.py`) now fails
+  closed when a requested `--path` bundle is missing, unreadable, or expands to
+  zero files, instead of reporting success on only the paths that resolved. Each
+  explicit path is validated on its own, so a populated bundle can no longer mask
+  a missing or empty one. Release-gate hardening only; no application behavior
+  changed.
+
 ## [0.1.57] - 2026-09-09
 
 ### Changed
