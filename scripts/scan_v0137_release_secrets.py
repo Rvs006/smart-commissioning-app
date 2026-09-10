@@ -126,6 +126,14 @@ def _is_text_path(path: Path) -> bool:
     return path.suffix.casefold() in _TEXT_SUFFIXES
 
 
+def _reraise_walk_error(error: OSError) -> None:
+    # Fail closed: os.walk otherwise swallows a directory it cannot read and
+    # silently skips that whole subtree. For a release secret scan an
+    # unreadable path must abort the scan, not pass on the files that happened
+    # to be readable alongside it.
+    raise error
+
+
 def _files(root: Path, *, explicit: bool) -> list[Path]:
     if root.is_file():
         return [root]
@@ -146,7 +154,7 @@ def _files(root: Path, *, explicit: bool) -> list[Path]:
     paths: list[Path] = []
     if root.is_file():
         return [root]
-    for directory, dirnames, filenames in os.walk(root, topdown=True):
+    for directory, dirnames, filenames in os.walk(root, topdown=True, onerror=_reraise_walk_error):
         dirnames[:] = [name for name in dirnames if name not in skip_names]
         for filename in filenames:
             path = Path(directory) / filename
