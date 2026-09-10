@@ -204,6 +204,24 @@ class V0154SecurityScanTests(unittest.TestCase):
                 )
             scan_files.assert_not_called()
 
+    def test_unreadable_descendant_fails_closed(self) -> None:
+        # os.walk silently skips a subtree it cannot read. For a release secret
+        # scan that must abort, not pass on the readable siblings, so _files
+        # passes an onerror that re-raises. Simulate the walk hitting a blocked
+        # directory (deterministic and cross-platform, no real chmod).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "readable.md").write_text("clean\n", encoding="utf-8")
+
+            def fake_walk(top, topdown=True, onerror=None):  # noqa: ARG001
+                if onerror is not None:
+                    onerror(PermissionError(13, "Permission denied", str(root / "blocked")))
+                return iter([])
+
+            with patch.object(scan.base.os, "walk", side_effect=fake_walk):
+                with self.assertRaises(PermissionError):
+                    scan.base._files(root, explicit=True)
+
     def test_clean_nested_archive_is_accepted(self) -> None:
         inner = io.BytesIO()
         with zipfile.ZipFile(inner, "w") as archive:
