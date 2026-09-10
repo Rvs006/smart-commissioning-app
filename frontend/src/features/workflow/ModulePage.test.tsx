@@ -7752,12 +7752,19 @@ describe("ModulePage UDMI workbench live results", () => {
     await waitFor(() => expect(executeButton).toBeEnabled());
     fireEvent.click(executeButton);
     await waitFor(() => expect(downloadSignal?.aborted).toBe(true));
-    await waitFor(() =>
-      expect(
-        screen
-          .getAllByRole("button", { name: "Download raw JSON" })
-          .some((button) => !(button as HTMLButtonElement).disabled),
-      ).toBe(true),
+    // The epoch switch tears down the terminal results view (leaving the
+    // "Accepted by API" panel) and rebuilds it only after the new run record
+    // repolls — up to the 1500ms runPollInterval cadence, past waitFor's 1000ms
+    // default. queryAllByRole tolerates the button's brief absence (getAllByRole
+    // throws on zero and raced the re-render); the timeout spans the repoll.
+    await waitFor(
+      () =>
+        expect(
+          screen
+            .queryAllByRole("button", { name: "Download raw JSON" })
+            .some((button) => !(button as HTMLButtonElement).disabled),
+        ).toBe(true),
+      { timeout: 5_000 },
     );
 
     await act(async () => {
