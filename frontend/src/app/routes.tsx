@@ -29,6 +29,14 @@ function loadModulePage(moduleRoute: string) {
   };
 }
 
+// Native scanner v2: a dedicated page for the vendored IP sidecar lane.
+// Rollback is this entry reverting to loadModulePage("ip-scanner").
+async function loadIpScannerPage() {
+  const { IpScannerPage } = await import("../features/scanners/IpScannerPage");
+  return { Component: IpScannerPage };
+}
+
+
 async function loadHubPage() {
   const { HubPage } = await import("../features/workflow/HubPage");
   return { Component: HubPage };
@@ -65,7 +73,7 @@ export const router = createHashRouter([
     children: [
       { index: true, lazy: loadDashboardPage },
       { path: "configuration", lazy: loadConfigurationPage },
-      { path: "ip-scanner", lazy: loadModulePage("ip-scanner") },
+      { path: "ip-scanner", lazy: loadIpScannerPage },
       // Built-in TCP/Nmap engine, off the primary nav but reachable by direct
       // URL. The sidecar module owns /ip-scanner (see moduleData.ts).
       { path: "ip-scanner-sct", lazy: loadModulePage("ip-scanner-sct") },
