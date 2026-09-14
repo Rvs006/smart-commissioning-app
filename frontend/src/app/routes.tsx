@@ -29,13 +29,17 @@ function loadModulePage(moduleRoute: string) {
   };
 }
 
-// Native scanner v2: a dedicated page for the vendored IP sidecar lane.
-// Rollback is this entry reverting to loadModulePage("ip-scanner").
+// Native scanner v2: dedicated pages for the two vendored sidecar lanes.
+// Rollback is these two entries reverting to loadModulePage(...).
 async function loadIpScannerPage() {
   const { IpScannerPage } = await import("../features/scanners/IpScannerPage");
   return { Component: IpScannerPage };
 }
 
+async function loadBacnetScannerPage() {
+  const { BacnetScannerPage } = await import("../features/scanners/BacnetScannerPage");
+  return { Component: BacnetScannerPage };
+}
 
 async function loadHubPage() {
   const { HubPage } = await import("../features/workflow/HubPage");
@@ -77,7 +81,7 @@ export const router = createHashRouter([
       // Built-in TCP/Nmap engine, off the primary nav but reachable by direct
       // URL. The sidecar module owns /ip-scanner (see moduleData.ts).
       { path: "ip-scanner-sct", lazy: loadModulePage("ip-scanner-sct") },
-      { path: "bacnet-scanner", lazy: loadModulePage("bacnet-scanner") },
+      { path: "bacnet-scanner", lazy: loadBacnetScannerPage },
       // Built-in BACnet engine, off the primary nav but reachable by direct
       // URL. The sidecar module owns /bacnet-scanner (see moduleData.ts).
       { path: "bacnet-discovery-sct", lazy: loadModulePage("bacnet-discovery-sct") },

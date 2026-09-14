@@ -4,11 +4,12 @@
    applies with no extra rules. No new dependency, no shadow beyond --shadow.
    ============================================================================ */
 
+/* The app shell's .page-frame already supplies the content column's padding and
+   max-width, so this only stacks the cards at the mockup's 18px rhythm. */
 .scanner-page {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 24px 34px 40px;
 }
 
 .scanner-page-head {
@@ -502,9 +503,14 @@
   overflow: hidden;
 }
 
+/* The artboard's 120px 1fr 120px 90px assumes a full-width expanded row; inside
+   a 380px panel those fixed columns leave the name nothing, so each one carries
+   a floor and a cap and only the name column takes the slack. */
 .scanner-object-row {
   display: grid;
-  grid-template-columns: 120px minmax(0, 1fr) 120px 90px;
+  grid-template-columns:
+    minmax(0, 1.1fr) minmax(0, 1.6fr)
+    minmax(0, 1fr) minmax(0, 0.7fr);
   border-top: 1px solid var(--border-soft);
   font-size: 12.5px;
 }
@@ -583,10 +589,6 @@
 }
 
 @media (max-width: 900px) {
-  .scanner-page {
-    padding: 20px 16px 32px;
-  }
-
   .scanner-setup-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

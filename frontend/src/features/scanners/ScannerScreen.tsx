@@ -13,6 +13,7 @@ import {
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { ENGINEER_REQUIRED_TOOLTIP } from "../../app/sessionContext";
 import { LiveRunConsole } from "../workflow/LiveRunConsole";
+import { bacnetBackendLabel } from "../workflow/discoveryRows";
 import { formatRelativeTime, humanizeStage } from "../workflow/runFormat";
 import { DeviceDetailPanel } from "./DeviceDetailPanel";
 import { GenerateReportCard } from "./GenerateReportCard";
@@ -60,6 +61,8 @@ export type ScannerScreenProps = {
   startBlockedReason?: string | null;
   /** Extra buttons in the results heading (BACnet export assets). */
   resultsActions?: ReactNode;
+  /** Lane-specific evidence cards below the results table (BACnet routers / points). */
+  evidenceCards?: ReactNode;
 };
 
 function useStoredPanelWidth() {
@@ -91,6 +94,7 @@ export function ScannerScreen({
   onIgnoreRegisterChange,
   startBlockedReason = null,
   resultsActions,
+  evidenceCards,
 }: ScannerScreenProps) {
   const {
     activeRun,
@@ -132,6 +136,10 @@ export function ScannerScreen({
   // (the full-app artboard's "128 objects").
   const objectsPill = useMemo(
     () => (lane === "bacnet" ? bacnetObjectsPill(results?.result_summary) : null),
+    [lane, results],
+  );
+  const backendNote = useMemo(
+    () => (lane === "bacnet" && results ? bacnetBackendLabel(results) : null),
     [lane, results],
   );
 
@@ -390,8 +398,22 @@ export function ScannerScreen({
             <div className="progress-track">
               <div style={{ width: `${Math.min(100, Math.max(0, activeRunProgress))}%` }} />
             </div>
-            <p className="scanner-stage">{humanizeStage(activeRunStage ?? "")}</p>
-            {activeRunRecord && (
+            <p className="scanner-stage">
+              {humanizeStage(activeRunStage ?? "") || "Waiting for first update"}
+              {activeRunProgress > 0 ? ` · ${Math.round(activeRunProgress)}%` : ""}
+            </p>
+            {/* The one connection note that applies to these lanes: when run
+                access closes mid-run, say why the evidence stopped. */}
+            {runAccessClosed && (
+              <p aria-live="polite" className="scanner-stage" role="status">
+                Access changed. Live run evidence is no longer available in this workspace.
+              </p>
+            )}
+            {/* The live console belongs to a run in flight. Once the run is
+                terminal the results table below IS the outcome, and the
+                console's UDMI/topic panels only render "waiting for evidence"
+                placeholders for a lane that never produces them. */}
+            {activeRunRecord && !activeRunTerminal && (
               <LiveRunConsole
                 key={activeRunRecord.run_id}
                 assetTopicDiscovery={null}
@@ -740,6 +762,24 @@ export function ScannerScreen({
           </div>
         )}
 
+        {/* Provenance, never decoration: a simulated BACnet backend must never be
+            mistaken for a real on-wire scan, and a TCP-connect miss is not proof
+            a host is absent. */}
+        {backendNote && (
+          <div
+            className={`sample-banner${backendNote.kind === "simulated" ? " warning" : ""}`}
+            role={backendNote.kind === "simulated" ? "alert" : "note"}
+          >
+            {backendNote.text}
+          </div>
+        )}
+        {lane === "ip" && rows.length > 0 && (
+          <div className="sample-banner" role="note">
+            Live scan observations. A host with no response on the scanned ports is inconclusive —
+            a TCP-connect miss is not proof the host is absent.
+          </div>
+        )}
+
         {rows.length > 0 && (
           <div className="results-filter-bar scanner-filter-bar">
             <label className="results-filter-text">
@@ -888,6 +928,8 @@ export function ScannerScreen({
           </p>
         )}
       </section>
+
+      {evidenceCards}
 
       <GenerateReportCard run={run} />
     </div>

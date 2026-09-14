@@ -224,6 +224,12 @@ describe("IpScannerPage", () => {
     stubFetch();
     render(scannerProviders(<IpScannerPage />));
 
+    // The page owns its title (the shell suppresses its own on this route), so
+    // the head must name the lane exactly as the menu entry does.
+    expect(screen.getByRole("heading", { level: 1, name: "IP Discovery" })).toBeInTheDocument();
+    expect(
+      screen.getByText("Find reachable, missing and unexpected hosts — native ip_scanner run."),
+    ).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Scan setup" })).toBeInTheDocument();
     // Auto-subnet prefill from the configured Source Interface cidr.
     await waitFor(() =>
@@ -235,7 +241,10 @@ describe("IpScannerPage", () => {
     // All six register counters, from result_summary only.
     const results = await screen.findByRole("heading", { name: "Results" });
     const card = results.closest("section") as HTMLElement;
-    for (const pill of ["3 Expected", "2 Reachable", "1 Match", "0 Partial", "1 Missing", "1 Rogue"]) {
+    // The card renders before the run's evidence barrier clears, so wait for the
+    // first counter rather than asserting straight away.
+    await within(card).findByText("3 Expected");
+    for (const pill of ["2 Reachable", "1 Match", "0 Partial", "1 Missing", "1 Rogue"]) {
       expect(within(card).getByText(pill)).toBeInTheDocument();
     }
 

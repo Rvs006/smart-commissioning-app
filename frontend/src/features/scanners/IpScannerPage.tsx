@@ -70,8 +70,9 @@ export function IpScannerPage() {
     { label: "Method", value: "TCP connect", sub: "vendored IP scanner" },
   ];
 
-  const startBlockedReason = scanRangeStart.trim() === "" ? "Enter a start address to scan." : null;
-
+  // No client-side range gate: v0.1.58 let a blank range through and the sidecar
+  // adapter answers with an honest "No scan range was provided" failure, which is
+  // the repo's rule (engines never fake success). Blocking here would hide it.
   return (
     <ScannerScreen
       inputs={{ ignoreRegister, probeTimeout, scanRangeEnd, scanRangeStart }}
@@ -123,7 +124,6 @@ export function IpScannerPage() {
           </label>
         </>
       }
-      startBlockedReason={startBlockedReason}
       startLabel="Start scan"
     />
   );
