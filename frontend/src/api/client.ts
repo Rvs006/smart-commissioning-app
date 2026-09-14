@@ -1984,6 +1984,55 @@ export function saveMqttScanRunAsRegister(input: {
   );
 }
 
+// The lanes that can save a scan as a register, and the file-name prefix each
+// save route stamps on the import it creates.
+const SCAN_REGISTER_LANES = {
+  "ip-scanner": { lane: "ip", filePrefix: "scan-register-" },
+  "bacnet-scanner": { lane: "bacnet", filePrefix: "bacnet-scan-register-" },
+  "mqtt-scanner": { lane: "mqtt", filePrefix: "mqtt-scan-register-" },
+} as const;
+
+export type ScanRegisterRoute = keyof typeof SCAN_REGISTER_LANES;
+
+// Download path for a succeeded scanner run's register CSV: the same bytes the
+// save-as-register route imported, handed to the operator as a file.
+export function getScanRegisterCsvPath(route: ScanRegisterRoute, runId: string): string {
+  const { lane } = SCAN_REGISTER_LANES[route];
+  return `/discovery/${lane}_sidecar/runs/${encodeURIComponent(runId)}/register.csv`;
+}
+
+// Recover the run id from an import created by a save-as-register route, so a
+// register already on file can still offer its CSV. Returns null for an uploaded
+// register (or a live save), which has no run to rebuild the CSV from.
+export function scanRegisterRunIdFromFileName(
+  route: ScanRegisterRoute,
+  fileName: string | null | undefined,
+): string | null {
+  const { filePrefix } = SCAN_REGISTER_LANES[route];
+  if (!fileName || !fileName.startsWith(filePrefix) || !fileName.endsWith(".csv")) {
+    return null;
+  }
+  const runId = fileName.slice(filePrefix.length, -".csv".length);
+  return runId.length > 0 ? runId : null;
+}
+
+// Turn what the MQTT live session has discovered so far into an accepted
+// mqtt_scanner_register import, and re-push it so the live tree recolours.
+export function saveMqttLiveAsRegister(input: {
+  sessionId: string;
+  context?: ApiRequestContext;
+}): Promise<ImportBatchSummary> {
+  return request<ImportBatchSummary>(
+    "/discovery/mqtt_sidecar/live/save-as-register",
+    {
+      body: JSON.stringify({ session_id: input.sessionId }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
 // GAP-M6: download path for a run's attached raw-evidence artifact (e.g. the
 // MQTT capture's export-archive ZIP), served by the shared raw-evidence route.
 export function getRawEvidenceDownloadPath(runId: string, artifactId: string): string {

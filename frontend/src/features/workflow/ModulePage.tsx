@@ -42,6 +42,10 @@ import {
   getReportDownloadPath,
   getBacnetExportAssetsPath,
   getRawEvidenceDownloadPath,
+  getScanRegisterCsvPath,
+  scanRegisterRunIdFromFileName,
+  saveMqttLiveAsRegister,
+  type ScanRegisterRoute,
   getSystemInterfaces,
   REPORTS_EXPORT_PATH,
   getUdmiSchemaTemplatePath,
@@ -636,6 +640,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // operator inputs (e.g. IP range) and deliberately drop the dry-run preview
   // step the sealed lanes use — true whether the lane renders native or embedded.
   const isSidecarDiscoveryModule = SIDECAR_DISCOVERY_ROUTES.has(module.route);
+  // The three lanes whose finished run can be saved as, and downloaded as, a register.
+  const scanRegisterRoute: ScanRegisterRoute | null =
+    module.route === "ip-scanner" || module.route === "bacnet-scanner" || module.route === "mqtt-scanner"
+      ? module.route
+      : null;
   const requestedRunId = searchParams.get("run")?.trim() || null;
   const comparisonRunId = searchParams.get("compare")?.trim() || null;
   const setScopedRunUrl = useCallback(
@@ -913,6 +922,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // GAP-M6: the MQTT capture's raw export-archive ZIP, attached to the run as raw
   // evidence during the capture and served by the shared raw-evidence route.
   const mqttArchiveDownload = useFileDownload(apiClient);
+  // "Save scan as register" imports the register but writes no file; this serves
+  // the same bytes back as a CSV the operator can keep.
+  const registerCsvDownload = useFileDownload(apiClient);
   const schemaTemplateDownload = useFileDownload(apiClient);
   const activeRunMatchesReservedLiveSubmission = Boolean(
     activeRun &&
@@ -1870,6 +1882,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       ),
     queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef, selectedImportType),
   });
+  // A register on file that came from "Save scan as register" names the run that
+  // produced it, so the same CSV can be downloaded again; an uploaded register
+  // (or one saved from a live session) has no run to rebuild it from.
+  const latestRegisterCsvFileName = latestImportQuery.data?.file_name ?? "";
+  const latestRegisterCsvRunId = scanRegisterRoute
+    ? scanRegisterRunIdFromFileName(scanRegisterRoute, latestRegisterCsvFileName)
+    : null;
 
   // Run retention: the page state is wiped on every navigation, so arriving at a
   // head used to look like nothing had ever run there. Ask the run store for
@@ -2802,6 +2821,19 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   useEffect(() => {
     setSavedRegister(null);
   }, [activeRun?.runId, activeRun?.epoch]);
+
+  // The live explorer's own save-as-register. A sibling of saveRegisterMutation
+  // rather than a reuse: this one is scoped to the held session, not to a run,
+  // so its result must not claim a run's register CSV is downloadable.
+  const saveLiveRegisterMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.save-live-register`),
+    mutationFn: (sessionId: string) => saveMqttLiveAsRegister({ context: { client: apiClient }, sessionId }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef),
+      });
+    },
+  });
 
   const propertyLiveMutation = useMutation({
     mutationFn: ({
@@ -5027,6 +5059,26 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         {formatRelativeTime(latestImportQuery.data.created_at)}. This register is
                         stored and used by runs on this page; upload again only if the file changed.
                       </span>
+                      {/* A register saved from a scan has no file the operator ever
+                        held; the run it came from can still rebuild the same CSV. */}
+                      {scanRegisterRoute && latestRegisterCsvRunId && (
+                        <button
+                          className="secondary-button compact"
+                          disabled={registerCsvDownload.pendingKey !== null}
+                          onClick={() => {
+                            void registerCsvDownload.download({
+                              fallbackFilename: latestRegisterCsvFileName,
+                              key: "latest-register-csv",
+                              path: getScanRegisterCsvPath(scanRegisterRoute, latestRegisterCsvRunId),
+                            });
+                          }}
+                          type="button"
+                        >
+                          {registerCsvDownload.pendingKey === "latest-register-csv"
+                            ? "Downloading..."
+                            : "Download register CSV"}
+                        </button>
+                      )}
                     </div>
                   )}
 
@@ -6422,8 +6474,49 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     >
                       Publish message…
                     </button>
+                    <button
+                      className="secondary-button compact"
+                      disabled={!canEngineer || !mqttLive.session || saveLiveRegisterMutation.isPending}
+                      onClick={() => {
+                        const sessionId = mqttLive.session?.session_id;
+                        if (sessionId) {
+                          saveLiveRegisterMutation.mutate(sessionId);
+                        }
+                      }}
+                      title={
+                        canEngineer
+                          ? "Turn the assets this live session has discovered into an expected-asset MQTT register. It is stored here, applied automatically to the next capture for this project and site, and pushed back so the tree below recolours now."
+                          : ENGINEER_REQUIRED_TOOLTIP
+                      }
+                      type="button"
+                    >
+                      {saveLiveRegisterMutation.isPending ? "Saving register..." : "Save as register"}
+                    </button>
                   </div>
                 </div>
+                {saveLiveRegisterMutation.isSuccess && saveLiveRegisterMutation.data && (
+                  <div className="state-panel success" role="status">
+                    <strong>Saved as register</strong>
+                    <span>
+                      {saveLiveRegisterMutation.data.accepted_rows} of{" "}
+                      {saveLiveRegisterMutation.data.total_rows} rows accepted (
+                      {saveLiveRegisterMutation.data.import_id}).{" "}
+                      {saveLiveRegisterMutation.data.accepted_rows > 0
+                        ? "The live tree now compares against it, and so will the next MQTT capture for this project and site."
+                        : "No row was accepted, so nothing changed here and the next capture will not use this import."}
+                    </span>
+                  </div>
+                )}
+                {saveLiveRegisterMutation.isError && (
+                  <div className="state-panel error" role="alert">
+                    <strong>Save as register failed</strong>
+                    <span>
+                      {saveLiveRegisterMutation.error instanceof Error
+                        ? saveLiveRegisterMutation.error.message
+                        : "The register could not be created."}
+                    </span>
+                  </div>
+                )}
                 {mqttPublishOpen && (
                   <MqttPublishModal
                     apiClient={apiClient}
@@ -7398,11 +7491,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       onClick={() => activeRun && saveRegisterMutation.mutate(activeRun.runId)}
                       title={
                         canEngineer
-                          ? module.route === "bacnet-scanner"
-                            ? "Turn this scan's discovered devices into an expected-device register (their reported object counts become the expected objects)."
-                            : module.route === "mqtt-scanner"
-                              ? "Turn this capture's discovered assets into an expected-asset MQTT register (one row per asset, with its topic, schema, site and location)."
-                              : "Turn this scan's responding devices into an expected-device register (their open ports become the expected ports)."
+                          ? `${
+                              module.route === "bacnet-scanner"
+                                ? "Turn this scan's discovered devices into an expected-device register (their reported object counts become the expected objects)."
+                                : module.route === "mqtt-scanner"
+                                  ? "Turn this capture's discovered assets into an expected-asset MQTT register (one row per asset, with its topic, schema, site and location)."
+                                  : "Turn this scan's responding devices into an expected-device register (their open ports become the expected ports)."
+                            } It is stored here and applied automatically to the next scan for this project and site; no file is uploaded, and you can download it as a CSV afterwards.`
                           : ENGINEER_REQUIRED_TOOLTIP
                       }
                       type="button"
@@ -7484,25 +7579,41 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </div>
               </div>
 
-              {(module.route === "ip-scanner" ||
-                module.route === "bacnet-scanner" ||
-                module.route === "mqtt-scanner") &&
-                savedRegister && (
-                  <div className="state-panel success" role="status">
-                    <strong>Saved as register</strong>
-                    <span>
-                      {savedRegister.file_name}: {savedRegister.accepted_rows} of{" "}
-                      {savedRegister.total_rows} rows accepted ({savedRegister.import_id}). The next{" "}
-                      {module.route === "bacnet-scanner"
-                        ? "BACnet"
-                        : module.route === "mqtt-scanner"
-                          ? "MQTT"
-                          : "IP"}{" "}
-                      {module.route === "mqtt-scanner" ? "capture" : "Discovery run"} for this project
-                      and site will compare against it.
-                    </span>
-                  </div>
-                )}
+              {scanRegisterRoute && savedRegister && (
+                <div className="state-panel success" role="status">
+                  <strong>Saved as register</strong>
+                  <span>
+                    {savedRegister.file_name}: {savedRegister.accepted_rows} of{" "}
+                    {savedRegister.total_rows} rows accepted ({savedRegister.import_id}). It is stored
+                    here and applies automatically to the next{" "}
+                    {scanRegisterRoute === "bacnet-scanner"
+                      ? "BACnet"
+                      : scanRegisterRoute === "mqtt-scanner"
+                        ? "MQTT"
+                        : "IP"}{" "}
+                    {scanRegisterRoute === "mqtt-scanner" ? "capture" : "Discovery run"} for this
+                    project and site. There is nothing to upload. Keep a copy if you want one:
+                  </span>
+                  <button
+                    className="secondary-button compact"
+                    disabled={registerCsvDownload.pendingKey !== null}
+                    onClick={() => {
+                      if (activeRun) {
+                        void registerCsvDownload.download({
+                          fallbackFilename: savedRegister.file_name,
+                          key: "register-csv",
+                          path: getScanRegisterCsvPath(scanRegisterRoute, activeRun.runId),
+                        });
+                      }
+                    }}
+                    type="button"
+                  >
+                    {registerCsvDownload.pendingKey === "register-csv"
+                      ? "Downloading..."
+                      : "Download register CSV"}
+                  </button>
+                </div>
+              )}
               {(module.route === "ip-scanner" ||
                 module.route === "bacnet-scanner" ||
                 module.route === "mqtt-scanner") &&
@@ -7526,6 +7637,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <div className="state-panel error" role="alert">
                   <strong>Capture archive download failed</strong>
                   <span>{mqttArchiveDownload.error}</span>
+                </div>
+              )}
+              {scanRegisterRoute && registerCsvDownload.error && (
+                <div className="state-panel error" role="alert">
+                  <strong>Register CSV download failed</strong>
+                  <span>{registerCsvDownload.error}</span>
                 </div>
               )}
 

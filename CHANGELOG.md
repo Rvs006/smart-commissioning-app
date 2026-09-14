@@ -7,6 +7,32 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- "Save scan as register" now offers the register back as a CSV file. A new
+  `register.csv` download on each scanner lane rebuilds the file from the same
+  run evidence the save used, so the copy you keep is byte-for-byte the register
+  the tool applies. The link sits next to the "Saved as register" note and next
+  to "Register already imported" when that register came from a scan. The save
+  button and its note now also say plainly that the register is stored here and
+  applied automatically to the next scan for that project and site, with nothing
+  to upload.
+- The MQTT live explorer can save what it has discovered as a register without
+  waiting for a capture run to finish. "Save as register" turns the live assets
+  into an MQTT register, stores it for the next capture, and pushes it straight
+  back into the live view so matched assets recolour without reconnecting. It
+  refuses, and says so, when the session has not seen any assets yet; if the
+  register is stored but the live view cannot be refreshed, the message names
+  the import and tells you to reconnect rather than save a second copy.
+
+### Changed
+
+- Sending a config message to live equipment now asks for confirmation first.
+  On builds that do not enforce the preview-and-approval path, "Send to live
+  equipment" opens a confirm step showing the exact topic, QoS, retain flag and
+  payload, with Cancel and "Send to device". Nothing is published until "Send to
+  device" is pressed. Builds that enforce approval are unchanged.
+
 ## [0.1.58] - 2026-09-14
 
 ### Changed

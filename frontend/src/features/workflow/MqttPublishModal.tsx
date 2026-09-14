@@ -14,8 +14,10 @@ import type { WorkspaceRef } from "../../app/sessionScope";
 // Sealed one-message publish (M5 PR-A). Compose -> Preview (no send) -> Approve
 // (admin) -> Send (replays the frozen bytes) -> Result. Built from SCT's existing
 // dialog / state-panel / data-table vocabulary. In a frictionless deployment
-// (authorizationEnforced=false) it collapses to Compose -> Send: the backend
-// seals the exact bytes server-side and records the sender.
+// (authorizationEnforced=false) it collapses to Compose -> Confirm -> Send: the
+// backend seals the exact bytes server-side and records the sender, and the
+// confirm step is the operator's last look at the topic, QoS/retain and payload
+// before they reach live equipment (there is no approver to catch a typo here).
 
 type Props = {
   workspace: WorkspaceRef;
@@ -29,7 +31,7 @@ type Props = {
   onClose: () => void;
 };
 
-type Stage = "compose" | "preview" | "result";
+type Stage = "compose" | "confirm" | "preview" | "result";
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
@@ -216,12 +218,66 @@ export function MqttPublishModal({
             <button
               className="primary-button compact"
               disabled={busy || topic.trim().length === 0}
+              onClick={() => setStage("confirm")}
+              type="button"
+            >
+              Send to live equipment
+            </button>
+          )}
+        </div>
+      )}
+
+      {stage === "confirm" && (
+        <div className="form-stack">
+          <div className="state-panel warning" role="status">
+            <strong>Confirm the write</strong>
+            <span>
+              This publishes to a live device and can change how the equipment operates. Nothing has
+              been sent yet.
+            </span>
+          </div>
+          <div className="data-table-wrap">
+            <table className="data-table">
+              <tbody>
+                <tr>
+                  <td>Topic</td>
+                  <td>{topic}</td>
+                </tr>
+                <tr>
+                  <td>QoS / retain</td>
+                  <td>
+                    {qos} / {retain ? "retained" : "not retained"}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <span className="section-copy">Payload</span>
+          <pre className="mqtt-payload-view">{payload}</pre>
+          <div className="inline-actions">
+            <button
+              className="secondary-button compact"
+              disabled={busy}
+              onClick={() => {
+                // Drop a previous send's error too: the operator is going back to
+                // edit, and a stale Problem banner over a new draft reads as if
+                // the new one already failed.
+                setError(null);
+                setStage("compose");
+              }}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="primary-button compact"
+              disabled={busy}
               onClick={() => void doDirectSend()}
               type="button"
             >
-              {busy ? "Sending…" : "Send to live equipment"}
+              {busy ? "Sending…" : "Send to device"}
             </button>
-          )}
+          </div>
         </div>
       )}
 

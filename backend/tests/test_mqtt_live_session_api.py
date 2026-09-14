@@ -524,6 +524,111 @@ class MqttLiveSessionApiTest(ApiTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(captured["body"], {"q": "supply_air_temp", "matchedOnly": True})
 
+    # -- save the live session as a register ----------------------------------
+
+    # The sidecar's generateRegisterCsv header + one asset row; the sidecar quotes
+    # every cell, which the import profile re-parses.
+    _LIVE_REGISTER_HEADER = "Asset,Topic,Type,Point,Unit,Data Type,Schema,Site,Location,Description"
+    _LIVE_REGISTER_CSV = (
+        _LIVE_REGISTER_HEADER
+        + '\r\n"AHU-1","udmi/site/example/AHU-1/event/pointset","","supply_air_temp","Cel",'
+        '"analog","udmi","example","Plant",""\r\n'
+    )
+
+    def test_save_as_register_imports_the_sidecar_rows_and_pushes_them_back(self) -> None:
+        session = self._acquire()
+        posts: list[tuple[str, dict]] = []
+
+        def fake_post_json(_base, path, body):
+            posts.append((path, body))
+            return {"imported": 1, "points": 1}
+
+        with patch.object(self.live_routes, "_get_text", lambda *_a: self._LIVE_REGISTER_CSV), patch.object(
+            self.live_routes, "_post_json", fake_post_json
+        ):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        summary = response.json()
+        self.assertEqual(summary["import_type"], "mqtt_scanner_register")
+        self.assertEqual(summary["accepted_rows"], 1)
+        # Scoped to the held session, never to anything the browser sent.
+        self.assertEqual(summary["project_id"], "proj")
+        self.assertEqual(summary["site_id"], "site")
+
+        # The ACCEPTED rows are re-pushed so the live tree recolours without a
+        # reconnect: one /api/register POST carrying the round-tripped CSV.
+        self.assertEqual([path for path, _ in posts], ["/api/register"])
+        pushed = posts[0][1]["csv"]
+        self.assertEqual(pushed.splitlines()[0], self._LIVE_REGISTER_HEADER)
+        self.assertIn("AHU-1", pushed)
+        self.assertIn("supply_air_temp", pushed)
+
+    def test_save_as_register_with_an_empty_live_snapshot_is_409(self) -> None:
+        session = self._acquire()
+        header_only = self._LIVE_REGISTER_HEADER + "\r\n"
+        pushes: list = []
+        with patch.object(self.live_routes, "_get_text", lambda *_a: header_only), patch.object(
+            self.live_routes, "_post_json", lambda *args: pushes.append(args)
+        ):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("not discovered any assets", response.json()["detail"])
+        # No empty register reaches the sidecar (it would clear the live matches).
+        self.assertEqual(pushes, [])
+
+    def test_save_as_register_never_pushes_an_empty_register_back(self) -> None:
+        # A row the import rejects must not be re-pushed, but an ALL-rejected
+        # import must not clear the sidecar either: a header-only CSV wipes every
+        # matched flag in the live tree. Asset-or-Topic is the one-of rule, so a
+        # row with neither is rejected.
+        session = self._acquire()
+        all_rejected = self._LIVE_REGISTER_HEADER + '\r\n"","","","supply_air_temp","","","","","",""\r\n'
+        pushes: list = []
+        with patch.object(self.live_routes, "_get_text", lambda *_a: all_rejected), patch.object(
+            self.live_routes, "_post_json", lambda *args: pushes.append(args)
+        ):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["accepted_rows"], 0)
+        self.assertEqual(pushes, [])
+
+    def test_save_as_register_with_a_stale_session_is_409(self) -> None:
+        response = self.client.post(
+            "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+            json={"session_id": "not-current"},
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+
+    def test_save_as_register_reports_the_import_id_when_the_re_push_fails(self) -> None:
+        # The register IS saved; only the live recolour failed. The message has to
+        # say so, or the operator saves a second copy of the same register.
+        session = self._acquire()
+
+        def dead_sidecar(*_a):
+            raise OSError("connection reset")
+
+        with patch.object(self.live_routes, "_get_text", lambda *_a: self._LIVE_REGISTER_CSV), patch.object(
+            self.live_routes, "_post_json", dead_sidecar
+        ):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+        self.assertEqual(response.status_code, 502, response.text)
+        detail = response.json()["detail"]
+        self.assertIn("was saved as import imp_", detail)
+        self.assertIn("Reconnect", detail)
+
     # -- stream relay ---------------------------------------------------------
 
     def test_stream_open_with_a_stale_session_is_409(self) -> None:

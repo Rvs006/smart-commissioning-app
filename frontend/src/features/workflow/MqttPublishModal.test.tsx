@@ -118,6 +118,11 @@ describe("MqttPublishModal", () => {
     expect(screen.queryByRole("button", { name: /Preview/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Send to live equipment/ }));
 
+    // There is no approver here, so the operator confirms the exact write first.
+    expect(screen.getByText("Confirm the write")).toBeInTheDocument();
+    expect(startDirectMqttPublish).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Send to device/ }));
+
     await screen.findByText(/Sent/);
     expect(startDirectMqttPublish).toHaveBeenCalledWith(
       expect.objectContaining({ topic: "site/ahu-1/cmd", payload: '{"cmd":1}' }),
@@ -125,6 +130,26 @@ describe("MqttPublishModal", () => {
     // The sealed preview path was never touched.
     expect(startMqttPublishPreview).not.toHaveBeenCalled();
     expect(createScanAuthorization).not.toHaveBeenCalled();
+  });
+
+  it("frictionless confirm shows the exact write and cancelling sends nothing", async () => {
+    render(<MqttPublishModal authorizationEnforced={false} onClose={() => {}} workspace={workspace} />);
+    fillCompose();
+    fireEvent.change(screen.getByLabelText("QoS"), { target: { value: "1" } });
+    fireEvent.click(screen.getByLabelText("Retain"));
+    fireEvent.click(screen.getByRole("button", { name: /Send to live equipment/ }));
+
+    // Topic, QoS/retain and the payload are all on screen before anything goes out.
+    expect(screen.getByText("site/ahu-1/cmd")).toBeInTheDocument();
+    expect(screen.getByText("1 / retained")).toBeInTheDocument();
+    expect(screen.getByText('{"cmd":1}')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    // Back to compose with the message intact, and not one byte published.
+    expect(startDirectMqttPublish).not.toHaveBeenCalled();
+    expect(screen.queryByText("Confirm the write")).toBeNull();
+    expect(screen.getByLabelText("Topic")).toHaveValue("site/ahu-1/cmd");
   });
 
   it("shows an honest failure when the send run fails", async () => {
