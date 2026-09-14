@@ -2,9 +2,12 @@
 
 v0.1.58 is a small capacity release. The built-in MQTT discovery engine now
 retains up to 30,000 distinct topics per capture instead of 10,000, so a
-registerless `#` sweep of a site with 5,000 or more assets publishing three
-UDMI topics per asset (15,000 distinct topics) is captured whole instead of
-stopping at the 10,000th topic with `topic_limit_reached` (#216). The release
+registerless `#` sweep of a 5,000-asset site publishing three UDMI topics per
+asset (15,000 distinct topics) is captured whole instead of stopping at the
+10,000th topic with `topic_limit_reached` (#216). At three topics per asset the
+ceiling holds about 10,000 assets; a `#` subscription that also captures
+unrelated topics lowers that bound, and a sweep past it still ends with
+`topic_limit_reached`. The release
 secret scan now fails closed when a requested bundle path is missing,
 unreadable, or empty (#212), and the same guard is backported to the older
 `scan_v0138` through `scan_v0156` wrappers (#213). No database migration
