@@ -255,6 +255,56 @@ class ScannerReportInventoryTest(unittest.TestCase):
             "a run with no routers key must not produce a router section",
         )
 
+    def test_bacnet_scanner_renders_expected_not_responding_section(self) -> None:
+        # The silent section used to light up only for the built-in
+        # bacnet_discovery engine, so a sidecar scan's signed report omitted the
+        # expected-but-silent devices its own results screen showed.
+        run = _run(
+            "bacnet_scanner",
+            "bac-run",
+            {"devices": [], "points": []},
+            {
+                "devices_discovered": 0,
+                "expected_not_responding": [
+                    {
+                        "asset_id": "bacnet-device-9",
+                        "asset_name": "VAV-9",
+                        "device_instance": 9,
+                        "address": "10.0.0.9",
+                        "directed_probe_sent": False,
+                    }
+                ],
+            },
+        )
+        sections = self.reports._discovery_inventory(run)
+        section = _section(sections, self.reports._BACNET_SILENT_COLUMNS)
+        self.assertEqual(len(section["rows"]), 1)
+        row = section["rows"][0]
+        self.assertEqual(row["Register Asset"], "VAV-9 (bacnet-device-9)")
+        self.assertEqual(row["Instance"], "9")
+        self.assertEqual(row["Address"], "10.0.0.9")
+        self.assertEqual(row["Directed Who-Is"], "not sent")
+        # The honesty note must survive: silence is inconclusive, never "absent".
+        self.assertEqual(section["note"], self.reports._BACNET_SILENT_NOTE)
+        _assert_no_leak(self, sections)
+
+    def test_bacnet_scanner_empty_silent_list_still_renders_the_section(self) -> None:
+        # Key present but empty is a real result ("every expected device
+        # answered"), distinct from a run that never recorded the field.
+        run = _run("bacnet_scanner", "bac-run", {"devices": [], "points": []},
+                   {"devices_discovered": 0, "expected_not_responding": []})
+        sections = self.reports._discovery_inventory(run)
+        self.assertEqual(_section(sections, self.reports._BACNET_SILENT_COLUMNS)["rows"], [])
+
+    def test_bacnet_run_without_silent_key_has_no_silent_section(self) -> None:
+        run = _run("bacnet_scanner", "bac-run", {"devices": [], "points": []},
+                   {"devices_discovered": 0})
+        sections = self.reports._discovery_inventory(run)
+        self.assertFalse(
+            any(s["columns"] == self.reports._BACNET_SILENT_COLUMNS for s in sections),
+            "a run with no expected_not_responding key must not produce the section",
+        )
+
     def test_mqtt_scanner_renders_topic_columns_and_summed_messages(self) -> None:
         run = _run(
             "mqtt_scanner",

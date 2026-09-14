@@ -63,10 +63,13 @@ const results = {
       register: "rogue",
     },
     {
+      // A silent host: the engine leaves `hostname` null and carries the
+      // register's expectation in expected_hostname.
       asset_id: null,
       ip_address: "10.0.10.20",
       mac_address: null,
-      hostname: "chiller-2",
+      hostname: null,
+      expected_hostname: "chiller-2",
       observed_ports: [],
       match_basis: "register",
       status_detail: "unreachable/missing",
@@ -299,6 +302,11 @@ describe("IpScannerPage", () => {
     const panel = await screen.findByRole("complementary");
     expect(within(panel).getByRole("heading", { name: "Expected, no response" })).toBeInTheDocument();
     expect(within(panel).queryByRole("heading", { name: "Live health" })).not.toBeInTheDocument();
+    // The register's expectation is named as an expectation, never as a discovery.
+    expect(within(panel).getByText("expected · chiller-2")).toBeInTheDocument();
+    expect(
+      within(panel).getByText("Expected, not resolved on the network"),
+    ).toBeInTheDocument();
   });
 
   it("posts the same run parameters ModulePage posts today", async () => {

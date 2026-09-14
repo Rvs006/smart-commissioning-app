@@ -294,9 +294,14 @@ export function formatBacnetSidecarSummaryCards(
   if (!summary || typeof summary !== "object") {
     return null;
   }
-  const anyPresent = BACNET_SIDECAR_SUMMARY_FIELDS.some(
-    ([, key]) => typeof summary[key] === "number",
-  );
+  // points_exported is checked but NOT displayed. The engine computes it as a
+  // sum, so it is a number on every real bacnet_scanner run even when every
+  // register counter is null (a cancelled or empty scan); dropping it from the
+  // strip must not also drop it from the "is this a scanner run at all?" test,
+  // or such a run would lose its summary entirely instead of showing dashes.
+  const anyPresent =
+    typeof summary.points_exported === "number" ||
+    BACNET_SIDECAR_SUMMARY_FIELDS.some(([, key]) => typeof summary[key] === "number");
   if (!anyPresent) {
     return null;
   }
@@ -314,7 +319,9 @@ export function formatBacnetSidecarSummaryCards(
 const MQTT_SIDECAR_SUMMARY_FIELDS = [
   ["Topics", "topics_discovered"],
   ["Assets", "assets_discovered"],
-  ["Matches", "register_matches"],
+  // "Match", not "Matches", so the same counter is named the same way on all
+  // three scanner screens.
+  ["Match", "register_matches"],
   ["Rogue", "register_rogue"],
 ] as const;
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DiscoveryResultsResponse } from "../../api/client";
+import { assetIdentity } from "./runIsolation";
 import {
   bacnetBackendLabel,
   bacnetDeviceDetailItems,
@@ -355,7 +356,8 @@ describe("ipRowsFromResults register cells", () => {
     const [row] = ipRowsFromResults(
       ipResults({
         ip_address: "192.0.2.50",
-        hostname: "expected-host",
+        hostname: null,
+        expected_hostname: "expected-host",
         observed_ports: [],
         match_basis: "register",
         last_seen_at: null,
@@ -369,7 +371,9 @@ describe("ipRowsFromResults register cells", () => {
     expect(row.Register).toBe("missing");
     expect(row.Ports).toBe("—");
     expect(row["Last Seen"]).toBe("—");
-    expect(row.Hostname).toBe("expected-host");
+    // The register's expectation must NOT be rendered as an observed hostname:
+    // nothing resolved it. It rides the observation as expected_hostname.
+    expect(row.Hostname).toBe("—");
   });
 
   it("renders a dash when the run stamped no register state", () => {
@@ -525,6 +529,60 @@ describe("bacnetResultColumns", () => {
   });
 });
 
+describe("bacnetRowsFromResults instance-less missing rows", () => {
+  // The vendored compare() emits instance "—" for any register row whose Device
+  // Instance was blank or unparseable. Keying the append off a Map would collapse
+  // every such row into one; each must survive as its own table row.
+  it("keeps two instance-less missing devices as two distinct rows", () => {
+    const rows = bacnetRowsFromResults(
+      bacnetView(
+        [],
+        [
+          {
+            asset_id: null,
+            device_instance: "—",
+            address: "192.0.2.41",
+            name: "NO-INSTANCE-A",
+            rag: "red",
+            register_state: "missing",
+          },
+          {
+            asset_id: null,
+            device_instance: "—",
+            address: "192.0.2.42",
+            name: "NO-INSTANCE-B",
+            rag: "red",
+            register_state: "missing",
+          },
+        ],
+      ),
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.Device)).toEqual(["NO-INSTANCE-A", "NO-INSTANCE-B"]);
+    expect(rows.map((row) => row.Address)).toEqual(["192.0.2.41", "192.0.2.42"]);
+    expect(rows.every((row) => row.__tone === "fail")).toBe(true);
+    // Distinct identities, so selecting one cannot select the other.
+    const identities = rows.map((row) => assetIdentity("bacnet-scanner", row));
+    expect(new Set(identities).size).toBe(2);
+  });
+
+  it("still skips an observation that already has its device row", () => {
+    const rows = bacnetRowsFromResults(
+      bacnetView(
+        [
+          {
+            name: "AHU-1",
+            device_type: "bacnet_device",
+            attributes: { device_instance: 1001, register_state: "match" },
+          },
+        ],
+        [{ device_instance: 1001, register_state: "match", point_count: 2 }],
+      ),
+    );
+    expect(rows).toHaveLength(1);
+  });
+});
+
 describe("discoveryViewFor register columns", () => {
   // Only the sidecar engines run compare(); the built-in lanes stamp no register
   // state, so their tables must not grow a column that can only read "—".
@@ -540,6 +598,48 @@ describe("discoveryViewFor register columns", () => {
     expect(builtInBacnet).not.toContain("Firmware");
     // The columns that lane already had stay put.
     expect(builtInBacnet).toContain("Network Number");
+  });
+
+  // The text filter matches "every VISIBLE cell" (see ResultsFilter). If a
+  // hidden column's value stayed in the row object, an operator on a built-in
+  // lane could type a word that is nowhere in the table and watch rows vanish.
+  it("strips the hidden columns from the built-in lanes' row payloads too", () => {
+    const ipRow = discoveryViewFor(
+      "ip-scanner-sct",
+      ipResults({ rag: "red", register: "rogue", status_detail: "rogue/rogue" }),
+    )?.rows[0];
+    expect(ipRow).toBeDefined();
+    expect(ipRow).not.toHaveProperty("Register");
+    // The tone key is not a column and must survive: the row still shades.
+    expect(ipRow?.__tone).toBe("fail");
+
+    const bacnetRow = discoveryViewFor(
+      "bacnet-discovery-sct",
+      bacnetView(
+        [
+          {
+            name: "AHU-1",
+            model: "CTRL-9",
+            device_type: "bacnet_device",
+            attributes: { device_instance: 1001, firmware: "3.2.1", register_state: "partial" },
+          },
+        ],
+        [],
+      ),
+    )?.rows[0];
+    expect(bacnetRow).toBeDefined();
+    expect(bacnetRow).not.toHaveProperty("Result");
+    expect(bacnetRow).not.toHaveProperty("Model");
+    expect(bacnetRow).not.toHaveProperty("Firmware");
+    expect(bacnetRow?.Device).toBe("AHU-1");
+  });
+
+  it("keeps the sidecar lanes' row payloads whole", () => {
+    const ipRow = discoveryViewFor(
+      "ip-scanner",
+      ipResults({ rag: "red", register: "rogue", status_detail: "rogue/rogue" }),
+    )?.rows[0];
+    expect(ipRow?.Register).toBe("rogue");
   });
 });
 

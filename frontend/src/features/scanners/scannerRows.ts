@@ -4,11 +4,7 @@ import type {
   DiscoveryRowRecord,
   ObservedPort,
 } from "../../api/client";
-import {
-  bacnetRowVerdict,
-  ipRowVerdict,
-  registerStateOf,
-} from "../workflow/discoveryRows";
+import { bacnetRowVerdict, ipRowVerdict } from "../workflow/discoveryRows";
 import {
   formatBacnetSidecarSummaryCards,
   formatIpSidecarSummaryCards,
@@ -84,6 +80,16 @@ function attributesOf(record: DiscoveryRowRecord | undefined): Record<string, un
   return attributes && typeof attributes === "object"
     ? (attributes as Record<string, unknown>)
     : {};
+}
+
+// ponytail: a local copy of discoveryRows' private registerStateOf. The two
+// sidecars name the key differently (`register` for IP, `register_state` for
+// BACnet) and both spell "no register bound" as "none", which must read as no
+// verdict rather than as a state. Track A owns that file and keeps the helper
+// private; fold this back in if it is ever exported.
+function registerStateOf(source: Record<string, unknown>): string {
+  const value = source.register ?? source.register_state;
+  return typeof value === "string" && value !== "none" ? value : "";
 }
 
 function numberList(value: unknown): number[] {
@@ -174,7 +180,7 @@ function ipRows(results: DiscoveryResultsResponse): ScannerRow[] {
     }
   }
 
-  return results.discovered_assets.map((asset: DiscoveryAssetObservation) => {
+  return results.discovered_assets.map((asset: DiscoveryAssetObservation, index) => {
     const address = text(asset.ip_address);
     const device = deviceByAddress.get(address);
     const attributes = attributesOf(device);
@@ -182,17 +188,22 @@ function ipRows(results: DiscoveryResultsResponse): ScannerRow[] {
     const verdict = ipRowVerdict(asset);
     const status = statusFromDetail(asset.status_detail, state === "missing" ? "unreachable" : "reachable");
     const missing = state === "missing";
-    const hostname = text(asset.hostname ?? device?.name);
+    // A silent host resolved no hostname: the engine keeps `hostname` null and
+    // carries the register's expectation in `expected_hostname`, so an
+    // expectation is never rendered as a discovery.
+    const hostname = text(missing ? asset.expected_hostname : (asset.hostname ?? device?.name));
     const vendor = text(device?.vendor);
     const latency = attributes.latency;
     return {
-      id: `ip:${address}`,
+      id: address === DASH ? `ip:row-${index}` : `ip:${address}`,
       title: hostname === DASH ? address : hostname,
       tone: verdict.tone,
       register: state,
       status,
       missing,
-      attributes,
+      // A silent host has no device record; carry the register's expectation so
+      // the panel can name what was expected without claiming it was observed.
+      attributes: missing ? { expected_hostname: asset.expected_hostname } : attributes,
       cells: {
         Address: { text: address, mono: true },
         Status: statusChip(status),
@@ -222,7 +233,7 @@ function bacnetRows(results: DiscoveryResultsResponse): ScannerRow[] {
     }
   }
 
-  return results.discovered_assets.map((asset: DiscoveryAssetObservation) => {
+  return results.discovered_assets.map((asset: DiscoveryAssetObservation, index) => {
     const instance = text(asset.device_instance);
     const device = deviceByInstance.get(instance);
     const attributes = attributesOf(device);
@@ -237,7 +248,9 @@ function bacnetRows(results: DiscoveryResultsResponse): ScannerRow[] {
     // honest source, with the per-asset count as a fallback.
     const objectCount = attributes.object_count ?? asset.point_count;
     return {
-      id: `bacnet:${instance}`,
+      // The vendored compare() emits "—" for every register row with a blank or
+      // unparseable device instance, so those rows must not share one key.
+      id: instance === DASH ? `bacnet:row-${index}` : `bacnet:${instance}`,
       title: name === DASH ? `Device ${instance}` : name,
       tone: verdict.tone,
       register: state,

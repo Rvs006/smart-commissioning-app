@@ -219,6 +219,14 @@ export function DeviceDetailPanel({
                 <dt>{lane === "bacnet" ? "Expected name" : "Expected hostname"}</dt>
                 <dd>{(lane === "bacnet" ? row.cells.Name?.text : row.cells.Hostname?.text) ?? "—"}</dd>
               </div>
+              {lane === "ip" && (
+                <div>
+                  <dt>Hostname check</dt>
+                  {/* The engine deliberately leaves `hostname` null here, so the
+                      panel must not imply the name was resolved. */}
+                  <dd className="scanner-kv-fail">Expected, not resolved on the network</dd>
+                </div>
+              )}
             </dl>
           </section>
         )}

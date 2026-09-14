@@ -209,6 +209,12 @@ def _map_result(
     discovered_assets: list[dict[str, Any]] = []
     structured_records: list[dict[str, Any]] = []
     issues: list[ValidationIssueRecord] = []
+    # The register rows that answered nothing, mirroring the key bacnet_discovery
+    # stamps. NOTE: the inventory report's "expected not responding" section is
+    # BACnet-only today (reports.py reads this key inside the bacnet branch), so
+    # on an IP run this is currently descriptive evidence on the run summary
+    # rather than a rendered report section.
+    expected_not_responding: list[dict[str, Any]] = []
 
     for row in rows:
         register = row.get("register")
@@ -293,15 +299,22 @@ def _map_result(
         elif register == "missing":
             # Expected by the register, silent on the wire. Observation-only: no
             # structured device record (nothing was observed), no ports, and
-            # last_seen_at stays None because this host was never seen. The
-            # hostname is the register's expectation, which is all we know.
+            # last_seen_at stays None because this host was never seen.
+            #
+            # hostname stays None: nothing resolved it. The register's expected
+            # hostname travels as expected_hostname, never in the observed field,
+            # so the results table cannot render an expectation as a discovery —
+            # the same laundering register_rows_from_devices refuses. ip_address
+            # IS kept: that address was genuinely probed.
+            expected_hostname = row.get("expectedHostname") or row.get("hostname") or None
             discovered_assets.append(
                 json_safe_value(
                     {
                         "asset_id": None,
                         "ip_address": ip,
                         "mac_address": None,
-                        "hostname": row.get("expectedHostname") or row.get("hostname") or None,
+                        "hostname": None,
+                        "expected_hostname": expected_hostname,
                         "observed_ports": [],
                         "match_basis": "register",
                         "status_detail": _status_detail(row),
@@ -310,6 +323,14 @@ def _map_result(
                         "register": register,
                     }
                 )
+            )
+            expected_not_responding.append(
+                {
+                    "asset_id": None,
+                    "asset_name": expected_hostname,
+                    "address": ip,
+                    "expected_ports": list(row.get("expectedPorts") or []),
+                }
             )
 
         severity = _RAG_SEVERITY.get(str(rag))
@@ -325,6 +346,9 @@ def _map_result(
             "register_partial": summary.get("partial"),
             "register_missing": summary.get("missing"),
             "register_rogue": summary.get("rogue"),
+            # Always stamped (an empty list when every expected host answered),
+            # so a consumer can tell "none silent" from a pre-upgrade run.
+            "expected_not_responding": expected_not_responding,
             "scanner": ENGINE_NAME,
         }
     )
@@ -662,9 +686,26 @@ def _demo() -> None:
                "matches": 1, "partial": 1, "missing": 1, "rogue": 1}
     result = _map_result(rows, summary, {"project_id": "p", "site_id": "s"})
 
-    # missing (unreachable) is an issue, not a device; the other 3 are devices.
-    assert len(result.discovered_assets) == 3, result.discovered_assets
+    # Every compare() row becomes an observation, including the expected-but-
+    # silent one, so the results table can show it. Only the 3 that answered
+    # become devices: the devices table stays observed-only.
+    assert len(result.discovered_assets) == 4, result.discovered_assets
     assert len(result.structured_records) == 3, result.structured_records
+    missing_asset = next(a for a in result.discovered_assets if a["register"] == "missing")
+    assert missing_asset["ip_address"] == "192.0.2.12", missing_asset
+    assert missing_asset["rag"] == "red", missing_asset
+    # Nothing observed may be claimed for a host that never answered.
+    assert missing_asset["observed_ports"] == [], missing_asset
+    assert missing_asset["last_seen_at"] is None, missing_asset
+    assert missing_asset["hostname"] is None, missing_asset
+    assert missing_asset["asset_id"] is None, missing_asset
+    assert missing_asset["status_detail"] == "unreachable/missing", missing_asset
+    # The register verdict rides every observation, not just the devices.
+    assert {a["register"] for a in result.discovered_assets} == {
+        "match", "partial", "missing", "rogue"
+    }, result.discovered_assets
+    silent = result.result_summary_extra["expected_not_responding"]
+    assert [entry["address"] for entry in silent] == ["192.0.2.12"], silent
     # observed_ports must be {port, protocol} objects (readback schema shape),
     # never raw ints - the exact gap that shipped once. udp is tagged from openUdp.
     for asset in result.discovered_assets:

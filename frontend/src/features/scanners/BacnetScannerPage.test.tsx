@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearApiKey, setApiKey } from "../../api/client";
 import { BacnetScannerPage } from "./BacnetScannerPage";
+import { scannerRowsFromResults } from "./scannerRows";
 import { scannerProviders } from "./scannerTestHarness";
 
 const RUN_ID = "run-bacnet-scanner-1";
@@ -371,5 +372,50 @@ describe("BacnetScannerPage", () => {
       screen.getByText(/The next BACnet scan for this project and site compares against it\./),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Download register CSV" })).toBeInTheDocument();
+  });
+});
+
+describe("BACnet row projection", () => {
+  it("keeps two instance-less silent devices as separate rows", () => {
+    // The vendored compare() spells a blank/unparseable Device Instance "—", so
+    // two such register rows share one instance. Keying a row on the instance
+    // alone would collapse them and hide a device the operator must chase.
+    const rows = scannerRowsFromResults("bacnet", {
+      run_id: RUN_ID,
+      job_type: "bacnet_scanner",
+      status: "succeeded",
+      result_summary: {},
+      discovered_assets: [
+        {
+          asset_id: null,
+          device_instance: "—",
+          address: "10.0.10.71",
+          name: "FCU-1",
+          rag: "red",
+          register_state: "missing",
+          last_seen_at: null,
+        },
+        {
+          asset_id: null,
+          device_instance: "—",
+          address: "10.0.10.72",
+          name: "FCU-2",
+          rag: "red",
+          register_state: "missing",
+          last_seen_at: null,
+        },
+      ],
+      devices: [],
+      points: [],
+      topics: [],
+    });
+
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((row) => row.id)).size).toBe(2);
+    expect(rows.every((row) => row.missing && row.tone === "fail")).toBe(true);
+    expect(rows.map((row) => row.cells.Name?.text)).toEqual([
+      "expected · FCU-1",
+      "expected · FCU-2",
+    ]);
   });
 });
