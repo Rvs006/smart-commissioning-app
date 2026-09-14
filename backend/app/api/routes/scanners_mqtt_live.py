@@ -140,7 +140,8 @@ def _get_text(base: str, path: str) -> str:
     answers ``text/csv``. Module-level so a test patches it the way it patches
     ``_post_json``.
     """
-    with urllib.request.urlopen(f"{base}{path}", timeout=15.0) as response:  # noqa: S310
+    # Fixed loopback URL owned by SidecarSupervisor, never operator input.
+    with urllib.request.urlopen(f"{base}{path}", timeout=15.0) as response:
         return response.read().decode("utf-8", "replace")
 
 
@@ -407,59 +408,78 @@ def save_mqtt_live_as_register(
     Gated exactly like ``subscribe``: engineer role, and the caller must hold the
     current lease and scope to its project/site. Project and site come from the
     session, never from the browser.
+
+    The whole save is one ceremony under ``_connect_ceremony_lock``: read the
+    sidecar, create the import, push back. connect() acquires the lease inside
+    that same lock, so a take-over cannot land between the lease check and the
+    import - which would otherwise persist a register for a session the caller no
+    longer holds, and leave that import as the newest one ``_bind_scanner_register``
+    freezes into the next capture. The lock holds across one loopback GET, one DB
+    write and one loopback POST; it deliberately is NOT ``live_service.lock``,
+    which the async relay and reaper take.
     """
-    session = _current_session_or_409(request.session_id, principal)
     base_url = _resolve_base_url(http_request)
 
-    try:
-        csv_text = _get_text(base_url, "/api/generate-register")
-    except (urllib.error.URLError, OSError) as error:
-        raise HTTPException(status_code=502, detail="The MQTT discovery sidecar could not be reached.") from error
-    # generateRegisterCsv always writes the header row, so "header only" is the
-    # honest empty case: nothing has been discovered on this session yet.
-    if len([line for line in csv_text.splitlines() if line.strip()]) < 2:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "The live session has not discovered any assets yet, so there is "
-                "nothing to save as a register."
-            ),
+    with _connect_ceremony_lock:
+        session = _current_session_or_409(request.session_id, principal)
+        try:
+            csv_text = _get_text(base_url, "/api/generate-register")
+        except (urllib.error.URLError, OSError) as error:
+            raise HTTPException(
+                status_code=502, detail="The MQTT discovery sidecar could not be reached."
+            ) from error
+        # generateRegisterCsv always writes the header row, so "header only" is the
+        # honest empty case: nothing has been discovered on this session yet.
+        if len([line for line in csv_text.splitlines() if line.strip()]) < 2:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The live session has not discovered any assets yet, so there is "
+                    "nothing to save as a register."
+                ),
+            )
+
+        summary, _errors = ImportService(service.engine).create_import(
+            import_type="mqtt_scanner_register",
+            file_name=f"mqtt-live-register-{session.session_id}.csv",
+            file_bytes=csv_text.encode("utf-8"),
+            project_id=session.project_id,
+            site_id=session.site_id,
+        )
+        logger.info(
+            "mqtt live saved as register session_id=%s import_id=%s rows=%d by=%s",
+            session.session_id,
+            summary.import_id,
+            summary.accepted_rows,
+            principal.username,
         )
 
-    summary, _errors = ImportService(service.engine).create_import(
-        import_type="mqtt_scanner_register",
-        file_name=f"mqtt-live-register-{session.session_id}.csv",
-        file_bytes=csv_text.encode("utf-8"),
-        project_id=session.project_id,
-        site_id=session.site_id,
-    )
-    logger.info(
-        "mqtt live saved as register session_id=%s import_id=%s rows=%d by=%s",
-        session.session_id,
-        summary.import_id,
-        summary.accepted_rows,
-        principal.username,
-    )
+        if summary.accepted_rows == 0:
+            # Nothing was accepted, so there is nothing to compare against. Pushing
+            # a header-only CSV here would CLEAR the sidecar's register and wipe
+            # every matched flag in the tree; leave the live view on what it already
+            # had and let the 0-accepted summary say what happened.
+            # (_bind_scanner_register skips a no-accepted-rows import too, so the
+            # next capture is unaffected.)
+            return summary
 
-    # Push only the ACCEPTED rows back, so the live tree compares against exactly
-    # what SCT stored (a row the import rejected must not keep matching here).
-    register_rows = _load_register_rows(
-        {"register_import_id": summary.import_id}, ImportRepository(service.engine).get_accepted_rows
-    )
-    if not register_rows:
-        # Nothing was accepted, so there is nothing to compare against. Pushing a
-        # header-only CSV here would CLEAR the sidecar's register and wipe every
-        # matched flag in the tree; leave the live view on what it already had and
-        # let the 0-accepted summary say what happened. (_bind_scanner_register
-        # skips a no-accepted-rows import too, so the next capture is unaffected.)
-        return summary
-    # Same ceremony lock connect() uses, for the same reason: it is the one thing
-    # that stops a concurrent take-over from interleaving its register push with
-    # ours and leaving the new holder's live tree comparing against OUR
-    # workspace's register. connect() acquires the lease inside this lock, so
-    # re-checking the session under it is genuinely conclusive.
-    with _connect_ceremony_lock:
-        _current_session_or_409(request.session_id, principal)
+        # Push only the ACCEPTED rows back, so the live tree compares against exactly
+        # what SCT stored (a row the import rejected must not keep matching here).
+        register_rows = _load_register_rows(
+            {"register_import_id": summary.import_id}, ImportRepository(service.engine).get_accepted_rows
+        )
+        if not register_rows:
+            # accepted_rows > 0 yet nothing read back: _load_register_rows swallows
+            # a missing/unreadable store into []. Pushing that would clear the
+            # sidecar, and returning 200 would claim a recolour that never happened.
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"The register was saved as import {summary.import_id}, but its accepted "
+                    "rows could not be read back, so the live session was not refreshed. "
+                    "Reconnect to apply it."
+                ),
+            )
         try:
             _post_json(base_url, "/api/register", {"csv": _register_csv(register_rows)})
         except (urllib.error.URLError, OSError) as error:

@@ -2388,7 +2388,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       // Refresh the "already imported" note so it reflects this upload the next
       // time the file input is empty (ISSUE-5).
       void queryClient.invalidateQueries({
-        queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef),
+        queryKey: queryKeys.latestImportRoot(sessionScopeId, workspaceRef),
       });
       // Default accepted MQTT registers to uploaded-row validation against live
       // broker payloads; both options remain editable.
@@ -2813,7 +2813,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       setSavedRegister(summary);
       // Mirror importMutation.onSuccess: refresh the "register on file" note.
       void queryClient.invalidateQueries({
-        queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef),
+        queryKey: queryKeys.latestImportRoot(sessionScopeId, workspaceRef),
       });
     },
   });
@@ -2830,7 +2830,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     mutationFn: (sessionId: string) => saveMqttLiveAsRegister({ context: { client: apiClient }, sessionId }),
     onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef),
+        queryKey: queryKeys.latestImportRoot(sessionScopeId, workspaceRef),
       });
     },
   });
@@ -3709,6 +3709,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     { workspace: workspaceRef, authorized: scanAuthorized, rootFilter: captureTopicFilter.trim() || undefined },
     apiClient,
   );
+
+  // saveLiveRegisterMutation's panel reports what THIS session saved. A new
+  // session (or a stop) makes that claim stale, so clear it with the session
+  // identity rather than letting a previous session's "Saved as register" note
+  // sit over a fresh tree.
+  const liveSessionId = mqttLive.session?.session_id ?? null;
+  const resetLiveRegisterSave = saveLiveRegisterMutation.reset;
+  useEffect(() => {
+    resetLiveRegisterSave();
+  }, [liveSessionId, resetLiveRegisterSave]);
 
   // BACnet-only provenance: read result_summary.backend so simulated sample
   // devices are never mistaken for a real on-wire scan. Null for other routes
@@ -5078,6 +5088,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                             ? "Downloading..."
                             : "Download register CSV"}
                         </button>
+                      )}
+                      {/* The link is offered on a file-name match, so a 404 here is
+                        the honest answer that the guess was wrong, not a fault. */}
+                      {registerCsvDownload.error && (
+                        <span className="field-note" role="alert">
+                          {registerCsvDownload.errorStatus === 404
+                            ? "This register was uploaded, so there is no scan behind it to rebuild the CSV from. Use your own copy of the file."
+                            : `Register CSV download failed: ${registerCsvDownload.error}`}
+                        </span>
                       )}
                     </div>
                   )}
@@ -10941,6 +10960,10 @@ function captureRowsToCsv(rows: CaptureRow[]): string {
 function useFileDownload(apiClient: SessionBoundApiClient) {
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The HTTP status behind `error`, so a caller can tell a real fault from an
+  // expected miss (e.g. a 404 on a download path offered on a heuristic) without
+  // pattern-matching the server's prose. null when the failure carried no status.
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const generationRef = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
 
@@ -10974,6 +10997,7 @@ function useFileDownload(apiClient: SessionBoundApiClient) {
       generationRef.current = generation;
       setPendingKey(key);
       setError(null);
+      setErrorStatus(null);
       try {
         const { blob, filename } = await downloadFile(path, init, {
           client: apiClient,
@@ -10986,6 +11010,7 @@ function useFileDownload(apiClient: SessionBoundApiClient) {
       } catch (cause) {
         if (generation === generationRef.current && !controller.signal.aborted && isCurrent()) {
           setError(cause instanceof Error ? cause.message : "Download failed.");
+          setErrorStatus(cause instanceof ApiError ? cause.status : null);
         }
       } finally {
         if (generation === generationRef.current) {
@@ -11003,9 +11028,10 @@ function useFileDownload(apiClient: SessionBoundApiClient) {
     controllerRef.current = null;
     setPendingKey(null);
     setError(null);
+    setErrorStatus(null);
   }, []);
 
-  return { download, error, pendingKey, reset };
+  return { download, error, errorStatus, pendingKey, reset };
 }
 
 function triggerBlobDownload(blob: Blob, filename: string): void {

@@ -173,6 +173,22 @@ class RegisterCsvDownloadTest(unittest.TestCase):
         error = self._http_error("ip", _run("ip_scanner"))
         self.assertEqual(error.status_code, 409)
 
+    # -- the three route wrappers pass their own lane -------------------------
+
+    def test_each_route_wrapper_forwards_its_own_lane(self) -> None:
+        # The wrappers are one line each, which is exactly how a lane gets swapped
+        # unnoticed: the BACnet route would happily serve IP rows.
+        calls: list[tuple[str, str]] = []
+        with patch.object(
+            self.scanners,
+            "_register_csv_download",
+            lambda lane, run_id, _principal: calls.append((lane, run_id)),
+        ):
+            self.scanners.download_ip_scan_register_csv("run-1", self.principal)
+            self.scanners.download_bacnet_scan_register_csv("run-2", self.principal)
+            self.scanners.download_mqtt_scan_register_csv("run-3", self.principal)
+        self.assertEqual(calls, [("ip", "run-1"), ("bacnet", "run-2"), ("mqtt", "run-3")])
+
 
 if __name__ == "__main__":
     unittest.main()

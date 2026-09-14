@@ -583,6 +583,78 @@ class MqttLiveSessionApiTest(ApiTestCase):
         # No empty register reaches the sidecar (it would clear the live matches).
         self.assertEqual(pushes, [])
 
+    def test_save_as_register_holds_the_ceremony_lock_across_read_import_and_push(self) -> None:
+        # A take-over must not be able to land between the lease check and the
+        # import: that would persist a register for a session the caller no longer
+        # holds, and _bind_scanner_register would freeze it into the next capture.
+        # connect() acquires the lease inside this same lock, so proving the lock
+        # is held for the whole sequence proves the sequence is non-interleavable.
+        session = self._acquire()
+        held: list[bool] = []
+
+        def record_lock_state(*_a, **_kw):
+            # Non-blocking probe from this same thread would always succeed on an
+            # RLock, so assert on a plain Lock the route holds: acquire(False)
+            # fails while it is held.
+            held.append(not self.live_routes._connect_ceremony_lock.acquire(False))
+            if held[-1] is False:  # pragma: no cover - only on a regression
+                self.live_routes._connect_ceremony_lock.release()
+            return self._LIVE_REGISTER_CSV
+
+        def push(*_a):
+            held.append(not self.live_routes._connect_ceremony_lock.acquire(False))
+            if held[-1] is False:  # pragma: no cover - only on a regression
+                self.live_routes._connect_ceremony_lock.release()
+            return {"imported": 1}
+
+        with patch.object(self.live_routes, "_get_text", record_lock_state), patch.object(
+            self.live_routes, "_post_json", push
+        ):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        # The sidecar read AND the push both ran with the ceremony lock held, so
+        # the create_import between them did too.
+        self.assertEqual(held, [True, True])
+
+    def test_save_as_register_is_409_before_anything_is_imported_when_taken_over(self) -> None:
+        # The lease check is the first thing inside the lock, so a stale session
+        # never reaches create_import: no orphan register is left behind.
+        session = self._acquire()
+        self._acquire(owner="someone-else", take_over=True)  # take over the lease
+        reads: list = []
+        with patch.object(self.live_routes, "_get_text", lambda *_a: reads.append(_a) or ""), patch.object(
+            self.live_routes, "_post_json", lambda *_a: {"imported": 0}
+        ):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(reads, [])
+
+    def test_save_as_register_is_502_when_accepted_rows_cannot_be_read_back(self) -> None:
+        # accepted_rows > 0 but nothing reads back (a missing or unreadable store;
+        # _load_register_rows swallows that into []). Returning 200 here would let
+        # the UI claim the live tree now compares against a register it never got.
+        session = self._acquire()
+        pushes: list = []
+        with patch.object(self.live_routes, "_get_text", lambda *_a: self._LIVE_REGISTER_CSV), patch.object(
+            self.live_routes, "_load_register_rows", lambda *_a: []
+        ), patch.object(self.live_routes, "_post_json", lambda *args: pushes.append(args)):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+        self.assertEqual(response.status_code, 502, response.text)
+        detail = response.json()["detail"]
+        self.assertIn("was saved as import imp_", detail)
+        self.assertIn("could not be read back", detail)
+        # Nothing was pushed, so the sidecar's existing register is untouched.
+        self.assertEqual(pushes, [])
+
     def test_save_as_register_never_pushes_an_empty_register_back(self) -> None:
         # A row the import rejects must not be re-pushed, but an ALL-rejected
         # import must not clear the sidecar either: a header-only CSV wipes every

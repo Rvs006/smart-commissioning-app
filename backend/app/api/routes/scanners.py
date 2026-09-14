@@ -669,8 +669,13 @@ def _register_csv_download(lane: str, run_id: str, principal: AuthPrincipal) -> 
     into SCT (so the next scan for this project/site RAG-compares against it) but
     writes no file the operator can keep, and they went looking for one. Built
     from the SAME rows helper and the SAME serializer as the save route for the
-    same lane, so the downloaded bytes are byte-identical to the bytes that were
-    imported - the kept file and the applied register can never drift apart.
+    same lane, so the downloaded bytes are byte-identical to the bytes the save
+    SUBMITTED to the importer.
+
+    That is not the same as the register SCT applies: the import profile can
+    reject a row, and only accepted rows are compared against. A rejected row is
+    therefore present in this file and absent from the applied register - which is
+    what makes the file useful for finding out why a device is not being matched.
 
     A DB read only: no sidecar, no network I/O, so like save-as-register it skips
     the scan-authorization consent gate and the inline-only 503 (both untrue

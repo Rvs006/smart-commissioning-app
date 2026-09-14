@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   createScanAuthorization,
   getValidationRun,
@@ -35,6 +35,16 @@ type Stage = "compose" | "confirm" | "preview" | "result";
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
+// Distinguishable from a rejected request: the publish was ACCEPTED and may well
+// have reached the broker, we just stopped watching it. Offering "send again"
+// after this would risk a duplicate write to live equipment.
+class RunPollTimeout extends Error {
+  constructor(readonly runId: string) {
+    super("The run did not finish in time.");
+    this.name = "RunPollTimeout";
+  }
+}
+
 async function pollRun(runId: string, apiClient?: SessionBoundApiClient): Promise<RunRecord> {
   const context = apiClient ? { client: apiClient } : undefined;
   for (let attempt = 0; attempt < 80; attempt += 1) {
@@ -44,7 +54,7 @@ async function pollRun(runId: string, apiClient?: SessionBoundApiClient): Promis
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  throw new Error("The run did not finish in time.");
+  throw new RunPollTimeout(runId);
 }
 
 function planField(run: RunRecord | null, key: string): unknown {
@@ -75,6 +85,15 @@ export function MqttPublishModal({
   const [purpose, setPurpose] = useState("");
   const [authorization, setAuthorization] = useState<ScanAuthorizationV1 | null>(null);
   const [sendRun, setSendRun] = useState<RunRecord | null>(null);
+  // The confirm step is the last gate before a live write. Focus lands on Cancel
+  // (not Send) so a stray Enter or Space cannot be the keystroke that publishes,
+  // and so the dialog's own text is what a screen reader announces on arrival.
+  const confirmCancelRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (stage === "confirm") {
+      confirmCancelRef.current?.focus();
+    }
+  }, [stage]);
 
   const fail = (err: unknown) => setError(err instanceof Error ? err.message : "The request failed.");
 
@@ -106,7 +125,15 @@ export function MqttPublishModal({
       setSendRun(await pollRun(accepted.run_id, apiClient));
       setStage("result");
     } catch (err) {
-      fail(err);
+      if (err instanceof RunPollTimeout) {
+        // The send was accepted; only our watch gave up. Move OFF the confirm
+        // step, so its live "Send to device" button cannot publish a second copy
+        // of a message that may already be on the wire, and name the run instead.
+        setSendRun({ run_id: err.runId, status: "running" } as RunRecord);
+        setStage("result");
+      } else {
+        fail(err);
+      }
     } finally {
       setBusy(false);
     }
@@ -228,9 +255,13 @@ export function MqttPublishModal({
       )}
 
       {stage === "confirm" && (
-        <div className="form-stack">
-          <div className="state-panel warning" role="status">
-            <strong>Confirm the write</strong>
+        <div
+          aria-labelledby="mqtt-publish-confirm-heading"
+          className="form-stack"
+          role="alertdialog"
+        >
+          <div className="state-panel warning">
+            <strong id="mqtt-publish-confirm-heading">Confirm the write</strong>
             <span>
               This publishes to a live device and can change how the equipment operates. Nothing has
               been sent yet.
@@ -258,6 +289,7 @@ export function MqttPublishModal({
             <button
               className="secondary-button compact"
               disabled={busy}
+              ref={confirmCancelRef}
               onClick={() => {
                 // Drop a previous send's error too: the operator is going back to
                 // edit, and a stale Problem banner over a new draft reads as if
@@ -367,10 +399,21 @@ export function MqttPublishModal({
                 {String(publishEvidence.topic)}, authorized by {String(publishEvidence.authorized_by)}.
               </span>
             </div>
-          ) : (
+          ) : TERMINAL.has(sendRun.status) ? (
             <div className="state-panel error" role="alert">
               <strong>Not sent</strong>
               <span>{(sendRun.error_message as string) || "The publish failed."} A new preview and approval are required to retry.</span>
+            </div>
+          ) : (
+            // Accepted, still not terminal when we stopped polling. Claiming
+            // either outcome would be a guess, and "retry" could double-publish.
+            <div className="state-panel warning" role="status">
+              <strong>Still running</strong>
+              <span>
+                The publish was accepted as run {sendRun.run_id} and had not finished when this
+                dialog stopped watching it. Check that run in Run History before sending again; it
+                may already have reached the broker.
+              </span>
             </div>
           )}
           <button className="secondary-button compact" onClick={onClose} type="button">
