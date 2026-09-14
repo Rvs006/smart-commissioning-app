@@ -234,17 +234,23 @@ export function formatIpHeadlineMetrics(value: unknown): IpHeadlineMetricDisplay
 
 export type IpSidecarSummaryCard = Readonly<{ heading: string; value: string }>;
 
-// GAP-C2: the four-card summary strip for the native IP sidecar lane. The
-// sidecar engine stamps its totals straight onto result_summary
-// (register_expected / hosts_scanned / register_matches / register_rogue),
-// not the sealed lane's ip_headline_metrics_v1 snapshot, so this reads them
-// directly. Returns null when none is a number (a dry-run, an older run, or a
-// failed scan has nothing to show, so the strip is omitted rather than faked);
-// a present-but-null field renders "—", never an invented count.
+// GAP-C2: the summary strip for the native IP sidecar lane. The sidecar engine
+// stamps its totals straight onto result_summary, not the sealed lane's
+// ip_headline_metrics_v1 snapshot, so this reads them directly. All six of the
+// sidecar's compare() counters are shown (expected / reachable / match /
+// partial / missing / rogue) — Partial and Missing were stamped by the engine
+// but never surfaced, so an operator could not see that expected devices had
+// gone silent. Returns null when none is a number (a dry-run, an older run, or
+// a failed scan has nothing to show, so the strip is omitted rather than
+// faked); a present-but-null field renders "—", never an invented count.
+// "Reachable" counts everything that answered, rogues included (the sidecar's
+// summary.reachable), which is what this card has always shown.
 const IP_SIDECAR_SUMMARY_FIELDS = [
   ["Expected", "register_expected"],
-  ["Reachable / Discovered", "hosts_scanned"],
-  ["Matches", "register_matches"],
+  ["Reachable", "hosts_scanned"],
+  ["Match", "register_matches"],
+  ["Partial", "register_partial"],
+  ["Missing", "register_missing"],
   ["Rogue", "register_rogue"],
 ] as const;
 
@@ -266,16 +272,19 @@ export function formatIpSidecarSummaryCards(
   });
 }
 
-// GAP-C2 (BACnet): the four-card summary strip for the native BACnet sidecar
-// lane. The bacnet_scanner engine stamps these totals straight onto
-// result_summary (devices_discovered / points_exported / register_matches /
-// register_rogue), so read them directly, exactly like the IP variant. Same
+// GAP-C2 (BACnet): the summary strip for the native BACnet sidecar lane. The
+// bacnet_scanner engine stamps these totals straight onto result_summary, so
+// read them directly, exactly like the IP variant, and show the same six
+// register counters so the two scanner screens read alike. Same
 // null-when-none / "—"-for-null-field contract so a dry-run or an older run
-// omits the strip rather than faking counts.
+// omits the strip rather than faking counts. "Reachable" is
+// devices_discovered: every device that answered, rogues included.
 const BACNET_SIDECAR_SUMMARY_FIELDS = [
-  ["Discovered", "devices_discovered"],
-  ["Points", "points_exported"],
-  ["Matches", "register_matches"],
+  ["Expected", "register_expected"],
+  ["Reachable", "devices_discovered"],
+  ["Match", "register_matches"],
+  ["Partial", "register_partial"],
+  ["Missing", "register_missing"],
   ["Rogue", "register_rogue"],
 ] as const;
 

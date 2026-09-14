@@ -323,7 +323,10 @@ def _map_result(
         instance = row.get("instance")
         rag = row.get("rag")
         register_state = row.get("register")
-        # "missing" = expected-but-not-discovered: an issue, not a device.
+        # "missing" = expected-but-not-discovered. It is NOT a device (it stays
+        # out of structured_records, which the devices table owns and which must
+        # remain observed-only), but it IS a result row the operator has to see,
+        # so it gets an observation entry alongside its issue.
         is_device = register_state != "missing" and row.get("status") != "unreachable"
 
         if is_device:
@@ -387,6 +390,25 @@ def _map_result(
                             # rebuild pointsExportComplete=False from evidence alone.
                             "points_truncated": instance in truncated_instances,
                         },
+                    }
+                )
+            )
+        elif register_state == "missing":
+            # Expected by the register, no Who-Is answer. Observation-only: no
+            # structured device record, and last_seen_at stays None because this
+            # device was never seen. name/address are the register's expectation
+            # (the sidecar's compare() fills them from the register row), which
+            # is all that is known about a device that did not answer.
+            discovered_assets.append(
+                json_safe_value(
+                    {
+                        "asset_id": f"bacnet-device-{instance}",
+                        "device_instance": instance,
+                        "address": row.get("ip"),
+                        "name": row.get("name") or row.get("expectedName") or None,
+                        "rag": rag,
+                        "register_state": register_state,
+                        "last_seen_at": None,
                     }
                 )
             )
