@@ -7,6 +7,16 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Changed
+
+- The built-in MQTT discovery engine now retains up to 30,000 distinct topics
+  per capture (`MAX_TOPIC_CAP`, previously 10,000). A registerless `#` sweep of
+  a 5,000-asset site publishing three UDMI topics per asset (15,000 distinct
+  topics) is captured whole instead of stopping at the 10,000th topic with
+  `topic_limit_reached`. The transport's 256 MiB retained-bytes ceiling still
+  bounds memory, and operators can still pass a smaller `max_messages`. UDMI
+  validation (register-sized) and the native MQTT scanner are unchanged.
+
 ### Fixed
 
 - The release secret scan (`scripts/scan_v0157_release_secrets.py`) now fails
