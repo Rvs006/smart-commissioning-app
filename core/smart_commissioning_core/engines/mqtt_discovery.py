@@ -94,8 +94,10 @@ DEFAULT_CAPTURE_SECONDS = 5.0
 # (mqtt_transport.subscribe_and_capture keeps one latest payload per topic), so a
 # large operator max_messages can no longer buy unbounded payload memory — but
 # each retained topic still holds one decoded JSON object, so clamp the topic
-# count. Worst-case memory ~= distinct_topics x largest payload.
-MAX_TOPIC_CAP = 10_000
+# count. Worst-case memory ~= distinct_topics x largest payload, and the
+# transport's 256 MiB retained-bytes cap bounds that product regardless. 30k
+# covers a 5,000+-asset site publishing three UDMI topics per asset in one sweep.
+MAX_TOPIC_CAP = 30_000
 # Registerless engine, so nothing scales the default to the site. Default equals
 # the memory-safe ceiling so a full-site sweep is captured whole rather than
 # truncated at the old 500; operators can still pass a smaller max_messages.
