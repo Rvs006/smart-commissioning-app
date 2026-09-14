@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""Tests for the v0.1.58 release-facing secret scan."""
+
+from __future__ import annotations
+
+import io
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from unittest.mock import patch
+
+import scan_v0158_release_secrets as scan
+
+
+class V0154SecurityScanTests(unittest.TestCase):
+    def test_default_command_scans_the_release_source_tree(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        expected = root / "README.md"
+        with (
+            patch.object(scan.base, "_files", return_value=[expected]) as files,
+            patch.object(scan.base, "scan", return_value=[]) as scan_files,
+        ):
+            self.assertEqual(scan.main([]), 0)
+        files.assert_called_once_with(root, explicit=False)
+        scan_files.assert_called_once_with([expected])
+
+    def test_directory_path_is_expanded_before_scanning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = root / "release-evidence.json"
+            with (
+                patch.object(scan.base, "_files", return_value=[expected]) as files,
+                patch.object(scan.base, "scan", return_value=[]) as scan_files,
+            ):
+                self.assertEqual(scan.main(["--path", str(root)]), 0)
+        files.assert_called_once_with(root.resolve(), explicit=True)
+        self.assertEqual([path.name for path in scan_files.call_args.args[0]], [expected.name])
+
+    def test_rejects_seeded_private_material(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-notes.md"
+            path.write_text('broker_password = "seeded-private-value"\n', encoding="utf-8")
+            self.assertTrue(scan.base.scan([path]))
+
+    def test_accepts_sanitized_release_placeholders(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-notes.md"
+            path.write_text("- password: {{PASSWORD_FROM_SECRET_MANAGER}}\n", encoding="utf-8")
+            self.assertEqual(scan.base.scan([path]), [])
+
+    def test_scans_zip_members(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-evidence.docx"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("word/document.xml", 'api_key = "seeded-private-value"')
+            self.assertTrue(scan.base.scan([path]))
+
+    def test_scans_credentials_inside_a_nested_archive(self) -> None:
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as archive:
+            archive.writestr("notes.txt", "broker_password = seeded-private-value")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-evidence.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("nested-private.zip", inner.getvalue())
+            self.assertTrue(scan.base.scan([path]))
+
+    def test_bundle_archive_skips_test_and_binary_members(self) -> None:
+        # A packaged bundle carries test fixtures (synthetic markers by design)
+        # and binaries; the archive scan must skip them like the directory walk,
+        # while still catching a real secret in a text member.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "SmartCommissioningApp-windows-portable.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "backend/tests/test_sync.py", 'password = "seeded-test-marker"'
+                )
+                archive.writestr(
+                    "_internal/libpq-abc.dll", b"\x00secret_key = deadbeefcafebabe\x01"
+                )
+                archive.writestr("scanners/node.exe", b"MZ\x00\x00")
+                archive.writestr("README_FIRST.txt", "broker_password = real-leak-value")
+            failures = scan.base.scan([path])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("README_FIRST.txt", failures[0])
+
+    def test_rejects_json_credential_in_directory_and_zip(self) -> None:
+        # A quoted-key JSON credential must be caught in both the assembled
+        # evidence directory and the packaged ZIP (BF-INTEGRATION-2 false negative).
+        payload = '{"password": "hunter2-secret-value"}'
+        with tempfile.TemporaryDirectory() as directory:
+            json_path = Path(directory) / "release-evidence.json"
+            json_path.write_text(payload + "\n", encoding="utf-8")
+            self.assertTrue(scan.base.scan([json_path]))
+            zip_path = Path(directory) / "release-evidence.zip"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                archive.writestr("evidence/release-evidence.json", payload)
+            self.assertTrue(scan.base.scan([zip_path]))
+
+    def test_accepts_json_field_name_maps_and_label_descriptions(self) -> None:
+        # A password key mapped to a plain field name or a human description is a
+        # schema/label, not a secret literal, and must not flood false positives.
+        with tempfile.TemporaryDirectory() as directory:
+            alias = Path(directory) / "aliases.json"
+            alias.write_text('{"mqtt_password": "password"}\n', encoding="utf-8")
+            self.assertEqual(scan.base.scan([alias]), [])
+            label = Path(directory) / "labels.json"
+            label.write_text(
+                '{"MQTT Password": "Broker password (stored masked)."}\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(scan.base.scan([label]), [])
+
+    def test_flags_credential_values_without_a_keyword(self) -> None:
+        # Value shape alone must not suppress: letter-only, uppercase, underscore,
+        # a passphrase, and an identifier under a credential key are all reported
+        # (REV-2-passphrase-scan). Only a value that spells out a credential
+        # keyword with no digit (a field name or a label) is suppressed.
+        for payload in (
+            '{"password": "abcdefghijk"}',
+            '{"password": "ABCDEFGHIJK"}',
+            '{"password": "___________"}',
+            '{"password": "correct horse battery staple"}',
+            '{"password": "SomeIdentifier"}',
+            'api_key = "correct horse battery staple"',
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "release-evidence.json"
+                path.write_text(payload + "\n", encoding="utf-8")
+                self.assertTrue(scan.base.scan([path]), f"missed: {payload}")
+
+    def test_rejects_pretty_printed_json_credential_across_lines(self) -> None:
+        # Pretty-printed JSON splits the key and its quoted value onto separate
+        # physical lines; the per-line matcher never sees both (REV-1). The
+        # multi-line pass must catch it, while a field name or placeholder split
+        # the same way stays clean.
+        with tempfile.TemporaryDirectory() as directory:
+            secret = Path(directory) / "release-evidence.json"
+            secret.write_text('{\n  "password":\n  "hunter2secret"\n}\n', encoding="utf-8")
+            self.assertTrue(scan.base.scan([secret]))
+            field_name = Path(directory) / "aliases.json"
+            field_name.write_text('{\n  "mqtt_password":\n  "password"\n}\n', encoding="utf-8")
+            self.assertEqual(scan.base.scan([field_name]), [])
+            placeholder = Path(directory) / "template.json"
+            placeholder.write_text(
+                '{\n  "password":\n  "{{FROM_SECRET_MANAGER}}"\n}\n', encoding="utf-8"
+            )
+            self.assertEqual(scan.base.scan([placeholder]), [])
+
+    def test_archive_nested_past_depth_bound_fails_closed(self) -> None:
+        # A credential hidden past the archive-depth cap must be reported, not
+        # silently decoded as text and passed (BF-BOUND-1). Wrap a real leak in
+        # more layers than _MAX_ARCHIVE_DEPTH and expect a depth failure.
+        data = b'password = "hunter2-real-leak"\n'
+        name = "leak.txt"
+        for index in range(scan.base._MAX_ARCHIVE_DEPTH + 2):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                archive.writestr(name, data)
+            data = buffer.getvalue()
+            name = f"level-{index}.zip"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-evidence.zip"
+            path.write_bytes(data)
+            failures = scan.base.scan([path])
+        self.assertTrue(failures)
+        self.assertTrue(any("archive nesting exceeds" in failure for failure in failures))
+
+    def test_missing_explicit_path_fails_closed(self) -> None:
+        # A requested bundle path that does not exist must fail nonzero, not
+        # report "OK (0 files)" (REV missing-bundle). os.walk over a missing
+        # root yields nothing, so the wrapper must reject it before scanning.
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "does-not-exist"
+            with patch.object(scan.base, "scan", return_value=[]) as scan_files:
+                self.assertEqual(scan.main(["--path", str(missing)]), 1)
+            scan_files.assert_not_called()
+
+    def test_existing_path_expanding_to_zero_files_fails_closed(self) -> None:
+        # A path that exists but expands to no scannable files (e.g. it vanished
+        # mid-walk, or held nothing) must also fail closed rather than pass empty.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch.object(scan.base, "_files", return_value=[]),
+                patch.object(scan.base, "scan", return_value=[]) as scan_files,
+            ):
+                self.assertEqual(scan.main(["--path", str(root)]), 1)
+            scan_files.assert_not_called()
+
+    def test_mixed_populated_and_empty_paths_fails_closed(self) -> None:
+        # Two explicit --path values, one populated and one empty: the empty one
+        # must fail the scan, not be masked by the populated one (REV-1 mixed).
+        with tempfile.TemporaryDirectory() as directory:
+            populated = Path(directory) / "readable"
+            populated.mkdir()
+            (populated / "release-notes.md").write_text("no secrets here\n", encoding="utf-8")
+            empty = Path(directory) / "empty"
+            empty.mkdir()
+            with patch.object(scan.base, "scan", return_value=[]) as scan_files:
+                self.assertEqual(
+                    scan.main(["--path", str(populated), "--path", str(empty)]), 1
+                )
+            scan_files.assert_not_called()
+
+    def test_unreadable_descendant_fails_closed(self) -> None:
+        # os.walk silently skips a subtree it cannot read. For a release secret
+        # scan that must abort, not pass on the readable siblings, so _files
+        # passes an onerror that re-raises. Simulate the walk hitting a blocked
+        # directory (deterministic and cross-platform, no real chmod).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "readable.md").write_text("clean\n", encoding="utf-8")
+
+            def fake_walk(top, topdown=True, onerror=None):  # noqa: ARG001
+                if onerror is not None:
+                    onerror(PermissionError(13, "Permission denied", str(root / "blocked")))
+                return iter([])
+
+            with patch.object(scan.base.os, "walk", side_effect=fake_walk):
+                with self.assertRaises(PermissionError):
+                    scan.base._files(root, explicit=True)
+
+    def test_clean_nested_archive_is_accepted(self) -> None:
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as archive:
+            archive.writestr("readme.txt", "ordinary release notes with no secrets")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-evidence.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("nested-clean.zip", inner.getvalue())
+            self.assertEqual(scan.base.scan([path]), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

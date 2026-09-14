@@ -43,29 +43,30 @@ Status meanings:
 
 | Area | Status | Documents |
 | --- | --- | --- |
-| Internal portable release | v0.1.57 (latest) | [Release notes](release-notes-v0.1.57.md), [validation](release-validation-v0.1.57.md), and [rollback](migration-rollback-v0.1.57.md) |
-| Hosted Docker | v0.1.57 (latest) | [Docker deployment and rollback](docker-deployment-rollback-v0.1.57.md) |
+| Internal portable release | v0.1.58 (latest) | [Release notes](release-notes-v0.1.58.md), [validation](release-validation-v0.1.58.md), and [rollback](migration-rollback-v0.1.58.md) |
+| Hosted Docker | v0.1.58 (latest) | [Docker deployment and rollback](docker-deployment-rollback-v0.1.58.md) |
 | Portable rebuild | Current | [Portable bundle rebuild](portable-bundle-rebuild.md) |
 | MQTT identities and ACLs | Versioned for v0.1.26 | [MQTT client IDs and broker ACLs](mqtt-client-id-and-acl.md) |
 | Inline ownership | Versioned for v0.1.27 | [Inline heartbeat](inline-heartbeat-v0.1.27.md) |
 | Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md), [v0.1.31](migration-rollback-v0.1.31.md), [v0.1.36](migration-rollback-v0.1.36.md), [v0.1.37](migration-rollback-v0.1.37.md), [v0.1.38](migration-rollback-v0.1.38.md), [v0.1.39](migration-rollback-v0.1.39.md), [v0.1.40](migration-rollback-v0.1.40.md), [v0.1.41](migration-rollback-v0.1.41.md), and [v0.1.42](migration-rollback-v0.1.42.md) |
 | Sync design | Current | [Architecture](sync-architecture.md), [wire format](sync-v2-wire-format.md), [credential scope](sync-v2-credential-scope.md), [operations](sync-v2-operations.md) |
 
-## v0.1.57 release record
+## v0.1.58 release record
 
-v0.1.57 is the latest published release. It is a presentation-only change: the
-IP, BACnet, and MQTT native scanner screens now show as one configure-and-scan
-page instead of the Setup / Run / Results step wizard. No engine, route, API
-call, run parameter, or discovery logic changed, a completed scan still saves as
-a real scanner run, and the sealed built-in discovery lanes keep their stepped
-layout. It adds no database migration.
+v0.1.58 is the latest published release. It raises the built-in MQTT discovery
+engine's distinct-topic ceiling from 10,000 to 30,000 per capture, so a
+registerless sweep of a 5,000-asset site publishing three UDMI topics per asset
+is captured whole, and it makes the release secret scan fail closed on a
+missing or empty bundle path. UDMI validation, the native scanner screens, and
+every engine other than MQTT discovery are unchanged. It adds no database
+migration.
 
-- [Release notes](release-notes-v0.1.57.md)
-- [Release validation record](release-validation-v0.1.57.md)
-- [Migration and rollback](migration-rollback-v0.1.57.md)
-- [Docker deployment and rollback](docker-deployment-rollback-v0.1.57.md)
-- [Field acceptance checklist](v0.1.57-field-acceptance-checklist.md)
-- [Evidence manifest](v0.1.57-evidence-manifest.md)
+- [Release notes](release-notes-v0.1.58.md)
+- [Release validation record](release-validation-v0.1.58.md)
+- [Migration and rollback](migration-rollback-v0.1.58.md)
+- [Docker deployment and rollback](docker-deployment-rollback-v0.1.58.md)
+- [Field acceptance checklist](v0.1.58-field-acceptance-checklist.md)
+- [Evidence manifest](v0.1.58-evidence-manifest.md)
 - [Nmap operator guide](nmap-one-click-operator-guide.md)
 
 ## v0.1.53 release record

@@ -7,24 +7,29 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.58] - 2026-09-14
+
 ### Changed
 
 - The built-in MQTT discovery engine now retains up to 30,000 distinct topics
-  per capture (`MAX_TOPIC_CAP`, previously 10,000). A registerless `#` sweep of
-  a 5,000-asset site publishing three UDMI topics per asset (15,000 distinct
-  topics) is captured whole instead of stopping at the 10,000th topic with
-  `topic_limit_reached`. The transport's 256 MiB retained-bytes ceiling still
-  bounds memory, and operators can still pass a smaller `max_messages`. UDMI
-  validation (register-sized) and the native MQTT scanner are unchanged.
+  per capture (`MAX_TOPIC_CAP`, previously 10,000) (#216). A registerless `#`
+  sweep of a 5,000-asset site publishing three UDMI topics per asset (15,000
+  distinct topics) is captured whole instead of stopping at the 10,000th topic
+  with `topic_limit_reached`. The transport's 256 MiB retained-bytes ceiling
+  still bounds memory, and operators can still pass a smaller `max_messages`.
+  UDMI validation (register-sized) and the native MQTT scanner are unchanged.
 
 ### Fixed
 
 - The release secret scan (`scripts/scan_v0157_release_secrets.py`) now fails
   closed when a requested `--path` bundle is missing, unreadable, or expands to
-  zero files, instead of reporting success on only the paths that resolved. Each
-  explicit path is validated on its own, so a populated bundle can no longer mask
-  a missing or empty one. Release-gate hardening only; no application behavior
-  changed.
+  zero files, instead of reporting success on only the paths that resolved
+  (#212). Each explicit path is validated on its own, so a populated bundle can
+  no longer mask a missing or empty one, and the same guard is backported to
+  the `scan_v0138` through `scan_v0156` wrappers (#213). Release-gate hardening
+  only; no application behavior changed.
+- Frontend test de-flakes for the ModulePage scoped-access focus assertion
+  (#214) and the UDMI epoch download-abort assertion (#215). Test-only.
 
 ## [0.1.57] - 2026-09-09
 

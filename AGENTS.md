@@ -70,12 +70,17 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-09-09. The latest public release is
-  v0.1.57, a presentation-only change that puts the three native scanner screens
-  on one configure-and-scan page instead of the Setup / Run / Results step
-  wizard (#210); no engine, route, API call, run parameter, or discovery logic
-  moved, and field acceptance for it stays open until recorded privately. The
-  native-scanner engines and their SCT wiring landed in v0.1.56: all three
+- **Current handoff**: status as of 2026-09-14. The latest public release is
+  v0.1.58, a small capacity release: the built-in MQTT discovery engine now
+  retains up to 30,000 distinct topics per capture instead of 10,000 (#216), so
+  a registerless sweep of a 5,000-asset site publishing three UDMI topics per
+  asset is captured whole, and the release secret scan fails closed on a missing
+  or empty bundle path (#212, backported to the older wrappers in #213); field
+  acceptance for it stays open until recorded privately. v0.1.57 was a
+  presentation-only change that put the three native scanner screens on one
+  configure-and-scan page instead of the Setup / Run / Results step wizard
+  (#210); no engine, route, API call, run parameter, or discovery logic moved.
+  The native-scanner engines and their SCT wiring landed in v0.1.56: all three
   standalone scanners (IP, BACnet, MQTT) render as native SCT module bodies
   (PRs #201, #203, #204), each one configure-and-scan surface, with the built-in
   discovery modules unchanged. A completed scan still persists as a real `ip_scanner` /
@@ -95,7 +100,7 @@ collection order is alphabetical - keep it so.
   export completeness, atomic MQTT live connect, and truncated-export flagging.
   Live IP and BACnet scans now emit progressive observations to the durable store
   as they run (#202), the persistence foundation for live-updating result rows.
-  This adds no database migration; the Alembic head is unchanged from v0.1.56
+  This adds no database migration; the Alembic head is unchanged from v0.1.57
   (a6b7c8d9e0f1). Built-in TCP connect remains the default; Nmap stays optional,
   locally installed, and unbundled. Keep source, raw evidence, report bytes, EXE
   identity, Docker labels, and release SHA bound to the same run or commit.
