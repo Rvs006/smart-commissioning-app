@@ -156,10 +156,71 @@ class RagVocabularyContractTest(unittest.TestCase):
         ]
         result = _map_result(rows, {}, [], {})
         devices = [r for r in result.structured_records if "device_ref" not in r]
-        # missing (unreachable) -> issue only; the other three -> devices.
+        # missing (unreachable) -> issue + an observation row; the other three
+        # additionally become devices.
         self.assertEqual({d["address"] for d in devices}, {"10.0.0.1", "10.0.0.2", "10.0.0.5"})
         # green raises no issue; amber + two reds do.
         self.assertEqual(len(result.issues), 3)
+
+
+class RegisterRowVisibilityTest(unittest.TestCase):
+    """The BACnet half of the "no RAG in the results table" field report: a
+    device the register expects that answers no Who-Is was an issue with no row
+    anywhere, so the operator never saw it. It must reach discovered_assets."""
+
+    ROWS = [
+        {"instance": 1, "register": "match", "rag": "green", "status": "reachable",
+         "ip": "10.0.0.1", "name": "AHU-1"},
+        {"instance": 2, "register": "partial", "rag": "amber", "status": "reachable",
+         "ip": "10.0.0.2", "name": "AHU-2"},
+        {"instance": 9, "register": "missing", "rag": "red", "status": "unreachable",
+         "ip": "10.0.0.9", "name": "VAV-9", "expectedName": "VAV-9"},
+        {"instance": 5, "register": "rogue", "rag": "red", "status": "rogue",
+         "ip": "10.0.0.5", "name": "UNKNOWN-5"},
+    ]
+
+    def _assets(self) -> dict[object, object]:
+        result = _map_result(self.ROWS, {}, [], {"project_id": "p", "site_id": "s"})
+        return {a["device_instance"]: a for a in result.discovered_assets}
+
+    def test_every_compare_row_reaches_discovered_assets(self) -> None:
+        self.assertEqual(set(self._assets()), {1, 2, 9, 5})
+
+    def test_rag_and_register_state_stamped_on_every_asset(self) -> None:
+        assets = self._assets()
+        for row in self.ROWS:
+            asset = assets[row["instance"]]
+            self.assertEqual(asset["rag"], row["rag"])
+            self.assertEqual(asset["register_state"], row["register"])
+
+    def test_missing_asset_claims_nothing_it_did_not_observe(self) -> None:
+        missing = self._assets()[9]
+        self.assertEqual(missing["asset_id"], "bacnet-device-9")
+        self.assertEqual(missing["register_state"], "missing")
+        self.assertEqual(missing["rag"], "red")
+        self.assertEqual(missing["address"], "10.0.0.9")
+        self.assertEqual(missing["name"], "VAV-9")
+        # Never seen, so no last-seen timestamp and no observed identity fields.
+        self.assertIsNone(missing["last_seen_at"])
+        self.assertNotIn("firmware", missing)
+        self.assertNotIn("model", missing)
+
+    def test_missing_device_stays_out_of_the_devices_table(self) -> None:
+        result = _map_result(self.ROWS, {}, [], {"project_id": "p", "site_id": "s"})
+        devices = [r for r in result.structured_records if "device_ref" not in r]
+        self.assertEqual({d["address"] for d in devices}, {"10.0.0.1", "10.0.0.2", "10.0.0.5"})
+        self.assertEqual(len(result.issues), 3)
+
+    def test_summary_carries_all_six_register_counters(self) -> None:
+        summary = {"expected": 3, "discovered": 3, "expectedReachable": 2,
+                   "matches": 1, "partial": 1, "missing": 1, "rogue": 1}
+        extra = _map_result(self.ROWS, summary, [], {}).result_summary_extra
+        self.assertEqual(extra["register_expected"], 3)
+        self.assertEqual(extra["devices_discovered"], 3)
+        self.assertEqual(extra["register_matches"], 1)
+        self.assertEqual(extra["register_partial"], 1)
+        self.assertEqual(extra["register_missing"], 1)
+        self.assertEqual(extra["register_rogue"], 1)
 
 
 class SseEventContractTest(unittest.TestCase):

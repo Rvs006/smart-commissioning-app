@@ -214,7 +214,10 @@ def _map_result(
         register = row.get("register")
         rag = row.get("rag")
         ip = row.get("ip")
-        # "missing" = expected-but-unreachable: it is an issue, not a device.
+        # "missing" = expected-but-unreachable. It is NOT a device (it never
+        # entered structured_records, and must not: the devices table is
+        # observed-only), but it IS a result row the operator has to see, so it
+        # gets an observation entry alongside its issue.
         is_device = register != "missing" and row.get("status") != "unreachable"
 
         if is_device:
@@ -240,6 +243,12 @@ def _map_result(
                         "match_basis": "ip",
                         "status_detail": _status_detail(row),
                         "last_seen_at": now,
+                        # The register verdict the sidecar's compare() reached,
+                        # carried on the observation itself (schema is
+                        # extra="allow") so the results table can colour the row
+                        # without re-deriving a verdict from status_detail text.
+                        "rag": rag,
+                        "register": register,
                     }
                 )
             )
@@ -278,6 +287,27 @@ def _map_result(
                             "location": row.get("location"),
                             "description": row.get("description"),
                         },
+                    }
+                )
+            )
+        elif register == "missing":
+            # Expected by the register, silent on the wire. Observation-only: no
+            # structured device record (nothing was observed), no ports, and
+            # last_seen_at stays None because this host was never seen. The
+            # hostname is the register's expectation, which is all we know.
+            discovered_assets.append(
+                json_safe_value(
+                    {
+                        "asset_id": None,
+                        "ip_address": ip,
+                        "mac_address": None,
+                        "hostname": row.get("expectedHostname") or row.get("hostname") or None,
+                        "observed_ports": [],
+                        "match_basis": "register",
+                        "status_detail": _status_detail(row),
+                        "last_seen_at": None,
+                        "rag": rag,
+                        "register": register,
                     }
                 )
             )

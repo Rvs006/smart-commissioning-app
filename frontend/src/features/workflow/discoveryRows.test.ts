@@ -3,7 +3,11 @@ import type { DiscoveryResultsResponse } from "../../api/client";
 import {
   bacnetBackendLabel,
   bacnetDeviceDetailItems,
+  bacnetResultColumns,
+  bacnetRowVerdict,
+  bacnetRowsFromResults,
   discoveryEmptyStateFor,
+  discoveryViewFor,
   discoveryMetrics,
   expectedPortsOk,
   filterResultRows,
@@ -285,6 +289,257 @@ describe("ipResultColumns", () => {
     expect(ipResultColumns[0]).toBe("Asset");
     expect(ipResultColumns[1]).toBe("Result");
     expect(ipResultColumns).not.toContain("__tone");
+  });
+
+  it("carries a Register column for the sidecar lane's compare() verdict", () => {
+    expect(ipResultColumns).toContain("Register");
+  });
+});
+
+// The register verdict the ip_scanner sidecar's compare() stamps on every
+// observation (ip_scanner_sidecar.py _map_result) outranks the port markers:
+// before this, a rogue device rendered as a neutral "Responsive" and an
+// expected-but-silent device was an issue with no row at all.
+describe("ipRowVerdict register precedence", () => {
+  it("reads the register verdict ahead of the port markers", () => {
+    expect(
+      ipRowVerdict({ rag: "green", register: "match", status_detail: "reachable/match" }),
+    ).toEqual({ label: "Match", tone: "pass" });
+    expect(
+      ipRowVerdict({ rag: "amber", register: "partial", status_detail: "reachable/partial" }),
+    ).toEqual({ label: "Partial", tone: "warn" });
+    expect(ipRowVerdict({ rag: "red", register: "rogue", status_detail: "rogue/rogue" })).toEqual({
+      label: "Rogue (not in register)",
+      tone: "fail",
+    });
+    expect(
+      ipRowVerdict({ rag: "red", register: "missing", status_detail: "unreachable/missing" }),
+    ).toEqual({ label: "Missing (expected, no response)", tone: "fail" });
+  });
+
+  it("does not let a port marker downgrade a rogue device to neutral", () => {
+    // The rogue row's status_detail carries no port marker at all, which is
+    // exactly how it used to fall through to the neutral "Responsive" label.
+    expect(ipRowVerdict({ rag: "red", register: "rogue", status_detail: "rogue/rogue" }).tone).toBe(
+      "fail",
+    );
+  });
+
+  it("falls through to the port markers when no register is bound", () => {
+    // register "none" is what the sidecar stamps with no register imported, and
+    // the built-in ip_scan lane stamps nothing at all. Both keep today's logic.
+    expect(
+      ipRowVerdict({
+        register: "none",
+        status_detail: "responsive: 80 | EXPECTED PORTS OK: 1/1 open",
+      }),
+    ).toEqual({ label: "Expected ports OK", tone: "pass" });
+    expect(ipRowVerdict({ status_detail: "responsive: 80" })).toEqual({
+      label: "Responsive",
+      tone: null,
+    });
+  });
+});
+
+describe("ipRowsFromResults register cells", () => {
+  it("renders the register state and tones the row from it", () => {
+    const [row] = ipRowsFromResults(
+      ipResults({ rag: "red", register: "rogue", status_detail: "rogue/rogue" }),
+    );
+    expect(row.Register).toBe("rogue");
+    expect(row.Result).toBe("Rogue (not in register)");
+    expect(row.__tone).toBe("fail");
+  });
+
+  it("renders an expected-but-silent row red with no ports and no last-seen", () => {
+    const [row] = ipRowsFromResults(
+      ipResults({
+        ip_address: "192.0.2.50",
+        hostname: "expected-host",
+        observed_ports: [],
+        match_basis: "register",
+        last_seen_at: null,
+        status_detail: "unreachable/missing",
+        rag: "red",
+        register: "missing",
+      }),
+    );
+    expect(row.Result).toBe("Missing (expected, no response)");
+    expect(row.__tone).toBe("fail");
+    expect(row.Register).toBe("missing");
+    expect(row.Ports).toBe("—");
+    expect(row["Last Seen"]).toBe("—");
+    expect(row.Hostname).toBe("expected-host");
+  });
+
+  it("renders a dash when the run stamped no register state", () => {
+    expect(ipRowsFromResults(ipResults({ status_detail: "responsive: 80" }))[0].Register).toBe("—");
+  });
+
+  it('renders a dash for the sidecar\'s "none" (a scan with no register bound)', () => {
+    // The sidecar spells "no register imported" as register: "none"; the column
+    // must read as no verdict, not as a state called none.
+    const [row] = ipRowsFromResults(
+      ipResults({ rag: "none", register: "none", status_detail: "reachable/none" }),
+    );
+    expect(row.Register).toBe("—");
+    expect(row.Result).toBe("Responsive");
+    expect(row.__tone).toBe("");
+  });
+});
+
+// BACnet results shell carrying both structured devices and the observations
+// the engine stamps alongside them.
+function bacnetView(
+  devices: Record<string, unknown>[],
+  assets: Record<string, unknown>[],
+): DiscoveryResultsResponse {
+  return {
+    run_id: "run-bacnet-rag",
+    job_type: "bacnet_discovery",
+    status: "succeeded",
+    result_summary: {},
+    discovered_assets: assets,
+    devices,
+    points: [],
+    topics: [],
+  };
+}
+
+describe("bacnetRowVerdict", () => {
+  it("maps the sidecar's four register states to a label and a tone", () => {
+    expect(bacnetRowVerdict({ register_state: "match" })).toEqual({
+      label: "Match",
+      tone: "pass",
+    });
+    expect(bacnetRowVerdict({ register_state: "partial" })).toEqual({
+      label: "Partial",
+      tone: "warn",
+    });
+    expect(bacnetRowVerdict({ register_state: "missing" })).toEqual({
+      label: "Missing (expected, no response)",
+      tone: "fail",
+    });
+    expect(bacnetRowVerdict({ register_state: "rogue" })).toEqual({
+      label: "Rogue (not in register)",
+      tone: "fail",
+    });
+  });
+
+  it("reports plain discovery when no register is bound", () => {
+    expect(bacnetRowVerdict({ register_state: "none" })).toEqual({
+      label: "Discovered",
+      tone: null,
+    });
+    expect(bacnetRowVerdict({})).toEqual({ label: "Discovered", tone: null });
+  });
+});
+
+describe("bacnetRowsFromResults register rows", () => {
+  it("tones a device row from its register state and fills Model / Firmware", () => {
+    const [row] = bacnetRowsFromResults(
+      bacnetView(
+        [
+          {
+            name: "AHU-1",
+            address: "192.0.2.10",
+            vendor: "Acme",
+            model: "CTRL-9",
+            device_type: "bacnet_device",
+            attributes: {
+              device_instance: 1001,
+              firmware: "3.2.1",
+              rag: "amber",
+              register_state: "partial",
+            },
+          },
+        ],
+        [{ device_instance: 1001, point_count: 42, rag: "amber", register_state: "partial" }],
+      ),
+    );
+    expect(row.Result).toBe("Partial");
+    expect(row.__tone).toBe("warn");
+    expect(row.Model).toBe("CTRL-9");
+    expect(row.Firmware).toBe("3.2.1");
+    expect(row.Objects).toBe("42");
+  });
+
+  it("appends a red row for an expected device that never answered", () => {
+    const rows = bacnetRowsFromResults(
+      bacnetView(
+        [
+          {
+            name: "AHU-1",
+            address: "192.0.2.10",
+            device_type: "bacnet_device",
+            attributes: { device_instance: 1001, rag: "green", register_state: "match" },
+          },
+        ],
+        [
+          { device_instance: 1001, rag: "green", register_state: "match" },
+          {
+            asset_id: "bacnet-device-2002",
+            device_instance: 2002,
+            address: "192.0.2.20",
+            name: "VAV-7",
+            rag: "red",
+            register_state: "missing",
+            last_seen_at: null,
+          },
+        ],
+      ),
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0].Result).toBe("Match");
+    const missing = rows[1];
+    expect(missing.Result).toBe("Missing (expected, no response)");
+    expect(missing.__tone).toBe("fail");
+    expect(missing.Instance).toBe("2002");
+    expect(missing.Device).toBe("VAV-7");
+    expect(missing.Address).toBe("192.0.2.20");
+    // Never observed, so nothing observed may be claimed for it.
+    expect(missing.Objects).toBe("—");
+    expect(missing.Discovered).toBe("—");
+    expect(missing.Firmware).toBe("—");
+  });
+
+  it("keeps a registerless run neutral and appends nothing", () => {
+    const rows = bacnetRowsFromResults(
+      bacnetView(
+        [{ name: "AHU-1", device_type: "bacnet_device", attributes: { device_instance: 1001 } }],
+        [{ device_instance: 1001, point_count: 3 }],
+      ),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].Result).toBe("Discovered");
+    expect(rows[0].__tone).toBe("");
+  });
+});
+
+describe("bacnetResultColumns", () => {
+  it("shows the register verdict, model and firmware without exposing __tone", () => {
+    expect(bacnetResultColumns[1]).toBe("Result");
+    expect(bacnetResultColumns).toContain("Model");
+    expect(bacnetResultColumns).toContain("Firmware");
+    expect(bacnetResultColumns).not.toContain("__tone");
+  });
+});
+
+describe("discoveryViewFor register columns", () => {
+  // Only the sidecar engines run compare(); the built-in lanes stamp no register
+  // state, so their tables must not grow a column that can only read "—".
+  it("keeps the register columns on the native scanner lanes", () => {
+    expect(discoveryViewFor("ip-scanner", ipResults({}))?.columns).toContain("Register");
+    expect(discoveryViewFor("bacnet-scanner", bacnetView([], []))?.columns).toContain("Result");
+  });
+
+  it("drops them on the built-in discovery lanes", () => {
+    expect(discoveryViewFor("ip-scanner-sct", ipResults({}))?.columns).not.toContain("Register");
+    const builtInBacnet = discoveryViewFor("bacnet-discovery-sct", bacnetView([], []))?.columns;
+    expect(builtInBacnet).not.toContain("Result");
+    expect(builtInBacnet).not.toContain("Firmware");
+    // The columns that lane already had stay put.
+    expect(builtInBacnet).toContain("Network Number");
   });
 });
 

@@ -103,10 +103,83 @@ class RagVocabularyContractTest(unittest.TestCase):
             {"ip": "10.0.0.4", "register": "rogue", "rag": "red", "status": "rogue", "openPorts": [23]},
         ]
         result = _map_result(rows, {}, {})
-        # missing (unreachable) -> issue only; the other three -> devices.
+        # missing (unreachable) -> issue + an observation row; the other three
+        # additionally become devices.
         self.assertEqual({r["address"] for r in result.structured_records}, {"10.0.0.1", "10.0.0.2", "10.0.0.4"})
         # green raises no issue; amber + two reds do.
         self.assertEqual(len(result.issues), 3)
+
+
+class RegisterRowVisibilityTest(unittest.TestCase):
+    """Field report: after uploading a register the results table showed no RAG
+    at all. The verdict was persisted on the structured device only, and an
+    expected-but-silent device was an issue with no row anywhere, so an operator
+    could not see it. Every compare() row must reach discovered_assets."""
+
+    ROWS = [
+        {"ip": "10.0.0.1", "register": "match", "rag": "green", "status": "reachable",
+         "hostname": "ok-host", "openPorts": [80], "expectedPorts": [80]},
+        {"ip": "10.0.0.2", "register": "partial", "rag": "amber", "status": "reachable",
+         "openPorts": [80], "expectedPorts": [80, 443]},
+        {"ip": "10.0.0.3", "register": "missing", "rag": "red", "status": "unreachable",
+         "hostname": "expected-host", "expectedHostname": "expected-host",
+         "openPorts": [], "expectedPorts": [443]},
+        {"ip": "10.0.0.4", "register": "rogue", "rag": "red", "status": "rogue", "openPorts": [23]},
+    ]
+
+    def _assets(self) -> dict[str, object]:
+        result = _map_result(self.ROWS, {}, {"project_id": "p", "site_id": "s"})
+        return {a["ip_address"]: a for a in result.discovered_assets}
+
+    def test_every_compare_row_reaches_discovered_assets(self) -> None:
+        self.assertEqual(
+            set(self._assets()), {"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"}
+        )
+
+    def test_rag_and_register_stamped_on_every_asset(self) -> None:
+        assets = self._assets()
+        for row in self.ROWS:
+            asset = assets[row["ip"]]
+            self.assertEqual(asset["rag"], row["rag"])
+            self.assertEqual(asset["register"], row["register"])
+
+    def test_missing_asset_claims_nothing_it_did_not_observe(self) -> None:
+        missing = self._assets()["10.0.0.3"]
+        self.assertEqual(missing["register"], "missing")
+        self.assertEqual(missing["rag"], "red")
+        self.assertEqual(missing["observed_ports"], [])
+        self.assertEqual(missing["match_basis"], "register")
+        self.assertEqual(missing["status_detail"], "unreachable/missing")
+        # Never seen, so no MAC, no asset id, and no last-seen timestamp.
+        self.assertIsNone(missing["last_seen_at"])
+        self.assertIsNone(missing["mac_address"])
+        self.assertIsNone(missing["asset_id"])
+        # The hostname is the register's expectation, which is all that is known.
+        self.assertEqual(missing["hostname"], "expected-host")
+
+    def test_missing_device_stays_out_of_the_devices_table(self) -> None:
+        # structured_records feeds replace_devices: observed-only, as before.
+        result = _map_result(self.ROWS, {}, {"project_id": "p", "site_id": "s"})
+        self.assertEqual(
+            {r["address"] for r in result.structured_records},
+            {"10.0.0.1", "10.0.0.2", "10.0.0.4"},
+        )
+        # The missing row still raises its issue; the observation is additive.
+        self.assertEqual(len(result.issues), 3)
+
+    def test_missing_asset_parses_against_the_readback_schema(self) -> None:
+        DiscoveryAssetObservation(**self._assets()["10.0.0.3"])
+
+    def test_summary_carries_all_six_register_counters(self) -> None:
+        summary = {"expected": 3, "reachable": 3, "expectedReachable": 2,
+                   "matches": 1, "partial": 1, "missing": 1, "rogue": 1}
+        extra = _map_result(self.ROWS, summary, {}).result_summary_extra
+        self.assertEqual(extra["register_expected"], 3)
+        self.assertEqual(extra["hosts_scanned"], 3)
+        self.assertEqual(extra["register_matches"], 1)
+        self.assertEqual(extra["register_partial"], 1)
+        self.assertEqual(extra["register_missing"], 1)
+        self.assertEqual(extra["register_rogue"], 1)
 
 
 class SseEventContractTest(unittest.TestCase):

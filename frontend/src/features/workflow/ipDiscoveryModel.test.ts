@@ -199,19 +199,23 @@ describe("BACnet router presentation", () => {
 });
 
 describe("IP sidecar summary cards (GAP-C2)", () => {
-  it("reads the four totals the sidecar engine stamps on result_summary", () => {
+  it("reads all six register totals the sidecar engine stamps on result_summary", () => {
     expect(
       formatIpSidecarSummaryCards({
         register_expected: 12,
         hosts_scanned: 9,
         register_matches: 7,
+        register_partial: 2,
+        register_missing: 3,
         register_rogue: 2,
         scanner: "ip_scanner_sidecar",
       }),
     ).toEqual([
       { heading: "Expected", value: "12" },
-      { heading: "Reachable / Discovered", value: "9" },
-      { heading: "Matches", value: "7" },
+      { heading: "Reachable", value: "9" },
+      { heading: "Match", value: "7" },
+      { heading: "Partial", value: "2" },
+      { heading: "Missing", value: "3" },
       { heading: "Rogue", value: "2" },
     ]);
   });
@@ -222,12 +226,34 @@ describe("IP sidecar summary cards (GAP-C2)", () => {
         register_expected: null,
         hosts_scanned: 5,
         register_matches: null,
+        register_partial: null,
+        register_missing: null,
         register_rogue: 0,
       }),
     ).toEqual([
       { heading: "Expected", value: "—" },
-      { heading: "Reachable / Discovered", value: "5" },
-      { heading: "Matches", value: "—" },
+      { heading: "Reachable", value: "5" },
+      { heading: "Match", value: "—" },
+      { heading: "Partial", value: "—" },
+      { heading: "Missing", value: "—" },
+      { heading: "Rogue", value: "0" },
+    ]);
+  });
+
+  it("still renders the strip for an older run that stamped no partial/missing", () => {
+    expect(
+      formatIpSidecarSummaryCards({
+        register_expected: 4,
+        hosts_scanned: 4,
+        register_matches: 4,
+        register_rogue: 0,
+      }),
+    ).toEqual([
+      { heading: "Expected", value: "4" },
+      { heading: "Reachable", value: "4" },
+      { heading: "Match", value: "4" },
+      { heading: "Partial", value: "—" },
+      { heading: "Missing", value: "—" },
       { heading: "Rogue", value: "0" },
     ]);
   });
@@ -240,19 +266,24 @@ describe("IP sidecar summary cards (GAP-C2)", () => {
 });
 
 describe("BACnet sidecar summary cards (GAP-C2)", () => {
-  it("reads the four totals the bacnet_scanner engine stamps on result_summary", () => {
+  it("reads the same six register totals as the IP strip", () => {
     expect(
       formatBacnetSidecarSummaryCards({
+        register_expected: 10,
         devices_discovered: 8,
         points_exported: 214,
         register_matches: 6,
+        register_partial: 1,
+        register_missing: 3,
         register_rogue: 1,
         scanner: "bacnet_scanner",
       }),
     ).toEqual([
-      { heading: "Discovered", value: "8" },
-      { heading: "Points", value: "214" },
-      { heading: "Matches", value: "6" },
+      { heading: "Expected", value: "10" },
+      { heading: "Reachable", value: "8" },
+      { heading: "Match", value: "6" },
+      { heading: "Partial", value: "1" },
+      { heading: "Missing", value: "3" },
       { heading: "Rogue", value: "1" },
     ]);
   });
@@ -260,15 +291,19 @@ describe("BACnet sidecar summary cards (GAP-C2)", () => {
   it("renders a present-but-null field as a dash, never a fabricated count", () => {
     expect(
       formatBacnetSidecarSummaryCards({
+        register_expected: null,
         devices_discovered: 3,
-        points_exported: null,
         register_matches: null,
+        register_partial: null,
+        register_missing: null,
         register_rogue: 0,
       }),
     ).toEqual([
-      { heading: "Discovered", value: "3" },
-      { heading: "Points", value: "—" },
-      { heading: "Matches", value: "—" },
+      { heading: "Expected", value: "—" },
+      { heading: "Reachable", value: "3" },
+      { heading: "Match", value: "—" },
+      { heading: "Partial", value: "—" },
+      { heading: "Missing", value: "—" },
       { heading: "Rogue", value: "0" },
     ]);
   });
