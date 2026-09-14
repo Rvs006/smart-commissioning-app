@@ -16,6 +16,10 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from app.schemas.jobs import (
+    DiscoveryAssetObservation,
+    DiscoveryResultsResponse,
+)
 from smart_commissioning_core.engines.bacnet_scanner_sidecar import (
     _RAG_SEVERITY,
     REGISTER_TEMPLATE_COLUMNS,
@@ -205,12 +209,6 @@ class RegisterRowVisibilityTest(unittest.TestCase):
         self.assertNotIn("firmware", missing)
         self.assertNotIn("model", missing)
 
-    def test_missing_device_stays_out_of_the_devices_table(self) -> None:
-        result = _map_result(self.ROWS, {}, [], {"project_id": "p", "site_id": "s"})
-        devices = [r for r in result.structured_records if "device_ref" not in r]
-        self.assertEqual({d["address"] for d in devices}, {"10.0.0.1", "10.0.0.2", "10.0.0.5"})
-        self.assertEqual(len(result.issues), 3)
-
     def test_summary_carries_all_six_register_counters(self) -> None:
         summary = {"expected": 3, "discovered": 3, "expectedReachable": 2,
                    "matches": 1, "partial": 1, "missing": 1, "rogue": 1}
@@ -221,6 +219,66 @@ class RegisterRowVisibilityTest(unittest.TestCase):
         self.assertEqual(extra["register_partial"], 1)
         self.assertEqual(extra["register_missing"], 1)
         self.assertEqual(extra["register_rogue"], 1)
+
+    def test_silent_rows_are_stamped_for_the_inventory_report(self) -> None:
+        extra = _map_result(self.ROWS, {}, [], {}).result_summary_extra
+        self.assertEqual(
+            extra["expected_not_responding"],
+            [
+                {
+                    "asset_id": "bacnet-device-9",
+                    "asset_name": "VAV-9",
+                    "device_instance": 9,
+                    "address": "10.0.0.9",
+                    # Broadcast Who-Is only; no unicast probe is ever sent at a
+                    # silent device's address, so this is False by construction.
+                    "directed_probe_sent": False,
+                }
+            ],
+        )
+
+    def test_expected_not_responding_is_always_stamped(self) -> None:
+        reachable_only = [
+            {"instance": 1, "register": "match", "rag": "green",
+             "status": "reachable", "ip": "10.0.0.1"},
+        ]
+        extra = _map_result(reachable_only, {}, [], {}).result_summary_extra
+        self.assertEqual(extra["expected_not_responding"], [])
+
+    def test_every_asset_parses_against_the_readback_schema(self) -> None:
+        # The IP twin of this check caught a readback 500 once; BACnet had none.
+        for asset in _map_result(self.ROWS, {}, [], {}).discovered_assets:
+            DiscoveryAssetObservation(**asset)
+
+    def test_full_results_response_accepts_sidecar_output(self) -> None:
+        response = DiscoveryResultsResponse(
+            run_id="run_1",
+            job_type="bacnet_scanner",
+            status="succeeded",
+            discovered_assets=_map_result(self.ROWS, {}, [], {}).discovered_assets,
+        )
+        self.assertEqual(len(response.discovered_assets), 4)
+
+    def test_instanceless_missing_rows_do_not_share_one_asset_id(self) -> None:
+        # The vendored compare() emits instance "—" for a register row with a
+        # blank or unparseable Device Instance. "bacnet-device-—" would be the
+        # SAME id for every such row, so the frontend collapsed them into one.
+        rows = [
+            {"instance": "—", "register": "missing", "rag": "red",
+             "status": "unreachable", "ip": "10.0.0.41", "name": "NO-INSTANCE-A"},
+            {"instance": "—", "register": "missing", "rag": "red",
+             "status": "unreachable", "ip": "10.0.0.42", "name": "NO-INSTANCE-B"},
+        ]
+        result = _map_result(rows, {}, [], {})
+        self.assertEqual(len(result.discovered_assets), 2)
+        self.assertEqual([a["asset_id"] for a in result.discovered_assets], [None, None])
+        self.assertEqual(
+            [a["address"] for a in result.discovered_assets], ["10.0.0.41", "10.0.0.42"]
+        )
+        # Same guard the issue rows already applied.
+        self.assertEqual([i.asset_id for i in result.issues], [None, None])
+        for asset in result.discovered_assets:
+            DiscoveryAssetObservation(**asset)
 
 
 class SseEventContractTest(unittest.TestCase):

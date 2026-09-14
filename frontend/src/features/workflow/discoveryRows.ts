@@ -141,21 +141,32 @@ function registerVerdict(state: string): { label: string; tone: "pass" | "warn" 
 // fields on DiscoveryAssetObservation. Returns "" when no register was bound:
 // the sidecars spell that "none", and a built-in discovery run or a dry run
 // stamps nothing at all. Both must read as "no verdict", not as a state.
-export function registerStateOf(source: Record<string, unknown>): string {
+function registerStateOf(source: Record<string, unknown>): string {
   const value = source.register ?? source.register_state;
   return typeof value === "string" && value !== "none" ? value : "";
 }
 
-// The "Result" column label and row tone for one IP discovery row, derived from
-// the same status_detail markers the chips already read — no new engine field.
+// The "Result" column label and row tone for one IP discovery row.
 //
-// Precedence is LOAD-BEARING (honesty rule): a silent host is checked FIRST so
-// it can never fall through to the red "Missing expected ports" verdict — a host
-// we never heard from must never be coloured as a hard failure. Amber is
-// reserved for register-expected silence (mirrors the BACnet expected-but-silent
-// semantics); an unregistered silent host stays neutral so a wide CIDR sweep
-// does not drown the table in amber. A responsive host with a demonstrably
-// closed expected port IS a real finding (fail), unlike full silence.
+// Precedence is LOAD-BEARING (honesty rule), and the two lanes differ on purpose:
+//
+// 1. A REGISTER VERDICT wins outright. On the sidecar lane the scan compared a
+//    named register row against a host it actually probed, in range, so its
+//    verdict is evidence and not an inference: "missing" is RED (the vendored
+//    compare() semantics — the register says this host must exist and it
+//    answered nothing), and "rogue" is red too. Re-deriving a verdict from the
+//    status-detail text here would paint a rogue device neutral "Responsive".
+// 2. With NO register bound, the status_detail markers decide, and there a
+//    silent host is checked FIRST so it can never fall through to the red
+//    "Missing expected ports" verdict. That rule is unchanged: on a wide CIDR
+//    sweep, silence from an address nobody claimed is inconclusive, so it stays
+//    neutral, and register-expected silence on the built-in lane stays amber.
+//
+// So "silence is never red" holds exactly where it was meant to — the broad
+// sweep — while a register-expected host on the sidecar lane, which is a bounded
+// list of hosts the operator asserted are there, reads red.
+// A responsive host with a demonstrably closed expected port IS a real finding
+// (fail), unlike full silence.
 export function ipRowVerdict(asset: DiscoveryAssetObservation): {
   label: string;
   tone: "pass" | "fail" | "warn" | null;
@@ -368,12 +379,12 @@ export function bacnetRowsFromResults(
     }
   }
 
-  const rendered = new Set<string>();
+  const renderedInstances = new Set<string>();
   const rows = results.devices.map((device: DiscoveryRowRecord) => {
     const attributes = (device.attributes as Record<string, unknown> | undefined) ?? {};
     const instance = attributes.device_instance ?? "";
     const key = String(instance);
-    rendered.add(key);
+    renderedInstances.add(key);
     const pointCount = pointCountByInstance.get(key);
     // IP address and BACnet network number are optional per device. They may be
     // stamped on the engine attributes (ip_address / network_number) or, for
@@ -405,8 +416,16 @@ export function bacnetRowsFromResults(
     };
   });
 
-  for (const [key, asset] of assetByInstance) {
-    if (rendered.has(key)) {
+  // Iterate the observations THEMSELVES, not assetByInstance: that map is keyed
+  // on device_instance, and the vendored compare() emits "—" for every register
+  // row whose Device Instance was blank or unparseable, so two such silent rows
+  // share one key and the map would collapse them into a single table row.
+  for (const asset of results.discovered_assets) {
+    const instance = asset.device_instance;
+    if (instance === undefined || instance === null) {
+      continue;
+    }
+    if (renderedInstances.has(String(instance))) {
       continue;
     }
     const verdict = bacnetRowVerdict(asset);
@@ -658,8 +677,26 @@ export type DiscoveryView = {
 const IP_SIDECAR_ONLY_COLUMNS = new Set(["Register"]);
 const BACNET_SIDECAR_ONLY_COLUMNS = new Set(["Result", "Model", "Firmware"]);
 
-function columnsFor(columns: string[], sidecarOnly: Set<string>, isSidecar: boolean): string[] {
-  return isSidecar ? columns : columns.filter((column) => !sidecarOnly.has(column));
+// Drop the sidecar-only columns AND the matching row keys on a built-in lane.
+// Both halves matter: hiding only the header would leave the values in the row
+// objects, where the text filter's "every VISIBLE cell" contract (see
+// ResultsFilter) would still match them and an operator would watch rows vanish
+// on a word they cannot see anywhere in the table.
+function sidecarView(
+  columns: string[],
+  rows: Record<string, string>[],
+  sidecarOnly: Set<string>,
+  isSidecar: boolean,
+): DiscoveryView {
+  if (isSidecar) {
+    return { columns, rows };
+  }
+  return {
+    columns: columns.filter((column) => !sidecarOnly.has(column)),
+    rows: rows.map((row) =>
+      Object.fromEntries(Object.entries(row).filter(([key]) => !sidecarOnly.has(key))),
+    ),
+  };
 }
 
 export function discoveryViewFor(
@@ -667,20 +704,20 @@ export function discoveryViewFor(
   results: DiscoveryResultsResponse,
 ): DiscoveryView | null {
   if (route === "ip-scanner" || route === "ip-scanner-sct") {
-    return {
-      columns: columnsFor(ipResultColumns, IP_SIDECAR_ONLY_COLUMNS, route === "ip-scanner"),
-      rows: ipRowsFromResults(results),
-    };
+    return sidecarView(
+      ipResultColumns,
+      ipRowsFromResults(results),
+      IP_SIDECAR_ONLY_COLUMNS,
+      route === "ip-scanner",
+    );
   }
   if (route === "bacnet-scanner" || route === "bacnet-discovery-sct") {
-    return {
-      columns: columnsFor(
-        bacnetResultColumns,
-        BACNET_SIDECAR_ONLY_COLUMNS,
-        route === "bacnet-scanner",
-      ),
-      rows: bacnetRowsFromResults(results),
-    };
+    return sidecarView(
+      bacnetResultColumns,
+      bacnetRowsFromResults(results),
+      BACNET_SIDECAR_ONLY_COLUMNS,
+      route === "bacnet-scanner",
+    );
   }
   if (route === "mqtt-scanner" || route === "mqtt-discovery-sct") {
     return { columns: mqttResultColumns, rows: mqttRowsFromResults(results) };

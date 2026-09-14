@@ -476,12 +476,38 @@ function provisionalDiscoveryViewFor(
   if (!view) {
     return null;
   }
+  // Pair each row with its observation by the row's OWN identity, never by
+  // position: bacnetRowsFromResults can append rows (expected-but-silent
+  // devices) that correspond to no projected record, so row index and
+  // `projected` index are not guaranteed to line up. The per-entry view keeps
+  // both sides on the same row builder, so the signature can never drift from
+  // what discoveryRowEntitySignature reads off the real row.
+  // ponytail: rebuilds one tiny view per observation; the progressive fold is
+  // capped at MAX_PROGRESSIVE_DEVICE_OBSERVATIONS (500), so this is bounded.
+  const entityKeyBySignature = new Map<string, string>();
+  for (const entry of projected) {
+    const single = discoveryViewFor(route, {
+      ...results,
+      discovered_assets:
+        route === "ip-scanner-sct" ? [projectedIpAsset(entry)] : [],
+      devices: [entry.record],
+    });
+    const signature = single?.rows[0]
+      ? discoveryRowEntitySignature(route, single.rows[0])
+      : null;
+    if (signature !== null && !entityKeyBySignature.has(signature)) {
+      entityKeyBySignature.set(signature, entry.entityKey);
+    }
+  }
   return {
     ...view,
-    rows: view.rows.map<Record<string, string>>((row, index) => ({
-      ...row,
-      __entityKey: projected[index]?.entityKey ?? "",
-    })),
+    rows: view.rows.map<Record<string, string>>((row) => {
+      const signature = discoveryRowEntitySignature(route, row);
+      return {
+        ...row,
+        __entityKey: (signature !== null && entityKeyBySignature.get(signature)) || "",
+      };
+    }),
   };
 }
 
@@ -3623,11 +3649,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
 
-  // GAP-C2 (BACnet): the native BACnet sidecar lane's four-card summary strip.
-  // The sidecar engine records its totals directly on result_summary
-  // (devices_discovered / points_exported / register_matches / register_rogue),
-  // not the sealed bacnet_headline_metrics_v1 snapshot, so bacnetHeadlineMetrics
-  // above is null here; read them straight. Gated to a terminal bacnet-scanner run.
+  // GAP-C2 (BACnet): the native BACnet sidecar lane's six-card summary strip
+  // (register_expected / devices_discovered / register_matches / register_partial
+  // / register_missing / register_rogue). The sidecar engine records its totals
+  // directly on result_summary, not the sealed bacnet_headline_metrics_v1
+  // snapshot, so bacnetHeadlineMetrics above is null here; read them straight.
+  // Gated to a terminal bacnet-scanner run.
   const bacnetSidecarSummaryCards = useMemo<IpSidecarSummaryCard[] | null>(() => {
     if (module.route !== "bacnet-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
       return null;
@@ -7750,7 +7777,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <div className="empty-workspace">
                     <strong>No rows match the current filters</strong>
                     <span>
-                      Adjust or clear the filters to see the {resultRows.length} captured{" "}
+                      {/* "rows", not "captured rows": the scanner tables now also
+                      carry expected-but-silent rows, which were never captured
+                      from the wire — the register says they should exist. */}
+                      Adjust or clear the filters to see the {resultRows.length}{" "}
                       {resultRows.length === 1 ? "row" : "rows"}.
                     </span>
                   </div>

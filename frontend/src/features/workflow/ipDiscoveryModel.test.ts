@@ -313,6 +313,22 @@ describe("BACnet sidecar summary cards (GAP-C2)", () => {
     expect(formatBacnetSidecarSummaryCards(undefined)).toBeNull();
     expect(formatBacnetSidecarSummaryCards({ scanner: "bacnet_scanner" })).toBeNull();
   });
+
+  it("keeps the strip for a cancelled scan whose only number is points_exported", () => {
+    // The engine always computes points_exported as a sum, so it is a number on
+    // every real run. It is checked but never displayed; dropping it from the
+    // cards must not hide the strip from a run with no register counters.
+    expect(
+      formatBacnetSidecarSummaryCards({ points_exported: 0, scanner: "bacnet_scanner" }),
+    ).toEqual([
+      { heading: "Expected", value: "—" },
+      { heading: "Reachable", value: "—" },
+      { heading: "Match", value: "—" },
+      { heading: "Partial", value: "—" },
+      { heading: "Missing", value: "—" },
+      { heading: "Rogue", value: "—" },
+    ]);
+  });
 });
 
 describe("MQTT sidecar summary cards (GAP-C2)", () => {
@@ -328,7 +344,7 @@ describe("MQTT sidecar summary cards (GAP-C2)", () => {
     ).toEqual([
       { heading: "Topics", value: "42" },
       { heading: "Assets", value: "9" },
-      { heading: "Matches", value: "6" },
+      { heading: "Match", value: "6" },
       { heading: "Rogue", value: "3" },
     ]);
   });
@@ -344,7 +360,7 @@ describe("MQTT sidecar summary cards (GAP-C2)", () => {
     ).toEqual([
       { heading: "Topics", value: "5" },
       { heading: "Assets", value: "—" },
-      { heading: "Matches", value: "—" },
+      { heading: "Match", value: "—" },
       { heading: "Rogue", value: "0" },
     ]);
   });

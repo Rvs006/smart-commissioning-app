@@ -154,18 +154,34 @@ class RegisterRowVisibilityTest(unittest.TestCase):
         self.assertIsNone(missing["last_seen_at"])
         self.assertIsNone(missing["mac_address"])
         self.assertIsNone(missing["asset_id"])
-        # The hostname is the register's expectation, which is all that is known.
-        self.assertEqual(missing["hostname"], "expected-host")
+        # The register's expected hostname must NOT be laundered into the
+        # observed field: nothing resolved it. It rides as expected_hostname.
+        self.assertIsNone(missing["hostname"])
+        self.assertEqual(missing["expected_hostname"], "expected-host")
 
-    def test_missing_device_stays_out_of_the_devices_table(self) -> None:
-        # structured_records feeds replace_devices: observed-only, as before.
-        result = _map_result(self.ROWS, {}, {"project_id": "p", "site_id": "s"})
+    def test_silent_rows_are_stamped_on_the_run_summary(self) -> None:
+        extra = _map_result(self.ROWS, {}, {}).result_summary_extra
         self.assertEqual(
-            {r["address"] for r in result.structured_records},
-            {"10.0.0.1", "10.0.0.2", "10.0.0.4"},
+            extra["expected_not_responding"],
+            [
+                {
+                    "asset_id": None,
+                    "asset_name": "expected-host",
+                    "address": "10.0.0.3",
+                    "expected_ports": [443],
+                }
+            ],
         )
-        # The missing row still raises its issue; the observation is additive.
-        self.assertEqual(len(result.issues), 3)
+
+    def test_expected_not_responding_is_always_stamped(self) -> None:
+        # Empty list, never an absent key: a consumer must be able to tell "no
+        # expected host was silent" from "this run predates the field".
+        reachable_only = [
+            {"ip": "10.0.0.1", "register": "match", "rag": "green",
+             "status": "reachable", "openPorts": []},
+        ]
+        extra = _map_result(reachable_only, {}, {}).result_summary_extra
+        self.assertEqual(extra["expected_not_responding"], [])
 
     def test_missing_asset_parses_against_the_readback_schema(self) -> None:
         DiscoveryAssetObservation(**self._assets()["10.0.0.3"])

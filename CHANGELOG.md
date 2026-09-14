@@ -35,7 +35,13 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   itself: Expected, Reachable, Match, Partial, Missing and Rogue. Partial and
   Missing were being recorded on every run but never displayed. The BACnet strip
   drops its exported-points count to make room; the point total remains on the
-  run's stored summary and in the exported assets. The MQTT strip is unchanged.
+  run's stored summary and in the exported assets. The MQTT strip keeps its four
+  counters; its "Matches" card is renamed "Match" so the same number is named the
+  same way on all three scanner screens.
+- A BACnet or IP scan now records the register rows that answered nothing on the
+  run summary, so the signed inventory report lists the same expected-but-silent
+  devices the results screen shows. Before this, that report section only ever
+  appeared for the built-in BACnet discovery engine.
 - The Verdict filter on the two native scanner screens is worded for what it
   filters: Match, Partial, and Missing / Rogue.
 
