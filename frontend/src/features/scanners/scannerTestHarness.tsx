@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router";
 import { createSessionBoundApiClient } from "../../api/client";
 import { SessionContext, type SessionContextValue } from "../../app/sessionContext";
 import { DEFAULT_WORKSPACE, createSessionScopeId } from "../../app/sessionScope";
+import type { SessionScopeId, WorkspaceRef } from "../../app/sessionScope";
 
 // Test-only wrapper for the scanner pages. It supplies the session through
 // SessionContext directly rather than SessionProvider, so a test never has to
@@ -22,10 +23,14 @@ export function scannerProviders(
     authorizationEnforced?: boolean;
     initialEntry?: string;
     queryClient?: QueryClient;
+    // A different project/site, for the tests that prove workspace-scoped state
+    // is withdrawn on a switch.
+    workspace?: WorkspaceRef;
+    sessionScopeId?: SessionScopeId;
   } = {},
 ) {
-  const sessionScopeId = createSessionScopeId();
-  const workspace = DEFAULT_WORKSPACE;
+  const sessionScopeId = options.sessionScopeId ?? createSessionScopeId();
+  const workspace = options.workspace ?? DEFAULT_WORKSPACE;
   const value: SessionContextValue = {
     apiClient: createSessionBoundApiClient(sessionScopeId, workspace, "engineer-key"),
     authorizationEnforced: options.authorizationEnforced ?? false,

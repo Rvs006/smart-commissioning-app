@@ -127,14 +127,19 @@ const pointsPage = {
 
 let startBody: Record<string, unknown> | null = null;
 
-function stubFetch() {
+function stubFetch(
+  overrides: {
+    runs?: () => unknown[];
+    onObjectBrowse?: () => Promise<unknown>;
+  } = {},
+) {
   startBody = null;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/v1/runs?")) {
-        return jsonResponse({ runs: [terminalRun] });
+        return jsonResponse({ runs: overrides.runs ? overrides.runs() : [terminalRun] });
       }
       if (url.endsWith("/api/v1/imports/profiles")) {
         return jsonResponse([
@@ -166,14 +171,16 @@ function stubFetch() {
       if (url.endsWith("/api/v1/system/interfaces")) {
         return jsonResponse([]);
       }
-      if (url.includes(`/api/v1/discovery/runs/${RUN_ID}/results`)) {
-        return jsonResponse(results);
-      }
-      if (url.includes(`/api/v1/discovery/runs/${RUN_ID}/points`)) {
-        return jsonResponse(pointsPage);
-      }
-      if (url.includes(`/api/v1/discovery/runs/${RUN_ID}`)) {
-        return jsonResponse(terminalRun);
+      const runMatch = new RegExp("/api/v1/discovery/runs/([^/?]+)").exec(url);
+      if (runMatch && !url.includes("/object-browse")) {
+        const runId = runMatch[1];
+        if (url.includes("/results")) {
+          return jsonResponse({ ...results, run_id: runId });
+        }
+        if (url.includes("/points")) {
+          return jsonResponse({ ...pointsPage, run_id: runId });
+        }
+        return jsonResponse({ ...terminalRun, run_id: runId });
       }
       if (url.endsWith("/api/v1/discovery/bacnet_sidecar/runs") && init?.method === "POST") {
         startBody = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -185,6 +192,9 @@ function stubFetch() {
         });
       }
       if (url.includes(`/object-browse`) && init?.method === "POST") {
+        if (overrides.onObjectBrowse) {
+          return jsonResponse(await overrides.onObjectBrowse());
+        }
         return jsonResponse({
           run_id: RUN_ID,
           device_instance: 2098101,
@@ -294,6 +304,76 @@ describe("BacnetScannerPage", () => {
     expect(
       within(panel).getByText(/54 objects on device · showing 2 · list truncated at the read cap/),
     ).toBeInTheDocument();
+  });
+
+  it("discards an object-browse response that lands after the run changed", async () => {
+    const runB = { ...terminalRun, run_id: "run-bacnet-scanner-2" };
+    let currentRun: Record<string, unknown> = terminalRun;
+    let releaseBrowse!: () => void;
+    const browsePending = new Promise<void>((resolve) => {
+      releaseBrowse = resolve;
+    });
+    stubFetch({
+      runs: () => [currentRun],
+      onObjectBrowse: async () => {
+        await browsePending;
+        // Run 1 values, for the same device instance run 2 also has.
+        return {
+          run_id: RUN_ID,
+          device_instance: 2098101,
+          address: "10.0.10.12",
+          count: 1,
+          truncated: false,
+          error: null,
+          objects: [
+            {
+              type_name: "analogInput",
+              instance: 1,
+              name: "Stale Supply Air Temp",
+              present_value: "99.9",
+              units: "degC",
+            },
+          ],
+        };
+      },
+    });
+    render(scannerProviders(<BacnetScannerPage />));
+
+    const cell = await screen.findByText("2098101");
+    fireEvent.click(cell.closest("tr") as HTMLElement);
+    const panel = await screen.findByRole("complementary");
+    fireEvent.click(within(panel).getByRole("button", { name: "Load objects" }));
+    await within(panel).findByRole("button", { name: "Reading object list..." });
+
+    // The operator moves to another run while the live read is still in flight.
+    currentRun = runB;
+    window.dispatchEvent(new Event("visibilitychange"));
+    // The refetch this event triggers is a real round trip through the query
+    // cache; the default 1s window is tight on a loaded machine.
+    await waitFor(() => expect(document.body.textContent).toContain("run-bacnet-scanner-2"), {
+      timeout: 5000,
+    });
+
+    releaseBrowse();
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Reading object list..." })).toBeNull(),
+    );
+
+    // Re-open the SAME device instance under run 2. This is where the leak bit:
+    // the stale result is still in state and the panel matches on
+    // device_instance alone, so run 1 present values would render as run 2 live
+    // read without ever pressing Load objects again.
+    const resultsCard = (await screen.findByRole("heading", { name: "Results" })).closest(
+      "section",
+    ) as HTMLElement;
+    const rowB = within(resultsCard).getByText("2098101");
+    fireEvent.click(rowB.closest("tr") as HTMLElement);
+    const panelB = await screen.findByRole("complementary");
+
+    expect(within(panelB).queryByText("Stale Supply Air Temp")).not.toBeInTheDocument();
+    expect(within(panelB).queryByText("99.9")).not.toBeInTheDocument();
+    // The browse control is offered again, unread.
+    expect(within(panelB).getByRole("button", { name: "Load objects" })).toBeInTheDocument();
   });
 
   it("blocks Send Who-Is on a half-filled instance range", async () => {
