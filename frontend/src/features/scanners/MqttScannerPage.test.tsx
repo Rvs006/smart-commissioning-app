@@ -10,7 +10,7 @@ import {
 } from "../../api/client";
 import { MqttScannerPage } from "./MqttScannerPage";
 import { scannerRowsFromResults } from "./scannerRows";
-import { scannerProviders } from "./scannerTestHarness";
+import { createScannerQueryClient, scannerProviders } from "./scannerTestHarness";
 
 // The live session is driven entirely by the module mock: each test sets the
 // phase + snapshot it needs and asserts what the page does with it. Nothing here
@@ -405,6 +405,70 @@ describe("MqttScannerPage", () => {
     expect(
       await screen.findByText("An MQTT capture run is in progress for this project and site."),
     ).toBeInTheDocument();
+  });
+
+  it("waits for /me rather than burning the one attempt on the fail-closed default", async () => {
+    // authorizationEnforced fails closed to true while /me is in flight, so the
+    // first pass of a frictionless build looks unauthorized. Deciding there
+    // stranded the page with no live view for the rest of the visit.
+    stubFetch({ runs: [] });
+    const client = createScannerQueryClient();
+    const view = render(
+      scannerProviders(<MqttScannerPage />, { queryClient: client, sessionLoading: true }),
+    );
+    await screen.findByRole("heading", { name: "Live topics" });
+    expect(liveMock.start).not.toHaveBeenCalled();
+
+    view.rerender(
+      scannerProviders(<MqttScannerPage />, { authorizationEnforced: false, queryClient: client }),
+    );
+    await waitFor(() => expect(liveMock.start).toHaveBeenCalledTimes(1));
+  });
+
+  it("starts once the operator ticks scan authorization on an enforced build", async () => {
+    stubFetch({ runs: [] });
+    render(scannerProviders(<MqttScannerPage />, { authorizationEnforced: true }));
+
+    const consent = await screen.findByLabelText(/I am authorized to scan this network/i);
+    expect(liveMock.start).not.toHaveBeenCalled();
+
+    fireEvent.click(consent);
+    await waitFor(() => expect(liveMock.start).toHaveBeenCalledTimes(1));
+  });
+
+  it("auto-starts for the next workspace after the first one was blocked", async () => {
+    // The guard is per workspace: a site that settled with no broker must not
+    // stop the next site, which has one, from connecting.
+    configuration = mqttConfiguration("");
+    stubFetch({ runs: [] });
+    const client = createScannerQueryClient();
+    const view = render(scannerProviders(<MqttScannerPage />, { queryClient: client }));
+    expect(await screen.findByText("No broker configured")).toBeInTheDocument();
+    expect(liveMock.start).not.toHaveBeenCalled();
+
+    configuration = mqttConfiguration("broker.example.test");
+    view.rerender(
+      scannerProviders(<MqttScannerPage />, {
+        queryClient: client,
+        workspace: { projectId: "other-project", siteId: "other-site" },
+      }),
+    );
+    await waitFor(() => expect(liveMock.start).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not reconnect behind an explicit Stop", async () => {
+    liveState = { phase: "live", session: liveSession, snapshot: liveSnapshot };
+    stubFetch({ runs: [] });
+    const client = createScannerQueryClient();
+    const view = render(scannerProviders(<MqttScannerPage />, { queryClient: client }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Stop live view" }));
+    expect(liveMock.stop).toHaveBeenCalledTimes(1);
+
+    liveState = { phase: "no_session" };
+    view.rerender(scannerProviders(<MqttScannerPage />, { queryClient: client }));
+    await screen.findByRole("button", { name: "Start live view" });
+    expect(liveMock.start).not.toHaveBeenCalled();
   });
 
   it("does not auto-start without scan authorization, or without the engineer role", async () => {

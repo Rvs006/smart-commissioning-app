@@ -27,26 +27,33 @@ export function scannerProviders(
     // is withdrawn on a switch.
     workspace?: WorkspaceRef;
     sessionScopeId?: SessionScopeId;
+    // /me still in flight. authorizationEnforced defaults TRUE in that window
+    // (session.tsx fails closed), so a page that reads scanAuthorized before the
+    // principal lands sees "not authorized" and must wait rather than decide.
+    sessionLoading?: boolean;
   } = {},
 ) {
   const sessionScopeId = options.sessionScopeId ?? createSessionScopeId();
   const workspace = options.workspace ?? DEFAULT_WORKSPACE;
+  const loading = options.sessionLoading ?? false;
   const value: SessionContextValue = {
     apiClient: createSessionBoundApiClient(sessionScopeId, workspace, "engineer-key"),
-    authorizationEnforced: options.authorizationEnforced ?? false,
+    authorizationEnforced: loading ? true : (options.authorizationEnforced ?? false),
     canAdmin: false,
-    canEngineer: options.canEngineer ?? true,
+    canEngineer: loading ? false : (options.canEngineer ?? true),
     error: null,
     hasApiKey: true,
-    isLoading: false,
-    me: {
-      effective_scopes: [],
-      global_scope: true,
-      role: "engineer",
-      source: "user_key",
-      username: "engineer-1",
-    },
-    role: "engineer",
+    isLoading: loading,
+    me: loading
+      ? null
+      : {
+          effective_scopes: [],
+          global_scope: true,
+          role: "engineer",
+          source: "user_key",
+          username: "engineer-1",
+        },
+    role: loading ? null : "engineer",
     sessionScopeId,
     signIn: () => {},
     signOut: () => {},

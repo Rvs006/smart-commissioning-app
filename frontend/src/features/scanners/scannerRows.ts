@@ -37,6 +37,14 @@ export type ScannerRow = {
   status: string;
   /** True for an expected device that never answered (no observed evidence). */
   missing: boolean;
+  /**
+   * IP only, and only on a `missing` row: did this scan actually probe the
+   * address? The sweep pings every address between start and end, so a register
+   * host OUTSIDE that range was never contacted and its silence is not evidence
+   * of anything. `undefined` = the engine could not answer (no recorded range,
+   * or an unparseable address).
+   */
+  probed?: boolean;
   deviceInstance?: number;
   /** The persisted device attributes, empty for a missing (never-observed) row. */
   attributes: Record<string, unknown>;
@@ -137,6 +145,13 @@ function statusChip(status: string): ScannerCell {
       return { text: "Rogue host", chip: "fail" };
     case "unreachable":
       return { text: "Unreachable", chip: "fail" };
+    // Register hosts the scan cannot call unreachable. Both stay red, because
+    // the register expects them and neither is accounted for, but "Unreachable"
+    // would be a claim about the network that this scan did not make.
+    case "not-probed":
+      return { text: "Not probed", chip: "fail" };
+    case "expected":
+      return { text: "Expected", chip: "fail" };
     default:
       return { text: status ? status : DASH, chip: "neutral" };
   }
@@ -321,8 +336,20 @@ function ipRows(results: DiscoveryResultsResponse): ScannerRow[] {
     const attributes = attributesOf(device);
     const state = registerStateOf(asset as Record<string, unknown>);
     const verdict = ipRowVerdict(asset);
-    const status = statusFromDetail(asset.status_detail, state === "missing" ? "unreachable" : "reachable");
     const missing = state === "missing";
+    // Track A's engine stamps directed_probe_sent on a silent host: true inside
+    // the swept range, false outside it, absent when it could not tell. A host
+    // the scan never reached must not be reported as unreachable — that turns
+    // "we did not look" into "it did not answer".
+    const probeSent = asset.directed_probe_sent;
+    const probed = typeof probeSent === "boolean" ? probeSent : undefined;
+    const status = missing
+      ? probed === false
+        ? "not-probed"
+        : probed === true
+          ? "unreachable"
+          : "expected"
+      : statusFromDetail(asset.status_detail, "reachable");
     // A silent host resolved no hostname: the engine keeps `hostname` null and
     // carries the register's expectation in `expected_hostname`, so an
     // expectation is never rendered as a discovery.
@@ -336,6 +363,7 @@ function ipRows(results: DiscoveryResultsResponse): ScannerRow[] {
       register: state,
       status,
       missing,
+      probed,
       // A silent host has no device record; carry the register's expectation so
       // the panel can name what was expected without claiming it was observed.
       attributes: missing ? { expected_hostname: asset.expected_hostname } : attributes,

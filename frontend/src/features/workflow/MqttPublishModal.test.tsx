@@ -37,6 +37,18 @@ const previewRun = {
   },
 };
 
+// Two native clicks inside ONE act() block: React has not committed `busy`
+// between them, so the button's `disabled` attribute is still stale when the
+// second lands. This is the real-world fast double-click the guard exists for;
+// RTL's fireEvent act-wraps each call and would commit in between, which is
+// exactly why a fireEvent-based version of this test passes even unguarded.
+async function doubleClick(element: HTMLElement): Promise<void> {
+  await act(async () => {
+    element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+}
+
 function fillCompose(): void {
   fireEvent.change(screen.getByLabelText("Topic"), { target: { value: "site/ahu-1/cmd" } });
   fireEvent.change(screen.getByLabelText("Payload"), { target: { value: '{"cmd":1}' } });
@@ -189,6 +201,63 @@ describe("MqttPublishModal", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // `busy` is React state, so it is not applied until React commits: before the
+  // synchronous guard, two clicks in the same tick both reached the network and
+  // the backend made a run for each, publishing twice to live equipment while
+  // the dialog showed one "Sent".
+  it("a double-click on the direct send publishes exactly once", async () => {
+    vi.mocked(startDirectMqttPublish).mockResolvedValue({ run_id: "send1" } as never);
+    vi.mocked(getValidationRun).mockResolvedValue({
+      run_id: "send1",
+      status: "succeeded",
+      result_summary: { publish: { topic: "site/ahu-1/cmd", authorized_by: "shared-key" } },
+    } as never);
+
+    render(<MqttPublishModal authorizationEnforced={false} onClose={() => {}} workspace={workspace} />);
+    fillCompose();
+    fireEvent.click(screen.getByRole("button", { name: /Send to live equipment/ }));
+
+    await doubleClick(screen.getByRole("button", { name: /Send to device/ }));
+
+    await screen.findByText(/Sent/);
+    expect(startDirectMqttPublish).toHaveBeenCalledTimes(1);
+  });
+
+  it("a double-click on the authorized send publishes exactly once", async () => {
+    await reachApprovedPreview();
+    vi.mocked(startAuthorizedMqttPublish).mockResolvedValue({ run_id: "send1" } as never);
+    vi.mocked(getValidationRun).mockImplementation((runId: string) =>
+      Promise.resolve(
+        (runId === "send1"
+          ? {
+              run_id: "send1",
+              status: "succeeded",
+              result_summary: { publish: { topic: "site/ahu-1/cmd", authorized_by: "admin" } },
+            }
+          : previewRun) as never,
+      ),
+    );
+
+    await doubleClick(screen.getByRole("button", { name: /Send to live equipment/ }));
+
+    await screen.findByText(/Sent/);
+    // The authorization is one-use, so a second replay would fail anyway; the
+    // point is that it is never issued.
+    expect(startAuthorizedMqttPublish).toHaveBeenCalledTimes(1);
+  });
+
+  it("a double-click on the preview submits exactly once", async () => {
+    vi.mocked(startMqttPublishPreview).mockResolvedValue({ run_id: "prev1" } as never);
+    vi.mocked(getValidationRun).mockResolvedValue(previewRun as never);
+
+    render(<MqttPublishModal onClose={() => {}} workspace={workspace} />);
+    fillCompose();
+    await doubleClick(screen.getByRole("button", { name: /Preview — nothing is sent/ }));
+
+    await screen.findByText("abc123");
+    expect(startMqttPublishPreview).toHaveBeenCalledTimes(1);
   });
 
   it("shows an honest failure when the send run fails", async () => {
