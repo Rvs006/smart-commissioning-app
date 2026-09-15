@@ -9,6 +9,24 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Added
 
+- The MQTT Discovery screen is now a dedicated live-first page. It opens on the
+  live topic tree instead of a capture form: when Configuration has a broker and
+  nobody else holds the session, the page connects by itself on arrival. The tree
+  sits in a 320px mono rail with its counts, message rates, activity flash, copy
+  and sort controls, and the focused asset fills the sticky side panel beside it,
+  with the Overview, Live payload, Points and Metadata tabs unchanged. The header
+  carries the Topics, Live assets, Messages and Issues counters, the live search
+  and "Registered assets only" toggle, "Apply subscription filter", "Save as
+  register" from the live session, and "Publish message...". Recording a capture
+  is a secondary action on the Broker and capture card above it, and its results
+  stay the persisted-evidence view: a Captured topics card with the four capture
+  counters, a Topic, Ret, QoS, Bytes, Last value and Register Match table, the
+  matched / not-in-register chips, the capture archive and register CSV
+  downloads, and the run footer. Clicking a captured row opens the same side
+  panel with that topic's asset, message count, retained flag, delivery QoS,
+  subscription QoS cap and last payload. A run that recorded no per-message
+  metadata reads "Not recorded" rather than a zero, and a non-JSON payload says
+  the engine kept a presence marker instead of the bytes.
 - The native IP and BACnet scanner results tables now show a row for every
   device the uploaded register expects, including the ones that never answered.
   An expected-but-silent device used to appear only in the issues list, so an

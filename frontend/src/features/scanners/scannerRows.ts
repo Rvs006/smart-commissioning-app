@@ -4,10 +4,11 @@ import type {
   DiscoveryRowRecord,
   ObservedPort,
 } from "../../api/client";
-import { bacnetRowVerdict, ipRowVerdict } from "../workflow/discoveryRows";
+import { bacnetRowVerdict, ipRowVerdict, mqttRowsFromResults } from "../workflow/discoveryRows";
 import {
   formatBacnetSidecarSummaryCards,
   formatIpSidecarSummaryCards,
+  formatMqttSidecarSummaryCards,
 } from "../workflow/ipDiscoveryModel";
 import type { ScannerLane } from "./useScannerRun";
 
@@ -59,8 +60,21 @@ export const BACNET_COLUMNS = [
   "Register",
 ] as const;
 
+// The MQTT capture table from the full-app artboard. "Register Match" is added
+// to the artboard's five so the capture keeps the register verdict the v0.1.58
+// table carried; Asset / Message count / Last payload seen / Detailed status
+// ride each row's cell sub-lines and the detail panel, so no evidence is lost.
+export const MQTT_COLUMNS = [
+  "Topic",
+  "Ret",
+  "QoS",
+  "Bytes",
+  "Last value",
+  "Register Match",
+] as const;
+
 export function scannerColumns(lane: ScannerLane): readonly string[] {
-  return lane === "bacnet" ? BACNET_COLUMNS : IP_COLUMNS;
+  return lane === "bacnet" ? BACNET_COLUMNS : lane === "mqtt" ? MQTT_COLUMNS : IP_COLUMNS;
 }
 
 const DASH = "—";
@@ -168,7 +182,120 @@ export function scannerRowsFromResults(
   if (!results) {
     return [];
   }
-  return lane === "bacnet" ? bacnetRows(results) : ipRows(results);
+  return lane === "bacnet" ? bacnetRows(results) : lane === "mqtt" ? mqttRows(results) : ipRows(results);
+}
+
+/**
+ * Payload size in bytes. The engine stamps no byte count, so this is measured
+ * from the persisted payload text with TextEncoder (UTF-8) rather than guessed
+ * from string length. Unknown reads "—", never 0: a run that recorded no payload,
+ * and a non-JSON payload the engine kept only a presence marker for, both have no
+ * honest size to report.
+ */
+function payloadBytes(raw: string): string {
+  if (!raw) {
+    return DASH;
+  }
+  try {
+    return String(new TextEncoder().encode(raw).length);
+  } catch {
+    return String(raw.length);
+  }
+}
+
+/**
+ * The engine's stored payload shapes, unwrapped for display exactly as the
+ * v0.1.58 payload inspector did: `_raw_present` marks a non-JSON payload whose
+ * bytes were NOT stored, and `_value` wraps a payload that was not a JSON object.
+ * Returns the pretty-printed payload, or null when there is nothing to show.
+ */
+function displayPayload(value: unknown): {
+  text: string | null;
+  compact: string | null;
+  rawOnly: boolean;
+} {
+  if (value === null || value === undefined) {
+    return { text: null, compact: null, rawOnly: false };
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (record._raw_present === true) {
+      return { text: null, compact: null, rawOnly: true };
+    }
+    const unwrapped = "_value" in record ? record._value : value;
+    return {
+      text: JSON.stringify(unwrapped, null, 2),
+      compact: JSON.stringify(unwrapped),
+      rawOnly: false,
+    };
+  }
+  return { text: String(value), compact: String(value), rawOnly: false };
+}
+
+/**
+ * MQTT capture rows. The per-topic projection is discoveryRows'
+ * mqttRowsFromResults, verbatim, so the capture table and Run History can never
+ * disagree about a topic's register verdict or its retained / QoS metadata; only
+ * the column set and the chips differ here.
+ */
+function mqttRows(results: DiscoveryResultsResponse): ScannerRow[] {
+  // mqttRowsFromResults maps results.topics 1:1 and in order, so the index also
+  // reaches the topic record's real last_payload OBJECT. The stringified cell is
+  // never re-parsed to get it back.
+  return mqttRowsFromResults(results).map((row, index) => {
+    const topic = row.Topic ?? DASH;
+    const asset = row.Asset ?? DASH;
+    const verdictText = row["Register Match"] ?? DASH;
+    const tone: RowTone = row.__tone === "pass" ? "pass" : row.__tone === "fail" ? "fail" : null;
+    // ScannerRow.register drives the chip filter; keep the two register words the
+    // MQTT engine actually reports ("matched" / "unmatched") in the shared
+    // vocabulary the filters use.
+    const register = tone === "pass" ? "match" : tone === "fail" ? "rogue" : "";
+    const rawPayload = row["Raw Payload"] ?? "";
+    const payload = displayPayload(results.topics[index]?.last_payload);
+    const retained = row.__retained;
+    const lastSeen = row["Last Payload Seen"] ?? DASH;
+    const messageCount = row["Message Count"] ?? DASH;
+    const statusDetail = row["Detailed Status"] ?? DASH;
+    return {
+      id: topic === DASH ? `mqtt:row-${index}` : `mqtt:${topic}`,
+      title: topic,
+      tone,
+      register,
+      status: statusDetail,
+      missing: false,
+      attributes: {
+        topic,
+        asset,
+        message_count: messageCount,
+        last_payload_seen: lastSeen,
+        status_detail: statusDetail,
+        last_retained: retained,
+        last_qos: row.__qos,
+        subscribe_qos: row.__subscribeQos,
+        last_payload: payload.text,
+        payload_raw_only: payload.rawOnly,
+        register_match: verdictText,
+      },
+      cells: {
+        Topic: { text: topic, mono: true, sub: asset === DASH ? undefined : asset },
+        // "" = the run predates per-message metadata: unknown reads "—", which
+        // must not be confused with an observed "not retained".
+        Ret: { text: retained === "yes" ? "✓" : retained === "no" ? "✗" : DASH },
+        QoS: { text: row.__qos ? row.__qos : DASH, mono: true },
+        Bytes: { text: payload.rawOnly ? DASH : payloadBytes(rawPayload), mono: true },
+        "Last value": {
+          text: payload.rawOnly ? "non-JSON (not stored)" : (payload.compact ?? DASH),
+          mono: true,
+          sub: `${messageCount} msg · ${lastSeen}`,
+        },
+        "Register Match": {
+          text: verdictText,
+          chip: tone === "pass" ? "pass" : tone === "fail" ? "fail" : "neutral",
+        },
+      },
+    };
+  });
 }
 
 function ipRows(results: DiscoveryResultsResponse): ScannerRow[] {
@@ -298,7 +425,9 @@ export function scannerSummaryPills(
   const cards =
     (lane === "bacnet"
       ? formatBacnetSidecarSummaryCards(summary)
-      : formatIpSidecarSummaryCards(summary)) ?? [];
+      : lane === "mqtt"
+        ? formatMqttSidecarSummaryCards(summary)
+        : formatIpSidecarSummaryCards(summary)) ?? [];
   return cards.map((card) => ({
     label: card.heading,
     value: card.value,
@@ -329,6 +458,20 @@ export const RAG_FILTERS: ReadonlyArray<{ id: RagFilter; label: string; chip: Ch
   { id: "partial", label: "Partial", chip: "warn" },
   { id: "missing-rogue", label: "Missing / Rogue", chip: "fail" },
 ];
+
+// The MQTT capture compares a topic against the register's filters, so it only
+// ever reports matched / not-in-register: no Partial, and no Missing row (an
+// expected topic the capture never saw is reported in the register-comparison
+// note, never as a row, because nothing was observed).
+export const MQTT_RAG_FILTERS: ReadonlyArray<{ id: RagFilter; label: string; chip: ChipTone }> = [
+  { id: "all", label: "All", chip: "neutral" },
+  { id: "match", label: "Matched", chip: "pass" },
+  { id: "missing-rogue", label: "Not in register", chip: "fail" },
+];
+
+export function ragFiltersFor(lane: ScannerLane) {
+  return lane === "mqtt" ? MQTT_RAG_FILTERS : RAG_FILTERS;
+}
 
 export function rowMatchesRagFilter(row: ScannerRow, filter: RagFilter): boolean {
   if (filter === "all") {
@@ -365,7 +508,13 @@ export function clampPanelWidth(width: number): number {
   return Math.min(SCANNER_PANEL_MAX_WIDTH, Math.max(SCANNER_PANEL_MIN_WIDTH, Math.round(width)));
 }
 
-export type DetailItem = { label: string; value: string; tone?: RowTone };
+export type DetailItem = {
+  label: string;
+  value: string;
+  tone?: RowTone;
+  /** Offer a copy control beside the value (a raw payload, a banner). */
+  copyable?: boolean;
+};
 export type DetailSection = {
   heading: string;
   items: DetailItem[];
@@ -391,7 +540,7 @@ export function serviceLines(services: unknown): ServiceLine[] {
     const head = [proto && port ? `${proto}/${port}` : proto || port, name, record.tls ? "🔒" : ""]
       .filter(Boolean)
       .join(" ");
-    // Pete's svcDescr(), verbatim in order: product+version, quoted title,
+    // The vendored tool's svcDescr(), verbatim in order: product+version, quoted title,
     // certificate CN, then the raw info string only when nothing else is known.
     const parts: string[] = [];
     if (record.product) {
@@ -569,4 +718,58 @@ export function bacnetDetailSections(row: ScannerRow): DetailSection[] {
     });
   }
   return sections;
+}
+
+/**
+ * MQTT capture detail panel. Every field the v0.1.58 capture table carried in a
+ * column (asset, message count, last payload seen, detailed status) lives here
+ * alongside the per-message metadata the old inspector showed, so narrowing the
+ * table to the artboard's columns loses nothing. A blank metadata value means
+ * the run predates that capture, and is said so rather than shown as a zero.
+ */
+export function mqttDetailSections(row: ScannerRow): DetailSection[] {
+  const a = row.attributes;
+  const notRecorded = (value: unknown) =>
+    value === undefined || value === null || value === "" ? "Not recorded" : String(value);
+  return [
+    {
+      heading: "Topic",
+      items: [
+        { label: "Topic", value: text(a.topic) },
+        { label: "Asset", value: text(a.asset) },
+        { label: "Messages", value: text(a.message_count) },
+        { label: "Last payload seen", value: text(a.last_payload_seen) },
+        { label: "Detailed status", value: text(a.status_detail) },
+      ],
+    },
+    {
+      heading: "Message metadata",
+      items: [
+        {
+          label: "Retained",
+          value:
+            a.last_retained === "yes" ? "Yes" : a.last_retained === "no" ? "No" : "Not recorded",
+        },
+        { label: "Delivery QoS", value: notRecorded(a.last_qos) },
+        { label: "Subscription QoS cap", value: notRecorded(a.subscribe_qos) },
+      ],
+      note:
+        "Delivery QoS is min(publisher QoS, this run's subscription QoS), not the publisher's own.",
+    },
+    {
+      heading: "Register",
+      items: [
+        { label: "Verdict", value: text(a.register_match), tone: row.tone },
+      ],
+    },
+    {
+      heading: "Last payload",
+      items: a.payload_raw_only
+        ? []
+        : [{ label: "Raw", value: text(a.last_payload), copyable: true }],
+      note: a.payload_raw_only
+        ? "Non-JSON payload observed. The engine stores a presence marker, not the raw bytes."
+        : undefined,
+    },
+  ];
 }

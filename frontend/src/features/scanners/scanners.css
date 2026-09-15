@@ -531,6 +531,125 @@
   overflow-wrap: anywhere;
 }
 
+/* ---- MQTT live explorer -------------------------------------------------- */
+/* The live status line in the setup action row: "Live · connected · N topics". */
+.scanner-live-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.scanner-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.scanner-live-dot.on {
+  background: var(--green);
+}
+
+/* Plan 4.5: 320px topic rail + the focused-asset panel, stacked below 1100px.
+   With an asset focused the panel takes its remembered, dragged width and the
+   rail keeps the slack, never dropping below the artboard's 320px. */
+.scanner-live-layout {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 0;
+  align-items: start;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.scanner-live-layout.with-panel {
+  grid-template-columns: minmax(320px, 1fr) var(--scanner-panel-width, 380px);
+}
+
+.scanner-live-layout .scanner-detail {
+  border: 0;
+  border-left: 1px solid var(--border-soft);
+  border-radius: 0;
+}
+
+.mqtt-rail {
+  min-width: 0;
+  padding: 12px 0;
+  border-right: 1px solid var(--border-soft);
+  background: var(--surface-2);
+  font-family: var(--dc-mono);
+  font-size: 12.5px;
+}
+
+.mqtt-rail-caption {
+  margin: 0 0 6px;
+  padding: 0 10px;
+  color: var(--muted);
+  font-family: var(--dc-font);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.mqtt-rail-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  font-family: var(--dc-font);
+}
+
+.mqtt-rail-scroll {
+  max-height: 520px;
+  overflow: auto;
+}
+
+.mqtt-rail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-block: 5px;
+  padding-right: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.mqtt-rail-row:first-child {
+  border-top: 0;
+}
+
+.mqtt-rail-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+}
+
+.mqtt-rail-name {
+  overflow-wrap: anywhere;
+}
+
+.mqtt-rail-count {
+  color: var(--text);
+}
+
+.mqtt-rail-meta,
+.mqtt-rail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-family: var(--dc-font);
+  font-size: 11px;
+}
+
 /* ---- footer -------------------------------------------------------------- */
 .scanner-footer-line {
   display: flex;
@@ -581,6 +700,23 @@
     position: static;
     max-height: none;
     margin-top: 16px;
+  }
+
+  .scanner-live-layout,
+  .scanner-live-layout.with-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scanner-live-layout .scanner-detail {
+    position: static;
+    max-height: none;
+    border-left: 0;
+    border-top: 1px solid var(--border-soft);
+  }
+
+  .mqtt-rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--border-soft);
   }
 
   .scanner-detail-resizer {

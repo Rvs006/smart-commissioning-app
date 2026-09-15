@@ -72,7 +72,120 @@ type TreeProps = {
   totalTopics: number;
   lastActivity: { paths: string[]; at: number } | null;
   onFocus?: (asset: string) => void;
+  /**
+   * "table" (default) is the six-column grid the module page renders full width.
+   * "rail" is the same tree, same ordering / flashing / copy / focus, rendered as
+   * the native MQTT screen's 320px mono column (plan section 4.5): name · count,
+   * 16px of indent per level, rate and flags as sub-text instead of columns.
+   */
+  variant?: "table" | "rail";
 };
+
+/** "1,842" — the artboard's counts are grouped, and a busy broker needs it. */
+function groupDigits(value: number): string {
+  return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
+}
+
+function TreeRailRows({
+  node,
+  depth,
+  expanded,
+  onToggle,
+  flashing,
+  onFocus,
+  orderNodes,
+  onCopy,
+  copiedPath,
+}: {
+  node: MqttLiveTreeNode;
+  depth: number;
+  expanded: Set<string>;
+  onToggle: (path: string) => void;
+  flashing: Set<string>;
+  onFocus?: (asset: string) => void;
+  orderNodes: (nodes: MqttLiveTreeNode[]) => MqttLiveTreeNode[];
+  onCopy: (path: string) => void;
+  copiedPath: string | null;
+}) {
+  const hasChildren = Boolean(node.ch && node.ch.length > 0);
+  const isOpen = expanded.has(node.p);
+  return (
+    <>
+      <div
+        className={`mqtt-rail-row${flashing.has(node.p) ? " mqtt-tree-flash" : ""}`}
+        style={{ paddingLeft: depth * 16 + 10 }}
+      >
+        <div className="mqtt-rail-label">
+          {hasChildren ? (
+            <button
+              aria-expanded={isOpen}
+              className="asset-summary-toggle"
+              onClick={() => onToggle(node.p)}
+              type="button"
+            >
+              <span aria-hidden="true" className="asset-summary-caret">
+                {isOpen ? "▾" : "▸"}
+              </span>
+              <span className="mqtt-rail-name">{node.n}</span>
+            </button>
+          ) : (
+            <span className="mqtt-rail-name">{node.n}</span>
+          )}
+          <span className="mqtt-rail-count">· {groupDigits(node.t)}</span>
+          {node.mt ? <span className="status-token ready">matched</span> : null}
+        </div>
+        <div className="mqtt-rail-meta">
+          <span>{node.r} msg/s</span>
+          <span>{groupDigits(node.m)} msgs</span>
+          {node.sc ? <span>{node.sc}</span> : null}
+          {node.ret ? <span>retained</span> : null}
+          {node.iss ? (
+            <span className="error-text">
+              {node.iss} issue{node.iss === 1 ? "" : "s"}
+            </span>
+          ) : null}
+        </div>
+        <div className="mqtt-rail-actions">
+          <button
+            className="secondary-button compact"
+            onClick={() => onCopy(node.p)}
+            title={`Copy topic ${node.p}`}
+            type="button"
+          >
+            {copiedPath === node.p ? "Copied" : "Copy topic"}
+          </button>
+          {node.a && onFocus ? (
+            <button
+              className="secondary-button compact"
+              onClick={() => onFocus(node.a as string)}
+              type="button"
+            >
+              Focus {node.a}
+            </button>
+          ) : node.a ? (
+            <span className="results-filter-count">{node.a}</span>
+          ) : null}
+        </div>
+      </div>
+      {hasChildren && isOpen
+        ? orderNodes(node.ch ?? []).map((child) => (
+            <TreeRailRows
+              copiedPath={copiedPath}
+              depth={depth + 1}
+              expanded={expanded}
+              flashing={flashing}
+              key={child.p}
+              node={child}
+              onCopy={onCopy}
+              onFocus={onFocus}
+              onToggle={onToggle}
+              orderNodes={orderNodes}
+            />
+          ))
+        : null}
+    </>
+  );
+}
 
 function TreeNodeRows({
   node,
@@ -170,7 +283,14 @@ function TreeNodeRows({
   );
 }
 
-export function MqttLiveTopicTree({ tree, treeShown, totalTopics, lastActivity, onFocus }: TreeProps) {
+export function MqttLiveTopicTree({
+  tree,
+  treeShown,
+  totalTopics,
+  lastActivity,
+  onFocus,
+  variant = "table",
+}: TreeProps) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [flashing, setFlashing] = useState<Set<string>>(() => new Set());
   const [sortMode, setSortMode] = useState<SortMode>("name");
@@ -248,9 +368,62 @@ export function MqttLiveTopicTree({ tree, treeShown, totalTopics, lastActivity, 
 
   if (tree.length === 0) {
     return (
-      <div className="empty-workspace">
-        <strong>No topics seen yet</strong>
-        <span>The tree fills as messages arrive on the broker.</span>
+      <div className={variant === "rail" ? "mqtt-rail" : undefined}>
+        {variant === "rail" && <p className="mqtt-rail-caption">Live topic tree</p>}
+        <div className="empty-workspace">
+          <strong>No topics seen yet</strong>
+          <span>The tree fills as messages arrive on the broker.</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (variant === "rail") {
+    return (
+      <div className="mqtt-rail">
+        <p className="mqtt-rail-caption">Live topic tree</p>
+        <div className="mqtt-rail-controls">
+          <span className="results-filter-count">
+            {groupDigits(treeShown)} of {groupDigits(totalTopics)} topic
+            {totalTopics === 1 ? "" : "s"} shown
+          </span>
+          <div className="inline-actions">
+            <button
+              aria-pressed={sortMode === "name"}
+              className="secondary-button compact"
+              onClick={() => setSortMode("name")}
+              title="Order the tree A-Z (stable while messages arrive)."
+              type="button"
+            >
+              Name
+            </button>
+            <button
+              aria-pressed={sortMode === "rate"}
+              className="secondary-button compact"
+              onClick={rankByCurrentRates}
+              title="Rank the tree by current message rate, then hold that order. Press again to re-rank."
+              type="button"
+            >
+              Rate ↻
+            </button>
+          </div>
+        </div>
+        <div className="mqtt-rail-scroll">
+          {orderNodes(tree).map((node) => (
+            <TreeRailRows
+              copiedPath={copiedPath}
+              depth={0}
+              expanded={expanded}
+              flashing={flashing}
+              key={node.p}
+              node={node}
+              onCopy={onCopy}
+              onFocus={onFocus}
+              onToggle={onToggle}
+              orderNodes={orderNodes}
+            />
+          ))}
+        </div>
       </div>
     );
   }

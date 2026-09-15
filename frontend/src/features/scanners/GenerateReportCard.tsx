@@ -40,7 +40,8 @@ export function GenerateReportCard({ run }: { run: ScannerRunController }) {
   const [title, setTitle] = useState("");
   const [toast, setToast] = useState<{ text: string; warning: boolean } | null>(null);
 
-  const reportType: ReportType = lane === "bacnet" ? "bacnet_discovery" : "ip_discovery";
+  const reportType: ReportType =
+    lane === "bacnet" ? "bacnet_discovery" : lane === "mqtt" ? "mqtt_discovery" : "ip_discovery";
 
   const mutation = useMutation({
     mutationKey: mutationKeys.reports(sessionScopeId, workspaceRef),

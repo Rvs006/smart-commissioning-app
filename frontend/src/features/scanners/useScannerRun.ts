@@ -12,9 +12,11 @@ import {
   listRuns,
   saveBacnetScanRunAsRegister,
   saveIpScanRunAsRegister,
+  saveMqttScanRunAsRegister,
   startDiscoveryRun,
   type BacnetObjectBrowseResponse,
   type ImportBatchSummary,
+  type ScanRegisterRoute,
 } from "../../api/client";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { useSession } from "../../app/sessionContext";
@@ -29,15 +31,45 @@ import {
   toRunRef,
 } from "../workflow/runIsolation";
 import { useRunEvents } from "../workflow/useRunEvents";
+import {
+  SCANNER_PANEL_DEFAULT_WIDTH,
+  SCANNER_PANEL_WIDTH_STORAGE_KEY,
+  clampPanelWidth,
+} from "./scannerRows";
 
-export type ScannerLane = "ip" | "bacnet";
+/**
+ * The side panel's width, remembered per browser (plan section 4.5). Shared by
+ * every scanner screen so the operator's drag survives a lane switch; a private
+ * window that refuses storage still gets a working, default-width panel.
+ */
+export function useStoredPanelWidth() {
+  const [width, setWidth] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(SCANNER_PANEL_WIDTH_STORAGE_KEY);
+      return stored ? clampPanelWidth(Number(stored)) : SCANNER_PANEL_DEFAULT_WIDTH;
+    } catch {
+      return SCANNER_PANEL_DEFAULT_WIDTH;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SCANNER_PANEL_WIDTH_STORAGE_KEY, String(width));
+    } catch {
+      // A private window can refuse storage; the panel still works this session.
+    }
+  }, [width]);
+  return [width, setWidth] as const;
+}
 
-export const SCANNER_LANE_ROUTES: Record<ScannerLane, string> = {
+export type ScannerLane = "ip" | "bacnet" | "mqtt";
+
+export const SCANNER_LANE_ROUTES: Record<ScannerLane, ScanRegisterRoute> = {
   ip: "ip-scanner",
   bacnet: "bacnet-scanner",
+  mqtt: "mqtt-scanner",
 };
 
-/** Every per-run operator input the two native scanner setup cards expose. */
+/** Every per-run operator input the three native scanner setup cards expose. */
 export type ScannerRunInputs = {
   ignoreRegister: boolean;
   // IP lane
@@ -48,6 +80,9 @@ export type ScannerRunInputs = {
   bacnetInstanceLow?: string;
   bacnetInstanceHigh?: string;
   bacnetDiscoverMs?: string;
+  // MQTT lane (the capture run; the live explorer holds no run)
+  captureTopicFilter?: string;
+  captureSeconds?: string;
 };
 
 type ActiveScannerRun = {
@@ -543,6 +578,8 @@ export function useScannerRun(lane: ScannerLane) {
           bacnetInstanceLow: inputs.bacnetInstanceLow,
           bacnetInstanceHigh: inputs.bacnetInstanceHigh,
           bacnetDiscoverMs: inputs.bacnetDiscoverMs,
+          captureTopicFilter: inputs.captureTopicFilter,
+          captureSeconds: inputs.captureSeconds,
         }),
         runKind: action.runKind,
         workspace: workspaceRef,
@@ -582,12 +619,16 @@ export function useScannerRun(lane: ScannerLane) {
     mutationFn: (runId: string) =>
       lane === "bacnet"
         ? saveBacnetScanRunAsRegister({ context: { client: apiClient }, runId })
-        : saveIpScanRunAsRegister({ context: { client: apiClient }, runId }),
+        : lane === "mqtt"
+          ? saveMqttScanRunAsRegister({ context: { client: apiClient }, runId })
+          : saveIpScanRunAsRegister({ context: { client: apiClient }, runId }),
     onSuccess: (summary) => {
+      // Mirror the upload path: refresh the "register on file" note. The ROOT key
+      // is load-bearing — latestImport(scope, workspace) appends an `undefined`
+      // slot that partial-matches nothing, so the note would never refresh.
       setSavedRegister(summary);
-      // Mirror the upload path: refresh the "register on file" note.
       void queryClient.invalidateQueries({
-        queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef),
+        queryKey: queryKeys.latestImportRoot(sessionScopeId, workspaceRef),
       });
     },
   });
@@ -655,9 +696,15 @@ export function useScannerRun(lane: ScannerLane) {
     );
   }, [setSearchParams]);
 
-  // Only a succeeded run with recorded devices has something to save/export.
+  // Only a succeeded run with recorded evidence has something to save/export.
+  // The MQTT capture records topics, not devices, so its gate reads the same way
+  // ModulePage's saveableMqttTopicCount did.
   const saveableDeviceCount =
-    activeRunStatus === "succeeded" ? (results?.devices?.length ?? 0) : 0;
+    activeRunStatus !== "succeeded"
+      ? 0
+      : lane === "mqtt"
+        ? (results?.topics?.length ?? 0)
+        : (results?.devices?.length ?? 0);
 
   return useMemo(
     () => ({
