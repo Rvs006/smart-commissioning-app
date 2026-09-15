@@ -848,7 +848,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     null,
   );
   // ip-scanner "save scan as register" outcome, cleared when a new run starts.
-  const [savedRegister, setSavedRegister] = useState<ImportBatchSummary | null>(null);
+  // The run id travels WITH the summary: the register CSV download is rebuilt
+  // from the run that was saved, and reading it off the mutable `activeRun`
+  // would hand run B's id to a download labelled with run A's file name.
+  const [savedRegister, setSavedRegister] = useState<{
+    runId: string;
+    summary: ImportBatchSummary;
+  } | null>(null);
   // mqtt-scanner live topic tree: the live search box (filters server-side).
   const [mqttLiveSearch, setMqttLiveSearch] = useState("");
   // GAP-M4: matched-only toggle applied to the same server-side search endpoint.
@@ -2841,8 +2847,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         : module.route === "mqtt-scanner"
           ? saveMqttScanRunAsRegister({ context: { client: apiClient }, runId })
           : saveIpScanRunAsRegister({ context: { client: apiClient }, runId }),
-    onSuccess: (summary) => {
-      setSavedRegister(summary);
+    onSuccess: (summary, runId) => {
+      // A save that resolves after the operator switched runs must not repopulate
+      // the panel the run-change effect just cleared: the note would describe run
+      // A while the page shows run B.
+      if (runId === activeRunRef.current) {
+        setSavedRegister({ runId, summary });
+      }
       // Mirror importMutation.onSuccess: refresh the "register on file" note.
       void queryClient.invalidateQueries({
         queryKey: queryKeys.latestImportRoot(sessionScopeId, workspaceRef),
@@ -2853,6 +2864,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   useEffect(() => {
     setSavedRegister(null);
   }, [activeRun?.runId, activeRun?.epoch]);
+
+  // Read by saveRegisterMutation.onSuccess so a late save is compared against the
+  // run on screen NOW, not the one that was active when the mutation was issued.
+  const activeRunRef = useRef(activeRun?.runId);
+  activeRunRef.current = activeRun?.runId;
 
   // The live explorer's own save-as-register. A sibling of saveRegisterMutation
   // rather than a reuse: this one is scoped to the held session, not to a run,
@@ -7642,12 +7658,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </div>
               </div>
 
-              {scanRegisterRoute && savedRegister && (
+              {scanRegisterRoute && savedRegister && savedRegister.runId === activeRun?.runId && (
                 <div className="state-panel success" role="status">
                   <strong>Saved as register</strong>
                   <span>
-                    {savedRegister.file_name}: {savedRegister.accepted_rows} of{" "}
-                    {savedRegister.total_rows} rows accepted ({savedRegister.import_id}). It is stored
+                    {savedRegister.summary.file_name}: {savedRegister.summary.accepted_rows} of{" "}
+                    {savedRegister.summary.total_rows} rows accepted (
+                    {savedRegister.summary.import_id}). It is stored
                     here and applies automatically to the next{" "}
                     {scanRegisterRoute === "bacnet-scanner"
                       ? "BACnet"
@@ -7661,13 +7678,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     className="secondary-button compact"
                     disabled={registerCsvDownload.pendingKey !== null}
                     onClick={() => {
-                      if (activeRun) {
-                        void registerCsvDownload.download({
-                          fallbackFilename: savedRegister.file_name,
-                          key: "register-csv",
-                          path: getScanRegisterCsvPath(scanRegisterRoute, activeRun.runId),
-                        });
-                      }
+                      void registerCsvDownload.download({
+                        fallbackFilename: savedRegister.summary.file_name,
+                        key: "register-csv",
+                        // The run that was SAVED, so the file and the URL always
+                        // describe the same run.
+                        path: getScanRegisterCsvPath(scanRegisterRoute, savedRegister.runId),
+                      });
                     }}
                     type="button"
                   >

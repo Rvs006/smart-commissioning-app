@@ -19,7 +19,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -83,15 +82,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Serialises the whole connect ceremony (lease acquire + register push + broker
-# connect) so two concurrent take-overs cannot interleave their POSTs against the
-# single shared sidecar and leave its register belonging to one workspace while
-# the lease/connection belong to another. Deliberately NOT live_service.lock: the
-# async relay and reaper take that, and the POSTs below can block for seconds
-# (sidecar doConnect), which would freeze every SSE stream.
+# Serialises every sequence that mutates the single shared sidecar's register or
+# connection, and every transition that hands it from one lane to another: the
+# connect ceremony (lease acquire + register push + broker connect), the live
+# save-as-register ceremony below, and the lease release / reap that let the
+# capture lane in. Owned by the session service so release() and reap_if_stale()
+# take the same lock; see MqttLiveSessionService.__init__ for the lock order
+# (ceremony_lock -> lock, never the reverse) and why it is reentrant.
 # ponytail: one process-global ceremony lock; the sidecar is single-tenant so
 # there is nothing finer worth locking.
-_connect_ceremony_lock = threading.Lock()
+_connect_ceremony_lock = live_service.ceremony_lock
 
 # Wall-clock cap on one browser stream; the frontend reconnects on timeout (same
 # value as events.py MAX_STREAM_SECONDS).
