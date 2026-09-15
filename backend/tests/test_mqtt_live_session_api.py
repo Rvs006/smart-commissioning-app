@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -152,6 +153,27 @@ class MqttLiveSessionApiTest(ApiTestCase):
         self.assertEqual(response.status_code, 400, response.text)
         self.assertIn("broker", response.text.lower())
         self.assertIsNone(self.live_service.current(), "no lease left after a 400")
+
+    def test_connect_without_broker_returns_the_pinned_sentence(self) -> None:
+        # The MQTT scanner page decides "no broker is configured, show a link to
+        # Configuration" by matching this exact phrase on the error it gets back
+        # (MqttScannerPage.tsx, noBrokerError). There is no machine-readable code
+        # on the response, so the prose IS the contract: reword the route and
+        # this test fails here rather than the page silently losing the link.
+        def no_broker(_params, _root):
+            raise ValueError("Live broker mode requires an MQTT broker FQDN or IP address.")
+
+        with patch.object(self.live_routes, "_connect_config", no_broker):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/connect",
+                json={"project_id": "p", "site_id": "s", "authorized": True},
+            )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(
+            response.json()["detail"],
+            "No MQTT broker is configured. Enter the broker FQDN or IP address "
+            "on the Configuration page and save it.",
+        )
 
     def test_connect_requires_authorization(self) -> None:
         response = self.client.post(
@@ -523,6 +545,295 @@ class MqttLiveSessionApiTest(ApiTestCase):
             )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(captured["body"], {"q": "supply_air_temp", "matchedOnly": True})
+
+    # -- save the live session as a register ----------------------------------
+
+    # The sidecar's generateRegisterCsv header + one asset row; the sidecar quotes
+    # every cell, which the import profile re-parses.
+    _LIVE_REGISTER_HEADER = "Asset,Topic,Type,Point,Unit,Data Type,Schema,Site,Location,Description"
+    _LIVE_REGISTER_CSV = (
+        _LIVE_REGISTER_HEADER
+        + '\r\n"AHU-1","udmi/site/example/AHU-1/event/pointset","","supply_air_temp","Cel",'
+        '"analog","udmi","example","Plant",""\r\n'
+    )
+
+    def test_save_as_register_imports_the_sidecar_rows_and_pushes_them_back(self) -> None:
+        session = self._acquire()
+        posts: list[tuple[str, dict]] = []
+
+        def fake_post_json(_base, path, body):
+            posts.append((path, body))
+            return {"imported": 1, "points": 1}
+
+        with patch.object(self.live_routes, "_get_text", lambda *_a: self._LIVE_REGISTER_CSV), patch.object(
+            self.live_routes, "_post_json", fake_post_json
+        ):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        summary = response.json()
+        self.assertEqual(summary["import_type"], "mqtt_scanner_register")
+        self.assertEqual(summary["accepted_rows"], 1)
+        # Scoped to the held session, never to anything the browser sent.
+        self.assertEqual(summary["project_id"], "proj")
+        self.assertEqual(summary["site_id"], "site")
+
+        # The ACCEPTED rows are re-pushed so the live tree recolours without a
+        # reconnect: one /api/register POST carrying the round-tripped CSV.
+        self.assertEqual([path for path, _ in posts], ["/api/register"])
+        pushed = posts[0][1]["csv"]
+        self.assertEqual(pushed.splitlines()[0], self._LIVE_REGISTER_HEADER)
+        self.assertIn("AHU-1", pushed)
+        self.assertIn("supply_air_temp", pushed)
+
+    def test_save_as_register_with_an_empty_live_snapshot_is_409(self) -> None:
+        session = self._acquire()
+        header_only = self._LIVE_REGISTER_HEADER + "\r\n"
+        pushes: list = []
+        with patch.object(self.live_routes, "_get_text", lambda *_a: header_only), patch.object(
+            self.live_routes, "_post_json", lambda *args: pushes.append(args)
+        ):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("not discovered any assets", response.json()["detail"])
+        # No empty register reaches the sidecar (it would clear the live matches).
+        self.assertEqual(pushes, [])
+
+    def _ceremony_lock_is_held_elsewhere(self) -> bool:
+        """True when some OTHER thread holds the ceremony lock right now.
+
+        The lock is reentrant (connect() releases the lease from inside its own
+        ceremony), so a same-thread ``acquire(False)`` always succeeds and proves
+        nothing. Probe from a throwaway thread instead.
+        """
+        lock = self.live_routes._connect_ceremony_lock
+        seen: list[bool] = []
+
+        def probe() -> None:
+            got = lock.acquire(False)
+            if got:
+                lock.release()
+            seen.append(not got)
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join(5)
+        return seen[0]
+
+    def test_save_as_register_holds_the_ceremony_lock_across_read_import_and_push(self) -> None:
+        # A take-over must not be able to land between the lease check and the
+        # import: that would persist a register for a session the caller no longer
+        # holds, and _bind_scanner_register would freeze it into the next capture.
+        # connect() acquires the lease inside this same lock, so proving the lock
+        # is held for the whole sequence proves the sequence is non-interleavable.
+        session = self._acquire()
+        held: list[bool] = []
+
+        def record_lock_state(*_a, **_kw):
+            held.append(self._ceremony_lock_is_held_elsewhere())
+            return self._LIVE_REGISTER_CSV
+
+        def push(*_a):
+            held.append(self._ceremony_lock_is_held_elsewhere())
+            return {"imported": 1}
+
+        with patch.object(self.live_routes, "_get_text", record_lock_state), patch.object(
+            self.live_routes, "_post_json", push
+        ):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        # The sidecar read AND the push both ran with the ceremony lock held, so
+        # the create_import between them did too.
+        self.assertEqual(held, [True, True])
+
+    def _blocking_save(self):
+        """Start a save in a worker thread and pause it inside the ceremony.
+
+        Returns ``(session, thread, resume, result)``: the save blocks in its
+        sidecar read until ``resume`` is set, so another request can be raced
+        against a ceremony that is genuinely mid-flight.
+        """
+        entered = threading.Event()
+        resume = threading.Event()
+        result: dict = {}
+
+        def read(*_a, **_kw):
+            entered.set()
+            resume.wait(10)
+            return self._LIVE_REGISTER_CSV
+
+        session = self._acquire()
+
+        def run() -> None:
+            with patch.object(self.live_routes, "_get_text", read), patch.object(
+                self.live_routes, "_post_json", lambda *_a: {"imported": 1}
+            ):
+                response = self.client.post(
+                    "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                    json={"session_id": session.session_id},
+                )
+            result["status"] = response.status_code
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        self.assertTrue(entered.wait(10), "the save never reached its sidecar read")
+        return session, thread, resume, result
+
+    def test_a_stop_during_a_pending_save_waits_for_the_save_to_finish(self) -> None:
+        # Operator Stop goes through live_service.release(), which now takes the
+        # ceremony lock: it cannot clear the lease mid-save. This is the honest
+        # outcome - the save completes and THEN the Stop lands, rather than the
+        # save 409ing.
+        session, save_thread, resume, save_result = self._blocking_save()
+        stop_result: dict = {}
+
+        def stop() -> None:
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/disconnect",
+                json={"session_id": session.session_id},
+            )
+            stop_result["released"] = response.json()["released"]
+
+        stop_thread = threading.Thread(target=stop)
+        stop_thread.start()
+        stop_thread.join(0.5)
+        # Still blocked on the ceremony, and the lease is still the save's.
+        self.assertTrue(stop_thread.is_alive(), "Stop cleared the session mid-save")
+        self.assertIsNotNone(self.live_service.current())
+
+        resume.set()
+        save_thread.join(10)
+        stop_thread.join(10)
+        self.assertEqual(save_result["status"], 200)
+        self.assertTrue(stop_result["released"])
+        self.assertIsNone(self.live_service.current())
+
+    def test_a_capture_start_during_a_pending_save_cannot_interleave_its_register_push(self) -> None:
+        # The full interleave the ceremony lock exists to stop: a save is pending,
+        # the operator hits Stop, and a capture starts. The capture lane's guard is
+        # "no live session held", so if the Stop could clear the lease mid-save the
+        # capture would be admitted and would push its own register and connect
+        # while the save's push was still in flight - and would then compare
+        # against a register other than the one frozen in its run parameters.
+        session, save_thread, resume, save_result = self._blocking_save()
+        try:
+            stop_thread = threading.Thread(
+                target=lambda: self.client.post(
+                    "/api/v1/discovery/mqtt_sidecar/live/disconnect",
+                    json={"session_id": session.session_id},
+                )
+            )
+            stop_thread.start()
+            stop_thread.join(0.5)  # long enough for an unguarded release to land
+
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/runs",
+                json={
+                    "project_id": "proj",
+                    "site_id": "site",
+                    "job_type": "mqtt_scanner",
+                    "parameters": {"authorized": True},
+                },
+            )
+            # Refused before any run is created, so no capture engine ever runs.
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertIn("live session is open", response.json()["detail"])
+        finally:
+            resume.set()
+            save_thread.join(10)
+            stop_thread.join(10)
+        self.assertEqual(save_result["status"], 200)
+
+    def test_save_as_register_is_409_before_anything_is_imported_when_taken_over(self) -> None:
+        # The lease check is the first thing inside the lock, so a stale session
+        # never reaches create_import: no orphan register is left behind.
+        session = self._acquire()
+        self._acquire(owner="someone-else", take_over=True)  # take over the lease
+        reads: list = []
+        with patch.object(self.live_routes, "_get_text", lambda *_a: reads.append(_a) or ""), patch.object(
+            self.live_routes, "_post_json", lambda *_a: {"imported": 0}
+        ):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(reads, [])
+
+    def test_save_as_register_is_502_when_accepted_rows_cannot_be_read_back(self) -> None:
+        # accepted_rows > 0 but nothing reads back (a missing or unreadable store;
+        # _load_register_rows swallows that into []). Returning 200 here would let
+        # the UI claim the live tree now compares against a register it never got.
+        session = self._acquire()
+        pushes: list = []
+        with patch.object(self.live_routes, "_get_text", lambda *_a: self._LIVE_REGISTER_CSV), patch.object(
+            self.live_routes, "_load_register_rows", lambda *_a: []
+        ), patch.object(self.live_routes, "_post_json", lambda *args: pushes.append(args)):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+        self.assertEqual(response.status_code, 502, response.text)
+        detail = response.json()["detail"]
+        self.assertIn("was saved as import imp_", detail)
+        self.assertIn("could not be read back", detail)
+        # Nothing was pushed, so the sidecar's existing register is untouched.
+        self.assertEqual(pushes, [])
+
+    def test_save_as_register_never_pushes_an_empty_register_back(self) -> None:
+        # A row the import rejects must not be re-pushed, but an ALL-rejected
+        # import must not clear the sidecar either: a header-only CSV wipes every
+        # matched flag in the live tree. Asset-or-Topic is the one-of rule, so a
+        # row with neither is rejected.
+        session = self._acquire()
+        all_rejected = self._LIVE_REGISTER_HEADER + '\r\n"","","","supply_air_temp","","","","","",""\r\n'
+        pushes: list = []
+        with patch.object(self.live_routes, "_get_text", lambda *_a: all_rejected), patch.object(
+            self.live_routes, "_post_json", lambda *args: pushes.append(args)
+        ):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["accepted_rows"], 0)
+        self.assertEqual(pushes, [])
+
+    def test_save_as_register_with_a_stale_session_is_409(self) -> None:
+        response = self.client.post(
+            "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+            json={"session_id": "not-current"},
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+
+    def test_save_as_register_reports_the_import_id_when_the_re_push_fails(self) -> None:
+        # The register IS saved; only the live recolour failed. The message has to
+        # say so, or the operator saves a second copy of the same register.
+        session = self._acquire()
+
+        def dead_sidecar(*_a):
+            raise OSError("connection reset")
+
+        with patch.object(self.live_routes, "_get_text", lambda *_a: self._LIVE_REGISTER_CSV), patch.object(
+            self.live_routes, "_post_json", dead_sidecar
+        ):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/save-as-register",
+                json={"session_id": session.session_id},
+            )
+        self.assertEqual(response.status_code, 502, response.text)
+        detail = response.json()["detail"]
+        self.assertIn("was saved as import imp_", detail)
+        self.assertIn("Reconnect", detail)
 
     # -- stream relay ---------------------------------------------------------
 

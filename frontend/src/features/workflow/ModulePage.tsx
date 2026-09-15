@@ -42,6 +42,10 @@ import {
   getReportDownloadPath,
   getBacnetExportAssetsPath,
   getRawEvidenceDownloadPath,
+  getScanRegisterCsvPath,
+  scanRegisterRunIdFromFileName,
+  saveMqttLiveAsRegister,
+  type ScanRegisterRoute,
   getSystemInterfaces,
   REPORTS_EXPORT_PATH,
   getUdmiSchemaTemplatePath,
@@ -87,6 +91,13 @@ import {
   type ScanAuthorizationV1,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
+import {
+  buildDiscoveryParameters,
+  resolveBacnetInstanceRange,
+  scanPortSpecification,
+  type IPDiscoveryProvider,
+  type ScanPort,
+} from "./buildDiscoveryParameters";
 import { MqttFocusedDetail } from "./MqttFocusedDetail";
 import { MqttLiveTopicTree } from "./MqttLiveTopicTree";
 import { MqttPublishModal } from "./MqttPublishModal";
@@ -141,6 +152,13 @@ import type { RunRef, SessionScopeId, WorkspaceRef } from "../../app/sessionScop
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { isPlainObject } from "../../utils/isPlainObject";
 
+// The parameter builder moved to its own module so the scanner pages can start a
+// run without importing this 11k-line component. Re-exported here so
+// buildDiscoveryParameters.test.ts (and any other existing import of the symbol
+// from ModulePage) keeps resolving.
+// eslint-disable-next-line react-refresh/only-export-components -- pure param builder re-export; it renders nothing.
+export { buildDiscoveryParameters };
+
 const BACNET_PROPERTY_OPTIONS: readonly BacnetPropertyName[] = [
   "object_name",
   "present_value",
@@ -188,7 +206,6 @@ import {
   formatBacnetRouters,
   formatBacnetSidecarSummaryCards,
   formatMqttSidecarSummaryCards,
-  serializeIpTargetRows,
   type IpTargetRow,
   type IpHeadlineMetricDisplay,
   type IpSidecarSummaryCard,
@@ -266,13 +283,6 @@ function sameRunAccessScope(
       left.workspaceRef.siteId === right.workspaceRef.siteId,
   );
 }
-
-type ScanPort = {
-  port: string;
-  protocol: "tcp" | "udp";
-};
-
-type IPDiscoveryProvider = "builtin_tcp_connect" | "operator_managed_nmap";
 
 const NMAP_PROFILE_LABELS: Record<NmapProfileName, string> = {
   tcp_connect_inventory: "TCP connect inventory",
@@ -476,12 +486,38 @@ function provisionalDiscoveryViewFor(
   if (!view) {
     return null;
   }
+  // Pair each row with its observation by the row's OWN identity, never by
+  // position: bacnetRowsFromResults can append rows (expected-but-silent
+  // devices) that correspond to no projected record, so row index and
+  // `projected` index are not guaranteed to line up. The per-entry view keeps
+  // both sides on the same row builder, so the signature can never drift from
+  // what discoveryRowEntitySignature reads off the real row.
+  // ponytail: rebuilds one tiny view per observation; the progressive fold is
+  // capped at MAX_PROGRESSIVE_DEVICE_OBSERVATIONS (500), so this is bounded.
+  const entityKeyBySignature = new Map<string, string>();
+  for (const entry of projected) {
+    const single = discoveryViewFor(route, {
+      ...results,
+      discovered_assets:
+        route === "ip-scanner-sct" ? [projectedIpAsset(entry)] : [],
+      devices: [entry.record],
+    });
+    const signature = single?.rows[0]
+      ? discoveryRowEntitySignature(route, single.rows[0])
+      : null;
+    if (signature !== null && !entityKeyBySignature.has(signature)) {
+      entityKeyBySignature.set(signature, entry.entityKey);
+    }
+  }
   return {
     ...view,
-    rows: view.rows.map<Record<string, string>>((row, index) => ({
-      ...row,
-      __entityKey: projected[index]?.entityKey ?? "",
-    })),
+    rows: view.rows.map<Record<string, string>>((row) => {
+      const signature = discoveryRowEntitySignature(route, row);
+      return {
+        ...row,
+        __entityKey: (signature !== null && entityKeyBySignature.get(signature)) || "",
+      };
+    }),
   };
 }
 
@@ -636,6 +672,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // operator inputs (e.g. IP range) and deliberately drop the dry-run preview
   // step the sealed lanes use — true whether the lane renders native or embedded.
   const isSidecarDiscoveryModule = SIDECAR_DISCOVERY_ROUTES.has(module.route);
+  // The three lanes whose finished run can be saved as, and downloaded as, a register.
+  const scanRegisterRoute: ScanRegisterRoute | null =
+    module.route === "ip-scanner" || module.route === "bacnet-scanner" || module.route === "mqtt-scanner"
+      ? module.route
+      : null;
   const requestedRunId = searchParams.get("run")?.trim() || null;
   const comparisonRunId = searchParams.get("compare")?.trim() || null;
   const setScopedRunUrl = useCallback(
@@ -807,7 +848,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     null,
   );
   // ip-scanner "save scan as register" outcome, cleared when a new run starts.
-  const [savedRegister, setSavedRegister] = useState<ImportBatchSummary | null>(null);
+  // The run id travels WITH the summary: the register CSV download is rebuilt
+  // from the run that was saved, and reading it off the mutable `activeRun`
+  // would hand run B's id to a download labelled with run A's file name.
+  const [savedRegister, setSavedRegister] = useState<{
+    runId: string;
+    summary: ImportBatchSummary;
+  } | null>(null);
   // mqtt-scanner live topic tree: the live search box (filters server-side).
   const [mqttLiveSearch, setMqttLiveSearch] = useState("");
   // GAP-M4: matched-only toggle applied to the same server-side search endpoint.
@@ -913,6 +960,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // GAP-M6: the MQTT capture's raw export-archive ZIP, attached to the run as raw
   // evidence during the capture and served by the shared raw-evidence route.
   const mqttArchiveDownload = useFileDownload(apiClient);
+  // "Save scan as register" imports the register but writes no file; this serves
+  // the same bytes back as a CSV the operator can keep.
+  const registerCsvDownload = useFileDownload(apiClient);
   const schemaTemplateDownload = useFileDownload(apiClient);
   const activeRunMatchesReservedLiveSubmission = Boolean(
     activeRun &&
@@ -1870,6 +1920,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       ),
     queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef, selectedImportType),
   });
+  // A register on file that came from "Save scan as register" names the run that
+  // produced it, so the same CSV can be downloaded again; an uploaded register
+  // (or one saved from a live session) has no run to rebuild it from.
+  const latestRegisterCsvFileName = latestImportQuery.data?.file_name ?? "";
+  const latestRegisterCsvRunId = scanRegisterRoute
+    ? scanRegisterRunIdFromFileName(scanRegisterRoute, latestRegisterCsvFileName)
+    : null;
 
   // Run retention: the page state is wiped on every navigation, so arriving at a
   // head used to look like nothing had ever run there. Ask the run store for
@@ -2369,7 +2426,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       // Refresh the "already imported" note so it reflects this upload the next
       // time the file input is empty (ISSUE-5).
       void queryClient.invalidateQueries({
-        queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef),
+        queryKey: queryKeys.latestImportRoot(sessionScopeId, workspaceRef),
       });
       // Default accepted MQTT registers to uploaded-row validation against live
       // broker payloads; both options remain editable.
@@ -2790,11 +2847,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         : module.route === "mqtt-scanner"
           ? saveMqttScanRunAsRegister({ context: { client: apiClient }, runId })
           : saveIpScanRunAsRegister({ context: { client: apiClient }, runId }),
-    onSuccess: (summary) => {
-      setSavedRegister(summary);
+    onSuccess: (summary, runId) => {
+      // A save that resolves after the operator switched runs must not repopulate
+      // the panel the run-change effect just cleared: the note would describe run
+      // A while the page shows run B.
+      if (runId === activeRunRef.current) {
+        setSavedRegister({ runId, summary });
+      }
       // Mirror importMutation.onSuccess: refresh the "register on file" note.
       void queryClient.invalidateQueries({
-        queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef),
+        queryKey: queryKeys.latestImportRoot(sessionScopeId, workspaceRef),
       });
     },
   });
@@ -2802,6 +2864,24 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   useEffect(() => {
     setSavedRegister(null);
   }, [activeRun?.runId, activeRun?.epoch]);
+
+  // Read by saveRegisterMutation.onSuccess so a late save is compared against the
+  // run on screen NOW, not the one that was active when the mutation was issued.
+  const activeRunRef = useRef(activeRun?.runId);
+  activeRunRef.current = activeRun?.runId;
+
+  // The live explorer's own save-as-register. A sibling of saveRegisterMutation
+  // rather than a reuse: this one is scoped to the held session, not to a run,
+  // so its result must not claim a run's register CSV is downloadable.
+  const saveLiveRegisterMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.save-live-register`),
+    mutationFn: (sessionId: string) => saveMqttLiveAsRegister({ context: { client: apiClient }, sessionId }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.latestImportRoot(sessionScopeId, workspaceRef),
+      });
+    },
+  });
 
   const propertyLiveMutation = useMutation({
     mutationFn: ({
@@ -3623,11 +3703,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
 
-  // GAP-C2 (BACnet): the native BACnet sidecar lane's four-card summary strip.
-  // The sidecar engine records its totals directly on result_summary
-  // (devices_discovered / points_exported / register_matches / register_rogue),
-  // not the sealed bacnet_headline_metrics_v1 snapshot, so bacnetHeadlineMetrics
-  // above is null here; read them straight. Gated to a terminal bacnet-scanner run.
+  // GAP-C2 (BACnet): the native BACnet sidecar lane's six-card summary strip
+  // (register_expected / devices_discovered / register_matches / register_partial
+  // / register_missing / register_rogue). The sidecar engine records its totals
+  // directly on result_summary, not the sealed bacnet_headline_metrics_v1
+  // snapshot, so bacnetHeadlineMetrics above is null here; read them straight.
+  // Gated to a terminal bacnet-scanner run.
   const bacnetSidecarSummaryCards = useMemo<IpSidecarSummaryCard[] | null>(() => {
     if (module.route !== "bacnet-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
       return null;
@@ -3677,6 +3758,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     { workspace: workspaceRef, authorized: scanAuthorized, rootFilter: captureTopicFilter.trim() || undefined },
     apiClient,
   );
+
+  // saveLiveRegisterMutation's panel reports what THIS session saved. A new
+  // session (or a stop) makes that claim stale, so clear it with the session
+  // identity rather than letting a previous session's "Saved as register" note
+  // sit over a fresh tree.
+  const liveSessionId = mqttLive.session?.session_id ?? null;
+  const resetLiveRegisterSave = saveLiveRegisterMutation.reset;
+  useEffect(() => {
+    resetLiveRegisterSave();
+  }, [liveSessionId, resetLiveRegisterSave]);
 
   // BACnet-only provenance: read result_summary.backend so simulated sample
   // devices are never mistaken for a real on-wire scan. Null for other routes
@@ -4003,13 +4094,24 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             { label: "Not observed this run", value: "offline" },
             { label: "No verdict", value: "none" },
           ]
-        : [
-            { label: "All verdicts", value: "all" },
-            { label: "Pass", value: "pass" },
-            { label: "Fail", value: "fail" },
-            { label: "Warn", value: "warn" },
-            { label: "No verdict", value: "none" },
-          ];
+        : // The native IP/BACnet scanners tone their rows from the register
+          // verdict, so the filter names the verdict rather than the tone.
+          // Missing and Rogue share the red tone and so share one option.
+          module.route === "ip-scanner" || module.route === "bacnet-scanner"
+          ? [
+              { label: "All verdicts", value: "all" },
+              { label: "Match", value: "pass" },
+              { label: "Partial", value: "warn" },
+              { label: "Missing / Rogue", value: "fail" },
+              { label: "No verdict", value: "none" },
+            ]
+          : [
+              { label: "All verdicts", value: "all" },
+              { label: "Pass", value: "pass" },
+              { label: "Fail", value: "fail" },
+              { label: "Warn", value: "warn" },
+              { label: "No verdict", value: "none" },
+            ];
 
   // Keep the selected row inside the FILTERED view: if the active selection is
   // filtered out, move it to the first visible row's ORIGINAL index so the
@@ -5027,6 +5129,35 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         {formatRelativeTime(latestImportQuery.data.created_at)}. This register is
                         stored and used by runs on this page; upload again only if the file changed.
                       </span>
+                      {/* A register saved from a scan has no file the operator ever
+                        held; the run it came from can still rebuild the same CSV. */}
+                      {scanRegisterRoute && latestRegisterCsvRunId && (
+                        <button
+                          className="secondary-button compact"
+                          disabled={registerCsvDownload.pendingKey !== null}
+                          onClick={() => {
+                            void registerCsvDownload.download({
+                              fallbackFilename: latestRegisterCsvFileName,
+                              key: "latest-register-csv",
+                              path: getScanRegisterCsvPath(scanRegisterRoute, latestRegisterCsvRunId),
+                            });
+                          }}
+                          type="button"
+                        >
+                          {registerCsvDownload.pendingKey === "latest-register-csv"
+                            ? "Downloading..."
+                            : "Download register CSV"}
+                        </button>
+                      )}
+                      {/* The link is offered on a file-name match, so a 404 here is
+                        the honest answer that the guess was wrong, not a fault. */}
+                      {registerCsvDownload.error && (
+                        <span className="field-note" role="alert">
+                          {registerCsvDownload.errorStatus === 404
+                            ? "This register was uploaded, so there is no scan behind it to rebuild the CSV from. Use your own copy of the file."
+                            : `Register CSV download failed: ${registerCsvDownload.error}`}
+                        </span>
+                      )}
                     </div>
                   )}
 
@@ -6422,8 +6553,49 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     >
                       Publish message…
                     </button>
+                    <button
+                      className="secondary-button compact"
+                      disabled={!canEngineer || !mqttLive.session || saveLiveRegisterMutation.isPending}
+                      onClick={() => {
+                        const sessionId = mqttLive.session?.session_id;
+                        if (sessionId) {
+                          saveLiveRegisterMutation.mutate(sessionId);
+                        }
+                      }}
+                      title={
+                        canEngineer
+                          ? "Turn the assets this live session has discovered into an expected-asset MQTT register. It is stored here, applied automatically to the next capture for this project and site, and pushed back so the tree below recolours now."
+                          : ENGINEER_REQUIRED_TOOLTIP
+                      }
+                      type="button"
+                    >
+                      {saveLiveRegisterMutation.isPending ? "Saving register..." : "Save as register"}
+                    </button>
                   </div>
                 </div>
+                {saveLiveRegisterMutation.isSuccess && saveLiveRegisterMutation.data && (
+                  <div className="state-panel success" role="status">
+                    <strong>Saved as register</strong>
+                    <span>
+                      {saveLiveRegisterMutation.data.accepted_rows} of{" "}
+                      {saveLiveRegisterMutation.data.total_rows} rows accepted (
+                      {saveLiveRegisterMutation.data.import_id}).{" "}
+                      {saveLiveRegisterMutation.data.accepted_rows > 0
+                        ? "The live tree now compares against it, and so will the next MQTT capture for this project and site."
+                        : "No row was accepted, so nothing changed here and the next capture will not use this import."}
+                    </span>
+                  </div>
+                )}
+                {saveLiveRegisterMutation.isError && (
+                  <div className="state-panel error" role="alert">
+                    <strong>Save as register failed</strong>
+                    <span>
+                      {saveLiveRegisterMutation.error instanceof Error
+                        ? saveLiveRegisterMutation.error.message
+                        : "The register could not be created."}
+                    </span>
+                  </div>
+                )}
                 {mqttPublishOpen && (
                   <MqttPublishModal
                     apiClient={apiClient}
@@ -7398,11 +7570,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       onClick={() => activeRun && saveRegisterMutation.mutate(activeRun.runId)}
                       title={
                         canEngineer
-                          ? module.route === "bacnet-scanner"
-                            ? "Turn this scan's discovered devices into an expected-device register (their reported object counts become the expected objects)."
-                            : module.route === "mqtt-scanner"
-                              ? "Turn this capture's discovered assets into an expected-asset MQTT register (one row per asset, with its topic, schema, site and location)."
-                              : "Turn this scan's responding devices into an expected-device register (their open ports become the expected ports)."
+                          ? `${
+                              module.route === "bacnet-scanner"
+                                ? "Turn this scan's discovered devices into an expected-device register (their reported object counts become the expected objects)."
+                                : module.route === "mqtt-scanner"
+                                  ? "Turn this capture's discovered assets into an expected-asset MQTT register (one row per asset, with its topic, schema, site and location)."
+                                  : "Turn this scan's responding devices into an expected-device register (their open ports become the expected ports)."
+                            } It is stored here and applied automatically to the next scan for this project and site; no file is uploaded, and you can download it as a CSV afterwards.`
                           : ENGINEER_REQUIRED_TOOLTIP
                       }
                       type="button"
@@ -7484,25 +7658,42 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </div>
               </div>
 
-              {(module.route === "ip-scanner" ||
-                module.route === "bacnet-scanner" ||
-                module.route === "mqtt-scanner") &&
-                savedRegister && (
-                  <div className="state-panel success" role="status">
-                    <strong>Saved as register</strong>
-                    <span>
-                      {savedRegister.file_name}: {savedRegister.accepted_rows} of{" "}
-                      {savedRegister.total_rows} rows accepted ({savedRegister.import_id}). The next{" "}
-                      {module.route === "bacnet-scanner"
-                        ? "BACnet"
-                        : module.route === "mqtt-scanner"
-                          ? "MQTT"
-                          : "IP"}{" "}
-                      {module.route === "mqtt-scanner" ? "capture" : "Discovery run"} for this project
-                      and site will compare against it.
-                    </span>
-                  </div>
-                )}
+              {scanRegisterRoute && savedRegister && savedRegister.runId === activeRun?.runId && (
+                <div className="state-panel success" role="status">
+                  <strong>Saved as register</strong>
+                  <span>
+                    {savedRegister.summary.file_name}: {savedRegister.summary.accepted_rows} of{" "}
+                    {savedRegister.summary.total_rows} rows accepted (
+                    {savedRegister.summary.import_id}). It is stored
+                    here and applies automatically to the next{" "}
+                    {scanRegisterRoute === "bacnet-scanner"
+                      ? "BACnet"
+                      : scanRegisterRoute === "mqtt-scanner"
+                        ? "MQTT"
+                        : "IP"}{" "}
+                    {scanRegisterRoute === "mqtt-scanner" ? "capture" : "Discovery run"} for this
+                    project and site. There is nothing to upload. Keep a copy if you want one:
+                  </span>
+                  <button
+                    className="secondary-button compact"
+                    disabled={registerCsvDownload.pendingKey !== null}
+                    onClick={() => {
+                      void registerCsvDownload.download({
+                        fallbackFilename: savedRegister.summary.file_name,
+                        key: "register-csv",
+                        // The run that was SAVED, so the file and the URL always
+                        // describe the same run.
+                        path: getScanRegisterCsvPath(scanRegisterRoute, savedRegister.runId),
+                      });
+                    }}
+                    type="button"
+                  >
+                    {registerCsvDownload.pendingKey === "register-csv"
+                      ? "Downloading..."
+                      : "Download register CSV"}
+                  </button>
+                </div>
+              )}
               {(module.route === "ip-scanner" ||
                 module.route === "bacnet-scanner" ||
                 module.route === "mqtt-scanner") &&
@@ -7528,11 +7719,19 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <span>{mqttArchiveDownload.error}</span>
                 </div>
               )}
+              {scanRegisterRoute && registerCsvDownload.error && (
+                <div className="state-panel error" role="alert">
+                  <strong>Register CSV download failed</strong>
+                  <span>{registerCsvDownload.error}</span>
+                </div>
+              )}
 
               {usingLiveResults && (
                 <div className="sample-banner" role="note">
                   {isDiscoveryModule ? (
-                    module.route === "ip-scanner" || module.route === "ip-scanner-sct" ? (
+                    module.route === "ip-scanner" ? (
+                      'Live discovery observations. With a register uploaded, the Result column reports this scan’s register verdict — a red "Missing" row is a host the register expects that did not answer, and a red "Rogue" row answered but is not in the register. Silence is inconclusive: a TCP-connect miss is not proof a host is absent.'
+                    ) : module.route === "ip-scanner-sct" ? (
                       'Live discovery observations. The Result column reports this scan’s response and register-port verdicts; "no response on scanned ports" is inconclusive — a TCP-connect miss is not proof a host is absent.'
                     ) : (module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct") &&
                       discoveryResultsQuery.data?.register_comparison ? (
@@ -7550,11 +7749,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       ) : (
                         "No accepted MQTT register import for this project/site — upload one to compare observed topics against the template."
                       )
+                    ) : module.route === "bacnet-scanner" ? (
+                      'Live discovery observations. With a register uploaded, the Result column reports this scan’s register verdict — a red "Missing" row is a device the register expects that answered no Who-Is, and a red "Rogue" row answered but is not in the register.'
                     ) : (
-                      // No register comparison available (non-MQTT discovery, or an
-                      // MQTT run that observed nothing / has no register): the
-                      // discovery table shows observations, and register verdicts are
-                      // otherwise produced by validation.
+                      // No register comparison available (the built-in discovery
+                      // lanes, or an MQTT run that observed nothing / has no
+                      // register): the discovery table shows observations, and
+                      // register verdicts are produced by validation.
                       'Live discovery observations. Register-comparison verdicts (matched / rogue / missing) are produced by validation, not discovery, so no "Result" column is shown here.'
                     )
                   ) : (
@@ -7735,7 +7936,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <div className="empty-workspace">
                     <strong>No rows match the current filters</strong>
                     <span>
-                      Adjust or clear the filters to see the {resultRows.length} captured{" "}
+                      {/* "rows", not "captured rows": the scanner tables now also
+                      carry expected-but-silent rows, which were never captured
+                      from the wire — the register says they should exist. */}
+                      Adjust or clear the filters to see the {resultRows.length}{" "}
                       {resultRows.length === 1 ? "row" : "rows"}.
                     </span>
                   </div>
@@ -9984,227 +10188,6 @@ function udmiResultsEmptyState(input: {
   };
 }
 
-function scanPortSpecification(ports: ScanPort[]): string {
-  return ports
-    .map((entry) => ({ port: entry.port.trim(), protocol: entry.protocol }))
-    .filter((entry) => entry.port)
-    .map((entry) => `${entry.port}/${entry.protocol}`)
-    .join(", ");
-}
-
-// BACnet device-instance bounds (0 .. 2^22-1). A device-instance range is
-// pair-or-neither: the vendored scanner sends a bounded Who-Is only when BOTH
-// low and high arrive; a lone bound falls through to a global Who-Is. So a
-// half-filled or invalid range must never reach the wire (it would silently
-// degrade to "scan everything" while the UI showed the operator's bound as
-// accepted). One rule, shared by the builder and the Run gate.
-const BACNET_INSTANCE_MIN = 0;
-const BACNET_INSTANCE_MAX = 4_194_303;
-
-function resolveBacnetInstanceRange(
-  lowRaw: string | undefined,
-  highRaw: string | undefined,
-): { low?: number; high?: number; error: string | null } {
-  const lo = (lowRaw ?? "").trim();
-  const hi = (highRaw ?? "").trim();
-  if (lo === "" && hi === "") {
-    return { error: null }; // both blank -> global Who-Is (the sidecar default)
-  }
-  const low = Number(lo);
-  const high = Number(hi);
-  const valid =
-    lo !== "" &&
-    hi !== "" &&
-    Number.isInteger(low) &&
-    Number.isInteger(high) &&
-    low >= BACNET_INSTANCE_MIN &&
-    high <= BACNET_INSTANCE_MAX &&
-    low <= high;
-  if (!valid) {
-    return {
-      error:
-        "Enter both bounds or leave both blank. Low must be a whole number no greater than high, within 0 to 4194303.",
-    };
-  }
-  return { low, high, error: null };
-}
-
-// Builds discovery run parameters, attaching the authorization contract for
-// real scans and the dry_run flag for previews. IP scans also carry the port
-// specification. Mirrors the backend safety contract (parameters.authorized).
-// eslint-disable-next-line react-refresh/only-export-components -- pure param builder exported for buildDiscoveryParameters.test.ts; it renders nothing.
-export function buildDiscoveryParameters(
-  action: Extract<ModuleRunAction, { kind: "discovery" }>,
-  options: {
-    authorized: boolean;
-    dryRun: boolean;
-    scanPorts: ScanPort[];
-    targetRows?: IpTargetRow[];
-    exclusionRows?: IpTargetRow[];
-    provider?: IPDiscoveryProvider;
-    nmapProfile?: NmapProfileName;
-    captureTopicFilter?: string;
-    captureSeconds?: string;
-    target?: string;
-    scanRangeStart?: string;
-    scanRangeEnd?: string;
-    probeTimeout?: string;
-    ignoreRegister?: boolean;
-    bacnetInstanceLow?: string;
-    bacnetInstanceHigh?: string;
-    bacnetDiscoverMs?: string;
-  },
-): Record<string, unknown> {
-  const parameters: Record<string, unknown> = {};
-  if (options.dryRun) {
-    parameters.dry_run = true;
-  } else {
-    // Boolean shorthand only — the backend stamps the real authenticated
-    // principal, so the frontend never fabricates a scan_authorization block.
-    parameters.authorized = options.authorized;
-  }
-  if (action.runKind === "ip") {
-    parameters.provider = options.provider ?? "builtin_tcp_connect";
-    if (parameters.provider === "operator_managed_nmap") {
-      parameters.nmap_profile = options.nmapProfile ?? "tcp_connect_inventory";
-    }
-    if (
-      parameters.provider !== "operator_managed_nmap" ||
-      options.nmapProfile !== "host_discovery"
-    ) {
-      parameters.port_specification = scanPortSpecification(options.scanPorts);
-    }
-    const targetRows = options.targetRows ?? [];
-    const exclusionRows = options.exclusionRows ?? [];
-    if (targetRows.length > 0 || exclusionRows.length > 0) {
-      const expressions = serializeIpTargetRows(targetRows, exclusionRows);
-      parameters.target_expressions = expressions.target_expressions;
-      parameters.exclusions = expressions.exclusions;
-      // A register-driven scan may still carry exclusions. The backend requires
-      // this explicit opt-in before it expands registered addresses, rather than
-      // treating an empty target editor as permission to scan them.
-      if (expressions.target_expressions.length === 0) {
-        parameters.use_register_addresses = true;
-      }
-      return parameters;
-    }
-    // Compatibility fallback for existing deep links and saved drafts. A blank
-    // target list deliberately scans the imported IP register, but the backend
-    // requires that intent on the wire before it will expand those addresses.
-    const target = options.target?.trim();
-    if (target) {
-      if (target.includes("/")) {
-        parameters.cidr = target;
-      } else if (target.includes("-")) {
-        // Split once on the first "-" so the operator's input reaches the
-        // backend intact (JS split(limit) would drop any trailing segment).
-        const dash = target.indexOf("-");
-        parameters.start = target.slice(0, dash).trim();
-        parameters.end = target.slice(dash + 1).trim();
-      } else {
-        parameters.addresses = [target];
-      }
-    } else {
-      parameters.use_register_addresses = true;
-    }
-  }
-  // IP sidecar lane: forward the operator's target range as start_ip / end_ip
-  // (the adapter's _scan_query accepts either start_ip/end_ip or start/end and
-  // requires a start). A blank end scans from start; a blank start reaches the
-  // adapter's honest "No scan range was provided" failure rather than a silent
-  // register-only scan.
-  if (action.runKind === "ip_sidecar") {
-    const start = options.scanRangeStart?.trim();
-    const end = options.scanRangeEnd?.trim();
-    if (start) {
-      parameters.start_ip = start;
-    }
-    if (end) {
-      parameters.end_ip = end;
-    }
-    // GAP-IP1: per-probe timeout (ms). Only a positive finite value goes on the
-    // wire; a blank or garbage field omits the key so the adapter's own default
-    // applies rather than a bogus timeout.
-    const timeout = Number((options.probeTimeout ?? "").trim());
-    if (Number.isFinite(timeout) && timeout > 0) {
-      parameters.timeout = timeout;
-    }
-    // GAP-C1: opt this run out of register RAG-comparison. The route's binder
-    // reads this and skips freezing a register in.
-    if (options.ignoreRegister) {
-      parameters.ignore_register = true;
-    }
-  }
-  // GAP-B1: BACnet sidecar lane. Forward the operator's device-instance range as
-  // low/high and the discovery window as discoverMs (the adapter's _scan_query
-  // reads exactly these keys). The range is a validated pair (see below); a blank
-  // range omits both keys so the sidecar's global Who-Is default applies.
-  // discoverMs is a duration (> 0) and stays per-key.
-  if (action.runKind === "bacnet_sidecar") {
-    // Pair-or-neither: emit low/high only as a validated range, otherwise omit
-    // BOTH. A lone or inverted bound would fall through to a global Who-Is on the
-    // sidecar while looking accepted. This also catches a saved draft or deep link
-    // carrying a half-filled range that never passed through the live Run gate.
-    const range = resolveBacnetInstanceRange(options.bacnetInstanceLow, options.bacnetInstanceHigh);
-    if (range.low !== undefined && range.high !== undefined) {
-      parameters.low = range.low;
-      parameters.high = range.high;
-    }
-    const discoverMs = Number((options.bacnetDiscoverMs ?? "").trim());
-    if (Number.isFinite(discoverMs) && discoverMs > 0) {
-      parameters.discoverMs = discoverMs;
-    }
-    // GAP-C1: opt this run out of register RAG-comparison, same as ip_sidecar.
-    if (options.ignoreRegister) {
-      parameters.ignore_register = true;
-    }
-  }
-  // MQTT discovery: forward the operator's topic filter and capture window so
-  // the engine subscribes to the requested topics for the requested duration
-  // (mq9nhbzu). The backend reads topic_filter + capture_seconds.
-  if (action.runKind === "mqtt") {
-    const filter = options.captureTopicFilter?.trim();
-    if (filter) {
-      parameters.topic_filter = filter;
-    }
-    // Blank => 0, the backend's "indefinite" sentinel: run until stopped (Stop
-    // run) or the message cap. A positive value is a bounded capture window.
-    // Anything else ("45s", "abc", "-5") is REJECTED at submit, mirroring the
-    // UDMI run-time path — silently coercing it to 0 would turn an intended
-    // bounded window into an unbounded background capture with no warning
-    // (mq9nhbzu). The thrown Error surfaces through the runMutation error panel.
-    const raw = (options.captureSeconds ?? "").trim();
-    const seconds = Number(raw);
-    if (raw !== "" && !(Number.isFinite(seconds) && seconds > 0)) {
-      throw new Error(
-        "Run time must be a positive number, or blank to capture until you press Stop run.",
-      );
-    }
-    parameters.capture_seconds = raw === "" ? 0 : seconds;
-  }
-  if (action.runKind === "mqtt_sidecar") {
-    // Sidecar capture lane: same operator inputs, bounded-capture semantics. The
-    // adapter reads topic_filter (a root-filter alias) and capture_seconds; blank
-    // omits the key so the engine's own defaults apply (# / 60s) — never a literal
-    // "#" or a 0-sentinel on the wire (this lane has no indefinite mode; its
-    // window is bounded 1-900s, clamped by the adapter).
-    const filter = options.captureTopicFilter?.trim();
-    if (filter) {
-      parameters.topic_filter = filter;
-    }
-    const raw = (options.captureSeconds ?? "").trim();
-    const seconds = Number(raw);
-    if (raw !== "" && !(Number.isFinite(seconds) && seconds > 0)) {
-      throw new Error(
-        "Run time must be a positive number, or blank for the 60-second default window.",
-      );
-    }
-    if (raw !== "") {
-      parameters.capture_seconds = seconds;
-    }
-  }
-  return parameters;
-}
 
 function buildUdmiValidationParameters(input: {
   captureSeconds: string;
@@ -10824,6 +10807,10 @@ function captureRowsToCsv(rows: CaptureRow[]): string {
 function useFileDownload(apiClient: SessionBoundApiClient) {
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The HTTP status behind `error`, so a caller can tell a real fault from an
+  // expected miss (e.g. a 404 on a download path offered on a heuristic) without
+  // pattern-matching the server's prose. null when the failure carried no status.
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const generationRef = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
 
@@ -10857,6 +10844,7 @@ function useFileDownload(apiClient: SessionBoundApiClient) {
       generationRef.current = generation;
       setPendingKey(key);
       setError(null);
+      setErrorStatus(null);
       try {
         const { blob, filename } = await downloadFile(path, init, {
           client: apiClient,
@@ -10869,6 +10857,7 @@ function useFileDownload(apiClient: SessionBoundApiClient) {
       } catch (cause) {
         if (generation === generationRef.current && !controller.signal.aborted && isCurrent()) {
           setError(cause instanceof Error ? cause.message : "Download failed.");
+          setErrorStatus(cause instanceof ApiError ? cause.status : null);
         }
       } finally {
         if (generation === generationRef.current) {
@@ -10886,9 +10875,10 @@ function useFileDownload(apiClient: SessionBoundApiClient) {
     controllerRef.current = null;
     setPendingKey(null);
     setError(null);
+    setErrorStatus(null);
   }, []);
 
-  return { download, error, pendingKey, reset };
+  return { download, error, errorStatus, pendingKey, reset };
 }
 
 function triggerBlobDownload(blob: Blob, filename: string): void {

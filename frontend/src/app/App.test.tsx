@@ -220,15 +220,42 @@ describe("App shell", () => {
     expect(await screen.findByText("ok")).toBeInTheDocument();
   });
 
-  it("titles the /ip-scanner page 'IP Discovery', matching its menu entry", async () => {
+  it("leaves the /ip-scanner title to the page so the head is named once", async () => {
     // The pageTitles h1 layer used to say "IP Scanner" while the menu said "IP
-    // Discovery" — the same head named two things on one screen.
+    // Discovery" — the same head named two things on one screen. The native
+    // scanner pages now carry their own eyebrow + title + purpose (the shared
+    // mockup's page head), so the shell must NOT also print its title there or
+    // the screen opens with "IP Discovery" twice. The title itself is asserted
+    // where it now lives, in IpScannerPage.test.tsx. Routes that do not own
+    // their title keep the shell heading (see /configuration below).
     stubDashboardFetch();
     renderApp({ path: "ip-scanner", initialEntry: "/ip-scanner" });
 
-    expect(screen.getByRole("heading", { level: 1, name: "IP Discovery" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "IP Discovery" })).toBeInTheDocument();
 
     // Settle the session query so nothing resolves after teardown.
+    expect(await screen.findByRole("button", { name: "Set API key" })).toBeInTheDocument();
+  });
+
+  it("leaves the /mqtt-scanner title to the page so the head is named once", async () => {
+    // Same contract as /ip-scanner: the native MQTT screen carries its own
+    // eyebrow + title + purpose, so the shell must not print a second h1.
+    stubDashboardFetch();
+    renderApp({ path: "mqtt-scanner", initialEntry: "/mqtt-scanner" });
+
+    expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "MQTT Discovery" })).toBeInTheDocument();
+
+    expect(await screen.findByRole("button", { name: "Set API key" })).toBeInTheDocument();
+  });
+
+  it("still prints the shell title on a route that does not own it", async () => {
+    stubDashboardFetch();
+    renderApp({ path: "configuration", initialEntry: "/configuration" });
+
+    expect(screen.getByRole("heading", { level: 1, name: "Configuration" })).toBeInTheDocument();
+
     expect(await screen.findByRole("button", { name: "Set API key" })).toBeInTheDocument();
   });
 
