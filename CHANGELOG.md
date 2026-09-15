@@ -7,6 +7,44 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- "Save scan as register" now offers the register back as a CSV file. A new
+  `register.csv` download on each scanner lane rebuilds the file from the same
+  run evidence the save used, so the copy you keep is byte-for-byte what the
+  save handed to the importer. Note that is the whole file, not the applied
+  register: a row the import rejects is in the CSV and is not compared against,
+  which is what makes the file useful for working out why a device is not being
+  matched. The link sits next to the "Saved as register" note and next to
+  "Register already imported" when that register came from a scan. The save
+  button and its note now also say plainly that the register is stored here and
+  applied automatically to the next scan for that project and site, with nothing
+  to upload.
+- The MQTT live explorer can save what it has discovered as a register without
+  waiting for a capture run to finish. "Save as register" turns the live assets
+  into an MQTT register, stores it for the next capture, and pushes it straight
+  back into the live view so matched assets recolour without reconnecting. It
+  refuses, and says so, when the session has not seen any assets yet; if the
+  register is stored but the live view cannot be refreshed, the message names
+  the import and tells you to reconnect rather than save a second copy. A
+  register saved this way has no CSV download, because there is no scan run
+  behind it to rebuild the file from; download one from a capture run instead.
+
+### Changed
+
+- Sending a config message to live equipment now asks for confirmation first.
+  On builds that do not enforce the preview-and-approval path, "Send to live
+  equipment" opens a confirm step showing the exact topic, QoS, retain flag and
+  payload, with Cancel and "Send to device". Nothing is published until "Send to
+  device" is pressed. Builds that enforce approval are unchanged.
+
+### Fixed
+
+- The "Register already imported" note now refreshes after an upload or a
+  save-as-register instead of showing the previous register until the page is
+  reloaded. The refresh was asking for a query key with an empty import-type
+  slot, which matched nothing, so it had been doing nothing at all.
+
 ## [0.1.58] - 2026-09-14
 
 ### Changed
