@@ -351,6 +351,20 @@ describe("IpScannerPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("returns focus to the row that opened the panel when it closes", async () => {
+    stubFetch();
+    render(scannerProviders(<IpScannerPage />));
+    const cell = await screen.findByText("10.0.10.12");
+    const row = cell.closest("tr") as HTMLElement;
+    row.focus();
+    fireEvent.click(row);
+
+    const panel = await screen.findByRole("complementary");
+    fireEvent.click(within(panel).getByRole("button", { name: "Close detail panel" }));
+
+    await waitFor(() => expect(document.activeElement).toBe(row));
+  });
+
   it("says a missing device was expected and shows no observed evidence", async () => {
     stubFetch();
     render(scannerProviders(<IpScannerPage />));

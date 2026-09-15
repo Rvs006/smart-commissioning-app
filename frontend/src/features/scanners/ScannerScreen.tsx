@@ -22,6 +22,7 @@ import { RegisterImportFields } from "../workflow/RegisterImportFields";
 import { DeviceDetailPanel } from "./DeviceDetailPanel";
 import { GenerateReportCard } from "./GenerateReportCard";
 import {
+  COLUMN_TITLES,
   bacnetObjectsPill,
   ragFiltersFor,
   rowMatchesRagFilter,
@@ -56,8 +57,22 @@ export type ScannerScreenProps = {
   /** What Start posts. */
   inputs: ScannerRunInputs;
   onIgnoreRegisterChange: (next: boolean) => void;
-  /** A lane-specific reason Start must stay disabled (e.g. a bad instance range). */
-  startBlockedReason?: string | null;
+  /**
+   * A lane-specific reason Start must stay disabled. A string is an operator
+   * fault (red, role="alert"); the object form lets a lane say the block is an
+   * expected state instead, which renders as a neutral status panel — a
+   * live-first page would otherwise shout an assertive alert as its resting UI.
+   */
+  startBlockedReason?:
+    | string
+    | null
+    | { tone: "error" | "status"; title?: string; reason: string };
+  /**
+   * The side-panel width, when the page owns it. Two panels on one page must
+   * not run two states over the same localStorage key. Omit to keep it here.
+   */
+  panelWidth?: number;
+  onPanelWidthChange?: (width: number) => void;
   /** Extra buttons in the results heading (BACnet export assets, MQTT archive). */
   resultsActions?: ReactNode;
   /** Lane-specific evidence cards below the results table (BACnet routers / points). */
@@ -88,6 +103,8 @@ export function ScannerScreen({
   inputs,
   onIgnoreRegisterChange,
   startBlockedReason = null,
+  panelWidth: panelWidthProp,
+  onPanelWidthChange,
   resultsActions,
   evidenceCards,
   setupHeading = "Scan setup",
@@ -152,7 +169,9 @@ export function ScannerScreen({
   const [ragFilter, setRagFilter] = useState<RagFilter>("all");
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
   const [panelExpanded, setPanelExpanded] = useState(false);
-  const [panelWidth, setPanelWidth] = useStoredPanelWidth();
+  const [ownPanelWidth, setOwnPanelWidth] = useStoredPanelWidth();
+  const panelWidth = panelWidthProp ?? ownPanelWidth;
+  const setPanelWidth = onPanelWidthChange ?? setOwnPanelWidth;
   const rowRefs = useRef(new Map<string, HTMLTableRowElement>());
   const filterInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -267,12 +286,16 @@ export function ScannerScreen({
   const laneRunNoun = lane === "mqtt" ? "capture" : "scan";
 
   // ---- run gating -----------------------------------------------------------
+  const startBlock =
+    typeof startBlockedReason === "string"
+      ? { tone: "error" as const, title: undefined, reason: startBlockedReason }
+      : startBlockedReason;
   const startBlocked =
     !canEngineer ||
     startedRunActive ||
     runAccessClosed ||
     !scanAuthorized ||
-    Boolean(startBlockedReason) ||
+    Boolean(startBlock) ||
     run.startMutation.isPending;
   const startTooltip = !canEngineer
     ? ENGINEER_REQUIRED_TOOLTIP
@@ -282,7 +305,7 @@ export function ScannerScreen({
         ? "A run is already in progress. Stop it before starting another."
         : !scanAuthorized
           ? "Confirm scan authorization before starting this scan."
-          : (startBlockedReason ?? undefined);
+          : (startBlock?.reason ?? undefined);
 
   const lastRunLine = activeRunRecord
     ? `Last run ${formatRelativeTime(activeRunRecord.updated_at ?? activeRunRecord.created_at)}`
@@ -375,11 +398,17 @@ export function ScannerScreen({
           </p>
         </div>
 
-        {startBlockedReason && (
-          <p className="error-text" role="alert">
-            {startBlockedReason}
-          </p>
-        )}
+        {startBlock &&
+          (startBlock.tone === "status" ? (
+            <div className="state-panel" role="status">
+              {startBlock.title && <strong>{startBlock.title}</strong>}
+              <span>{startBlock.reason}</span>
+            </div>
+          ) : (
+            <p className="error-text" role="alert">
+              {startBlock.reason}
+            </p>
+          ))}
         {run.startMutation.isError && (
           <div className="state-panel error">
             <strong>Run request failed</strong>
@@ -750,7 +779,7 @@ export function ScannerScreen({
                 <thead>
                   <tr>
                     {columns.map((column) => (
-                      <th key={column} scope="col">
+                      <th key={column} scope="col" title={COLUMN_TITLES[column]}>
                         {column}
                       </th>
                     ))}

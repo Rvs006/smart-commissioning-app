@@ -47,7 +47,10 @@
   border-radius: 12px;
   background: var(--surface);
   box-shadow: var(--shadow);
-  overflow: hidden;
+  /* `clip`, not `hidden`: both trim content to the radius, but `hidden` makes
+     the card a scroll container, and a scroll container ancestor kills
+     `position: sticky` on every detail panel inside it. */
+  overflow: clip;
 }
 
 .scanner-card-head {
@@ -569,14 +572,15 @@
 /* Plan 4.5: 320px topic rail + the focused-asset panel, stacked below 1100px.
    With an asset focused the panel takes its remembered, dragged width and the
    rail keeps the slack, never dropping below the artboard's 320px. */
+/* No `overflow` here: any value but `visible` makes this the nearest scrollport
+   and the focused panel stops sticking. The rail clips itself instead. */
 .scanner-live-layout {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
   gap: 0;
   align-items: start;
   border: 1px solid var(--border-soft);
   border-radius: 10px;
-  overflow: hidden;
 }
 
 .scanner-live-layout.with-panel {
@@ -593,9 +597,38 @@
   min-width: 0;
   padding: 12px 0;
   border-right: 1px solid var(--border-soft);
+  border-radius: 9px 0 0 9px;
   background: var(--surface-2);
   font-family: var(--dc-mono);
   font-size: 12.5px;
+  overflow: hidden;
+}
+
+/* Caret, name-as-focus-control and the icon copy: one row, three sizes. */
+.mqtt-rail-caret {
+  padding: 0;
+  background: none;
+  border: 0;
+}
+
+.mqtt-rail-focus {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mqtt-rail-focus:hover {
+  color: var(--accent-hover);
+}
+
+.mqtt-rail-copy {
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
 }
 
 .mqtt-rail-caption {

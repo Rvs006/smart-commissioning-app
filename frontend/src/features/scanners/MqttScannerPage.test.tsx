@@ -9,6 +9,7 @@ import {
   type MqttLiveSnapshot,
 } from "../../api/client";
 import { MqttScannerPage } from "./MqttScannerPage";
+import { scannerRowsFromResults } from "./scannerRows";
 import { scannerProviders } from "./scannerTestHarness";
 
 // The live session is driven entirely by the module mock: each test sets the
@@ -23,18 +24,24 @@ const liveMock = {
   refreshStatus: vi.fn(async () => {}),
 };
 let liveState: Partial<MqttLiveSessionState> = {};
+// What the page asked the hook for, so the tests can prove the workspace,
+// authorization and root filter reach the session and are not defaulted.
+let liveHookCalls: Array<{ enabled: unknown; input: unknown }> = [];
 
 vi.mock("../workflow/useMqttLiveSession", () => ({
-  useMqttLiveSession: () => ({
-    error: null,
-    lastActivity: null,
-    phase: "no_session",
-    session: null,
-    snapshot: null,
-    status: null,
-    ...liveMock,
-    ...liveState,
-  }),
+  useMqttLiveSession: (enabled: unknown, input: unknown) => {
+    liveHookCalls.push({ enabled, input });
+    return {
+      error: null,
+      lastActivity: null,
+      phase: "no_session",
+      session: null,
+      snapshot: null,
+      status: null,
+      ...liveMock,
+      ...liveState,
+    };
+  },
 }));
 
 const RUN_ID = "run-mqtt-scanner-1";
@@ -300,9 +307,12 @@ const focusedAsset: MqttLiveFocused = {
   configPayload: '{"version":"1.5.2"}',
 };
 
+const runningRun = { ...terminalRun, status: "running", progress_percent: 40 };
+
 beforeEach(() => {
   setApiKey("engineer-key");
   liveState = {};
+  liveHookCalls = [];
   configuration = mqttConfiguration("broker.example.test");
   for (const fn of Object.values(liveMock)) {
     fn.mockClear();
@@ -324,6 +334,84 @@ describe("MqttScannerPage", () => {
     expect(await screen.findByRole("heading", { name: "Broker & capture" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Live topics" })).toBeInTheDocument();
     await waitFor(() => expect(liveMock.start).toHaveBeenCalledTimes(1));
+
+    // The session is opened for THIS workspace, with the page's authorization
+    // and its topic filter, not the hook's defaults.
+    const last = liveHookCalls[liveHookCalls.length - 1];
+    expect(last?.enabled).toBe(true);
+    expect(last?.input).toMatchObject({
+      authorized: true,
+      workspace: { projectId: expect.any(String), siteId: expect.any(String) },
+    });
+    // Blank filter means "every topic": the hook is given no rootFilter at all
+    // rather than a literal "#".
+    expect((last?.input as { rootFilter?: string }).rootFilter).toBeUndefined();
+  });
+
+  it("passes the topic filter through as the live session's root filter", async () => {
+    stubFetch({ runs: [] });
+    render(scannerProviders(<MqttScannerPage />));
+
+    fireEvent.change(await screen.findByLabelText(/Topic filter/), {
+      target: { value: "example/#" },
+    });
+
+    await waitFor(() =>
+      expect((liveHookCalls[liveHookCalls.length - 1]?.input as { rootFilter?: string }).rootFilter).toBe("example/#"),
+    );
+  });
+
+  it("does not auto-start while a capture run is still in flight", async () => {
+    // The blocker this guards: until the latest-run query answers, nothing is
+    // attached, so startedRunActive is false and a naive auto-connect 409s.
+    stubFetch({ runs: [runningRun] });
+    render(scannerProviders(<MqttScannerPage />));
+
+    await screen.findByRole("heading", { name: "Live topics" });
+    await waitFor(() => expect(screen.getByText(/Discovery run monitor/)).toBeInTheDocument());
+    expect(liveMock.start).not.toHaveBeenCalled();
+  });
+
+  it("shows the connect refusal instead of a bare 'Live view not running'", async () => {
+    liveState = {
+      phase: "no_session",
+      error: "An MQTT capture run is in progress for this project and site.",
+    };
+    stubFetch({ runs: [] });
+    render(scannerProviders(<MqttScannerPage />));
+
+    expect(
+      await screen.findByText("An MQTT capture run is in progress for this project and site."),
+    ).toBeInTheDocument();
+  });
+
+  it("does not auto-start without scan authorization, or without the engineer role", async () => {
+    stubFetch({ runs: [] });
+    const enforced = render(
+      scannerProviders(<MqttScannerPage />, { authorizationEnforced: true }),
+    );
+    await screen.findByRole("heading", { name: "Live topics" });
+    await waitFor(() => expect(screen.getByLabelText(/Topic filter/)).toBeInTheDocument());
+    expect(liveMock.start).not.toHaveBeenCalled();
+    enforced.unmount();
+
+    liveHookCalls = [];
+    render(scannerProviders(<MqttScannerPage />, { canEngineer: false }));
+    await screen.findByRole("heading", { name: "Live topics" });
+    await waitFor(() => expect(screen.getByLabelText(/Topic filter/)).toBeInTheDocument());
+    expect(liveMock.start).not.toHaveBeenCalled();
+  });
+
+  it("attempts the auto-start at most once across re-renders", async () => {
+    stubFetch({ runs: [] });
+    render(scannerProviders(<MqttScannerPage />));
+
+    await waitFor(() => expect(liveMock.start).toHaveBeenCalledTimes(1));
+    // Any state change re-runs the effect; the attempt must not repeat.
+    fireEvent.change(await screen.findByLabelText(/Topic filter/), { target: { value: "a/#" } });
+    fireEvent.change(screen.getByLabelText(/Topic filter/), { target: { value: "b/#" } });
+    await waitFor(() => expect(liveHookCalls.length).toBeGreaterThan(2));
+    expect(liveMock.start).toHaveBeenCalledTimes(1);
   });
 
   it("does not auto-start, and points at Configuration, when no broker is configured", async () => {
@@ -376,9 +464,13 @@ describe("MqttScannerPage", () => {
 
     // Children are only mounted while their branch is open, so expand first —
     // the same collapse behaviour the module page's tree had.
-    fireEvent.click(screen.getByRole("button", { name: /example/, expanded: false }));
+    fireEvent.click(screen.getByRole("button", { name: "Expand example" }));
+    // The rail's asset name IS the focus control; copy is a labelled icon.
     fireEvent.click(await screen.findByRole("button", { name: "Focus AHU-01" }));
     expect(liveMock.focus).toHaveBeenCalledWith("AHU-01");
+    expect(
+      screen.getByRole("button", { name: "Copy topic example/AHU-01" }),
+    ).toBeInTheDocument();
   });
 
   it("closes the focused panel locally, because the sidecar has no unfocus call", async () => {
@@ -401,6 +493,39 @@ describe("MqttScannerPage", () => {
     ).toBeInTheDocument();
     // Close is local state, not a request the backend would ignore.
     expect(liveMock.focus).not.toHaveBeenCalled();
+
+    // Re-focusing the SAME asset must reopen it: the snapshot does not change,
+    // so nothing but the focus handler can clear the dismissal.
+    fireEvent.click(screen.getByRole("button", { name: "Expand example" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Focus AHU-01" }));
+    expect(await screen.findByRole("complementary", { name: "AHU-01" })).toBeInTheDocument();
+    expect(liveMock.focus).toHaveBeenCalledWith("AHU-01");
+  });
+
+  it("returns focus to the control that opened the panel", async () => {
+    liveState = { phase: "live", session: liveSession, snapshot: liveSnapshot };
+    stubFetch({ runs: [] });
+    const view = render(scannerProviders(<MqttScannerPage />));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Expand example" }));
+    const focusButton = await screen.findByRole("button", { name: "Focus AHU-01" });
+    focusButton.focus();
+    fireEvent.click(focusButton);
+
+    // The snapshot now carries the focused asset, as the stream would deliver it.
+    liveState = {
+      phase: "live",
+      session: liveSession,
+      snapshot: { ...liveSnapshot, focused: focusedAsset },
+    };
+    view.rerender(scannerProviders(<MqttScannerPage />));
+
+    const panel = await screen.findByRole("complementary", { name: "AHU-01" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Close detail panel" }));
+
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Focus AHU-01" })),
+    );
   });
 
   it("saves the live session as a register and reports what was accepted", async () => {
@@ -483,7 +608,20 @@ describe("MqttScannerPage", () => {
 
     const start = screen.getByRole("button", { name: "Record capture" });
     await waitFor(() => expect(start).toBeDisabled());
+    // An operator fault: red and assertive.
     expect(screen.getByRole("alert")).toHaveTextContent(/15-minute scanner capture limit/);
+  });
+
+  it("says the live view holds the connection as a status, not a red alert", async () => {
+    // Under live-first this block is the page's RESTING state, so an assertive
+    // alert would shout on every visit.
+    liveState = { phase: "live", session: liveSession, snapshot: liveSnapshot };
+    stubFetch({ runs: [] });
+    render(scannerProviders(<MqttScannerPage />));
+
+    expect(await screen.findByText("Stop the live view before capturing")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Record capture" })).toBeDisabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("renders the captured-topics card with pills, chips, columns and the archive link", async () => {
@@ -495,7 +633,7 @@ describe("MqttScannerPage", () => {
     for (const pill of ["3 Topics", "2 Assets", "2 Match", "1 Rogue"]) {
       expect(await within(card).findByText(pill)).toBeInTheDocument();
     }
-    for (const column of ["Topic", "Ret", "QoS", "Bytes", "Last value", "Register Match"]) {
+    for (const column of ["Topic", "Ret", "QoS", "JSON size", "Last value", "Register Match"]) {
       expect(within(card).getByRole("columnheader", { name: column })).toBeInTheDocument();
     }
 
@@ -560,5 +698,40 @@ describe("MqttScannerPage", () => {
     expect(await screen.findByText("mqtt_scanner")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "View in Run History" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open in Reports" })).toBeInTheDocument();
+  });
+
+});
+
+describe("MQTT capture row projection", () => {
+  // "JSON size" must describe the same text "Last value" renders: the wrapper
+  // the engine stores around a scalar is not what the operator is looking at.
+  const project = (lastPayload: unknown) =>
+    scannerRowsFromResults("mqtt", {
+      ...results,
+      topics: [{ ...results.topics[0], last_payload: lastPayload }],
+    } as never)[0];
+
+  it("sizes a scalar payload by its unwrapped text, not the stored wrapper", () => {
+    const row = project({ _value: 42 });
+    expect(row.cells["Last value"].text).toBe("42");
+    expect(row.cells["JSON size"].text).toBe("2");
+  });
+
+  it("sizes an object payload by its compact JSON", () => {
+    const row = project({ temp: 18.4 });
+    expect(row.cells["Last value"].text).toBe('{"temp":18.4}');
+    expect(row.cells["JSON size"].text).toBe("13");
+  });
+
+  it("sizes an empty object as the two braces it renders", () => {
+    const row = project({});
+    expect(row.cells["Last value"].text).toBe("{}");
+    expect(row.cells["JSON size"].text).toBe("2");
+  });
+
+  it("reports no size for a non-JSON payload the engine did not store", () => {
+    const row = project({ _raw_present: true });
+    expect(row.cells["Last value"].text).toBe("non-JSON (not stored)");
+    expect(row.cells["JSON size"].text).toBe("—");
   });
 });

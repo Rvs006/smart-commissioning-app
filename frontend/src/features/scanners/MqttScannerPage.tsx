@@ -51,6 +51,8 @@ export function MqttScannerPage() {
   const [publishPrefill, setPublishPrefill] = useState<{ topic: string; payload: string } | null>(
     null,
   );
+  // One width for both panels on this page (live focus + captured row). They
+  // share a localStorage key, so two independent states would fight over it.
   const [panelWidth, setPanelWidth] = useStoredPanelWidth();
   // The sidecar has no "unfocus" call — focus is server-side session state that
   // only changes when another asset is focused. So Close is a local dismissal
@@ -80,7 +82,11 @@ export function MqttScannerPage() {
   const brokerTls = (mqttConfig["Use TLS"] ?? "").trim();
   const clientId = (mqttConfig["Client ID"] ?? "").trim();
   const configuredQos = (mqttConfig["QoS"] ?? "").trim();
-  const brokerConfigured = brokerHost !== "";
+  // "No broker" is a claim about what Configuration HOLDS, so it may only be made
+  // from a read that succeeded. A failed read is a different fact and says so.
+  const configurationRead = configurationQuery.isSuccess;
+  const brokerConfigured = configurationRead && brokerHost !== "";
+  const brokerUnconfigured = configurationRead && brokerHost === "";
 
   const mqttLive = useMqttLiveSession(
     true,
@@ -92,19 +98,24 @@ export function MqttScannerPage() {
     apiClient,
   );
   const liveHolding = LIVE_HOLDING_PHASES.has(mqttLive.phase);
-  // A 400 from connect when Configuration has no broker. Detected on the text the
-  // route returns so a stale/absent configuration read cannot hide the reason.
+  // A 400 from connect when Configuration has no broker. Keyed on the sentence
+  // the route returns, which backend/tests/test_mqtt_live_session_api.py pins
+  // verbatim (test_connect_without_broker_returns_the_pinned_sentence) so a
+  // reworded backend fails there rather than silently here.
   const noBrokerError = Boolean(mqttLive.error?.includes("No MQTT broker is configured"));
 
   // Live-first (plan section 4.4): open the session on arrival when a broker is
   // configured and nobody else holds it. One attempt only — a failure lands in
-  // the state panel with a link to Configuration instead of a retry loop. A
-  // capture run in flight owns the same connection, so the auto-start stands
-  // down and the operator's explicit Start live view stays available.
+  // the state panel with a link to Configuration instead of a retry loop.
+  //
+  // run.runRestoreSettled is load-bearing: until the latest-run query answers,
+  // startedRunActive is false because nothing has been ATTACHED, not because
+  // nothing is running. Auto-connecting into an in-flight capture 409s ("An MQTT
+  // capture run is in progress") and leaves the operator with no session.
   const autoStartAttempted = useRef(false);
   const startLive = mqttLive.start;
   useEffect(() => {
-    if (autoStartAttempted.current || !configurationQuery.isFetched) {
+    if (autoStartAttempted.current || !configurationQuery.isFetched || !run.runRestoreSettled) {
       return;
     }
     if (!brokerConfigured || !canEngineer || !run.scanAuthorized || run.startedRunActive) {
@@ -121,6 +132,7 @@ export function MqttScannerPage() {
     canEngineer,
     configurationQuery.isFetched,
     mqttLive.phase,
+    run.runRestoreSettled,
     run.scanAuthorized,
     run.startedRunActive,
     startLive,
@@ -186,13 +198,14 @@ export function MqttScannerPage() {
   );
   const registerAvailable = results?.register_comparison?.register_available === true;
 
+  const unread = configurationQuery.isError ? "could not be read" : "not set";
   const setupCells: SetupCell[] = [
     {
       label: "Broker",
-      value: brokerHost || "not set",
+      value: brokerHost || unread,
       sub: brokerHost ? `${brokerPort ? `:${brokerPort}` : ""} · TLS ${brokerTls || "unset"}` : undefined,
     },
-    { label: "Client · QoS", value: clientId || "not set", sub: configuredQos || undefined },
+    { label: "Client · QoS", value: clientId || unread, sub: configuredQos || undefined },
     { label: "Topic filter", value: captureTopicFilter || "# (every topic)" },
     {
       label: "Capture window",
@@ -204,10 +217,22 @@ export function MqttScannerPage() {
     },
   ];
 
-  const startBlockedReason = captureOverCap
-    ? "Run time exceeds the 15-minute scanner capture limit — shorten the window."
+  // Two different things stop a capture, and they must not sound the same. The
+  // window being too long is the operator's mistake (red, assertive). The live
+  // view holding the one broker connection is the page's normal state under
+  // live-first, so it is a neutral status note, as ModulePage's was.
+  const startBlocked = captureOverCap
+    ? {
+        tone: "error" as const,
+        reason: "Run time exceeds the 15-minute scanner capture limit — shorten the window.",
+      }
     : liveHolding
-      ? "The live topic tree holds the broker connection. Stop the live view before recording a capture."
+      ? {
+          tone: "status" as const,
+          title: "Stop the live view before capturing",
+          reason:
+            "The live topic tree holds the broker connection. A capture run needs that same connection, so stop the live view above before you record a capture.",
+        }
       : null;
 
   return (
@@ -236,6 +261,16 @@ export function MqttScannerPage() {
               <h2 id="mqtt-live-heading">Live topics</h2>
               {mqttLive.phase === "live" && mqttLive.snapshot && (
                 <div className="scanner-pills">
+                  {/* Plan section 4.4's five KPIs. Broker leads, because a
+                      connection that has dropped explains every other number. */}
+                  <span
+                    className={`scanner-chip${
+                      mqttLive.snapshot.status.status === "connected" ? " chip-pass" : " chip-warn"
+                    }`}
+                  >
+                    Broker {mqttLive.snapshot.status.status}
+                    {mqttLive.snapshot.status.error ? ` · ${mqttLive.snapshot.status.error}` : ""}
+                  </span>
                   <span className="scanner-chip">
                     {mqttLive.snapshot.stats.topicsDiscovered} Topics
                   </span>
@@ -284,14 +319,18 @@ export function MqttScannerPage() {
           </div>
 
           <div className="scanner-card-body form-stack">
-            {mqttLive.error && (mqttLive.phase === "error" || mqttLive.phase === "unavailable") && (
+            {/* Any refusal, in any phase except the two that already explain
+                themselves. Gating this on phase error/unavailable hid the 409
+                from a capture run behind a bare "Live view not running". */}
+            {mqttLive.error && mqttLive.phase !== "live" && mqttLive.phase !== "occupied" && (
               <div className="state-panel error" role="alert">
                 <strong>{noBrokerError ? "No broker configured" : "Live session problem"}</strong>
                 <span>{mqttLive.error}</span>
                 {noBrokerError && <Link to="/configuration">Open Configuration</Link>}
               </div>
             )}
-            {configurationQuery.isFetched && !brokerConfigured && (
+            {/* The route already said it, with its own link, when it refused. */}
+            {brokerUnconfigured && !noBrokerError && (
               <div className="state-panel" role="status">
                 <strong>No broker configured</strong>
                 <span>
@@ -299,6 +338,16 @@ export function MqttScannerPage() {
                   view opens by itself once one is set.
                 </span>
                 <Link to="/configuration">Open Configuration</Link>
+              </div>
+            )}
+            {configurationQuery.isError && (
+              <div className="state-panel error" role="alert">
+                <strong>The configuration could not be read</strong>
+                <span>
+                  {configurationQuery.error instanceof Error
+                    ? configurationQuery.error.message
+                    : "The broker settings could not be loaded, so what is configured is unknown."}
+                </span>
               </div>
             )}
 
@@ -434,7 +483,13 @@ export function MqttScannerPage() {
                 >
                   <MqttLiveTopicTree
                     lastActivity={mqttLive.lastActivity}
-                    onFocus={(asset) => void mqttLive.focus(asset)}
+                    onFocus={(asset) => {
+                      // Re-focusing the SAME asset after a close leaves the
+                      // snapshot unchanged, so the effect below never fires:
+                      // clearing here is what makes the second click work.
+                      setFocusDismissed(false);
+                      void mqttLive.focus(asset);
+                    }}
                     totalTopics={mqttLive.snapshot.totalTopics}
                     tree={mqttLive.snapshot.tree}
                     treeShown={mqttLive.snapshot.treeShown}
@@ -451,6 +506,7 @@ export function MqttScannerPage() {
                       <MqttFocusedDetail
                         canEngineer={canEngineer}
                         focused={mqttLive.snapshot.focused}
+                        titled={false}
                         onWriteConfig={(topic, payload) => {
                           // Prefill the publish lane with the device's config
                           // topic and last-seen config payload, retain on.
@@ -513,6 +569,8 @@ export function MqttScannerPage() {
         ignoreRegister: false,
       }}
       onIgnoreRegisterChange={() => {}}
+      onPanelWidthChange={setPanelWidth}
+      panelWidth={panelWidth}
       purpose="Subscribe, watch the topic tree, capture retained payloads — native mqtt_scanner run."
       resultsActions={
         <>
@@ -652,7 +710,7 @@ export function MqttScannerPage() {
       }
       setupHeading="Broker & capture"
       showIgnoreRegister={false}
-      startBlockedReason={startBlockedReason}
+      startBlockedReason={startBlocked}
       startLabel="Record capture"
     />
   );

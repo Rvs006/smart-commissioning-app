@@ -119,19 +119,34 @@ function TreeRailRows({
           {hasChildren ? (
             <button
               aria-expanded={isOpen}
-              className="asset-summary-toggle"
+              aria-label={`${isOpen ? "Collapse" : "Expand"} ${node.n}`}
+              className="asset-summary-toggle mqtt-rail-caret"
               onClick={() => onToggle(node.p)}
               type="button"
             >
               <span aria-hidden="true" className="asset-summary-caret">
                 {isOpen ? "▾" : "▸"}
               </span>
-              <span className="mqtt-rail-name">{node.n}</span>
+            </button>
+          ) : null}
+          {/* The name IS the focus control on an asset node: two full-width
+              buttons per row do not fit a 320px rail. */}
+          {node.a && onFocus ? (
+            <button
+              aria-label={`Focus ${node.a}`}
+              className="mqtt-rail-name mqtt-rail-focus"
+              onClick={() => onFocus(node.a as string)}
+              type="button"
+            >
+              {node.n}
             </button>
           ) : (
             <span className="mqtt-rail-name">{node.n}</span>
           )}
-          <span className="mqtt-rail-count">· {groupDigits(node.t)}</span>
+          <span className="mqtt-rail-count">
+            · {groupDigits(node.t)}
+            <span className="visually-hidden"> topics</span>
+          </span>
           {node.mt ? <span className="status-token ready">matched</span> : null}
         </div>
         <div className="mqtt-rail-meta">
@@ -147,24 +162,15 @@ function TreeRailRows({
         </div>
         <div className="mqtt-rail-actions">
           <button
-            className="secondary-button compact"
+            aria-label={`Copy topic ${node.p}`}
+            className="scanner-icon-button mqtt-rail-copy"
             onClick={() => onCopy(node.p)}
             title={`Copy topic ${node.p}`}
             type="button"
           >
-            {copiedPath === node.p ? "Copied" : "Copy topic"}
+            <span aria-hidden="true">{copiedPath === node.p ? "✓" : "⧉"}</span>
           </button>
-          {node.a && onFocus ? (
-            <button
-              className="secondary-button compact"
-              onClick={() => onFocus(node.a as string)}
-              type="button"
-            >
-              Focus {node.a}
-            </button>
-          ) : node.a ? (
-            <span className="results-filter-count">{node.a}</span>
-          ) : null}
+          {node.a && !onFocus ? <span className="results-filter-count">{node.a}</span> : null}
         </div>
       </div>
       {hasChildren && isOpen
