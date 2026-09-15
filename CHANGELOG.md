@@ -124,17 +124,16 @@ database migration in this release.
 
 ### Removed
 
-- Three things the old MQTT module page had are not on the new MQTT Discovery
-  screen. The captured-topics "Export to CSV" button is gone; the same rows and
-  the same topic filter still download as XLSX from the run, and the raw capture
-  archive still holds every payload. The "Explore JSON tree" inspector under a
-  selected topic is gone; the side panel shows the stored payload pretty-printed
-  with a copy button, and says so plainly when the engine kept only a presence
-  marker for a non-JSON payload. Both come back with the module-page cleanup
-  that removes the old screen. The results filter's "No verdict" option is gone
-  for good: within one capture a register is either bound, so every topic
-  carries a verdict, or it is not, so none do, and the option could never select
-  a subset.
+- The shared module page no longer carries the IP / BACnet / MQTT scanner
+  branches. They were dead the moment the routes moved to the dedicated pages,
+  and keeping them meant two implementations of the same screen. The built-in
+  discovery lanes (`ip-scanner-sct`, `bacnet-discovery-sct`,
+  `mqtt-discovery-sct`), UDMI validation, data validation and reports are
+  untouched, including their Setup / Run / Results wizard, the sealed dry-run
+  preview and the MQTT capture panel.
+- The MQTT results filter's "No verdict" option is gone. Within one capture a
+  register is either bound, so every topic carries a verdict, or it is not, so
+  none do; the option could never select a subset.
 
 ### Fixed
 
@@ -170,16 +169,11 @@ database migration in this release.
 - Stop is no longer enabled for a just-restored run whose record has not loaded
   yet, and "Generate All" checks the run owner before each format so a run
   started partway through cannot be credited with the remaining reports.
-
-### Removed
-
-- The shared module page no longer carries the IP / BACnet / MQTT scanner
-  branches. They were dead the moment the routes moved to the dedicated pages,
-  and keeping them meant two implementations of the same screen. The built-in
-  discovery lanes (`ip-scanner-sct`, `bacnet-discovery-sct`,
-  `mqtt-discovery-sct`), UDMI validation, data validation and reports are
-  untouched, including their Setup / Run / Results wizard, the sealed dry-run
-  preview and the MQTT capture panel.
+- Arriving at MQTT Discovery while a capture is still running no longer tries to
+  auto-connect the live view and then show a bare "Live view not running" with no
+  reason. The page waits until it knows whether a run is already in flight, and
+  when the broker session is refused it says why instead of leaving the operator
+  to guess.
 
 ## [0.1.58] - 2026-09-14
 
