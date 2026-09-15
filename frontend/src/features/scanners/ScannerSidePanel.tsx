@@ -44,11 +44,14 @@ export function ScannerSidePanel({
   children,
 }: ScannerSidePanelProps) {
   const dragFromRef = useRef<{ x: number; width: number } | null>(null);
-  // Whatever had focus when the panel opened (the results row, the rail's Focus
-  // button). Closing hands focus back there instead of dropping it on <body>.
-  const openerRef = useRef<Element | null>(
-    typeof document === "undefined" ? null : document.activeElement,
-  );
+  // Whatever had focus when this subject was opened (the results row, the rail's
+  // Focus button). Closing hands focus back there instead of dropping it on
+  // <body>. Re-read on every subject change: the panel stays mounted when the
+  // operator picks a different row or asset, so the first opener goes stale.
+  const openerRef = useRef<Element | null>(null);
+  useEffect(() => {
+    openerRef.current = document.activeElement;
+  }, [title]);
   const closeToOpener = () => {
     const opener = openerRef.current;
     if (opener instanceof HTMLElement && opener.isConnected) {
