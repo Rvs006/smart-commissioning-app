@@ -7,6 +7,48 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- The native IP and BACnet scanner results tables now show a row for every
+  device the uploaded register expects, including the ones that never answered.
+  An expected-but-silent device used to appear only in the issues list, so an
+  operator reading the table could not tell it had gone quiet. It now renders as
+  a red "Missing (expected, no response)" row carrying the address and name the
+  register expects, with no ports, no object count, and no last-seen time,
+  because nothing was observed. These rows are result observations only: the
+  devices table stays observed-only, so nothing that failed to answer is
+  recorded as a discovered device.
+- The BACnet results table has a Result column (the register verdict) plus Model
+  and Firmware columns, and the IP table has a Register column showing the raw
+  verdict behind its Result label. The built-in discovery lanes are unchanged:
+  they run no register compare, so they keep the columns they had.
+
+### Changed
+
+- Row colour on the native IP and BACnet results tables now comes from the
+  register verdict the scan actually reached, instead of being guessed from the
+  status text. A device that answered but is not in the register reads "Rogue
+  (not in register)" in red rather than a neutral "Responsive"; a partial match
+  is amber; a clean match is green. With no register uploaded the tables behave
+  exactly as before.
+- Both scanner summary strips now carry the same six counters as the scan
+  itself: Expected, Reachable, Match, Partial, Missing and Rogue. Partial and
+  Missing were being recorded on every run but never displayed. The BACnet strip
+  drops its exported-points count to make room; the point total remains on the
+  run's stored summary and in the exported assets. The MQTT strip keeps its four
+  counters; its "Matches" card is renamed "Match" so the same number is named the
+  same way on all three scanner screens.
+- A BACnet or IP scan now records the register rows that answered nothing on the
+  run summary, so the signed inventory report lists the same expected-but-silent
+  devices the results screen shows. Before this, that report section only ever
+  appeared for the built-in BACnet discovery engine. The IP report gains its own
+  "Expected IP hosts not responding" section, which says per host whether the
+  scan actually probed it: the sweep pings every address in the scanned range,
+  so a register host outside that range is marked "not sent" rather than being
+  reported as silent when it was never contacted at all.
+- The Verdict filter on the two native scanner screens is worded for what it
+  filters: Match, Partial, and Missing / Rogue.
+
 ## [0.1.58] - 2026-09-14
 
 ### Changed

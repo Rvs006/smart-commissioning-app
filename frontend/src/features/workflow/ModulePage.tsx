@@ -476,12 +476,38 @@ function provisionalDiscoveryViewFor(
   if (!view) {
     return null;
   }
+  // Pair each row with its observation by the row's OWN identity, never by
+  // position: bacnetRowsFromResults can append rows (expected-but-silent
+  // devices) that correspond to no projected record, so row index and
+  // `projected` index are not guaranteed to line up. The per-entry view keeps
+  // both sides on the same row builder, so the signature can never drift from
+  // what discoveryRowEntitySignature reads off the real row.
+  // ponytail: rebuilds one tiny view per observation; the progressive fold is
+  // capped at MAX_PROGRESSIVE_DEVICE_OBSERVATIONS (500), so this is bounded.
+  const entityKeyBySignature = new Map<string, string>();
+  for (const entry of projected) {
+    const single = discoveryViewFor(route, {
+      ...results,
+      discovered_assets:
+        route === "ip-scanner-sct" ? [projectedIpAsset(entry)] : [],
+      devices: [entry.record],
+    });
+    const signature = single?.rows[0]
+      ? discoveryRowEntitySignature(route, single.rows[0])
+      : null;
+    if (signature !== null && !entityKeyBySignature.has(signature)) {
+      entityKeyBySignature.set(signature, entry.entityKey);
+    }
+  }
   return {
     ...view,
-    rows: view.rows.map<Record<string, string>>((row, index) => ({
-      ...row,
-      __entityKey: projected[index]?.entityKey ?? "",
-    })),
+    rows: view.rows.map<Record<string, string>>((row) => {
+      const signature = discoveryRowEntitySignature(route, row);
+      return {
+        ...row,
+        __entityKey: (signature !== null && entityKeyBySignature.get(signature)) || "",
+      };
+    }),
   };
 }
 
@@ -3623,11 +3649,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
 
-  // GAP-C2 (BACnet): the native BACnet sidecar lane's four-card summary strip.
-  // The sidecar engine records its totals directly on result_summary
-  // (devices_discovered / points_exported / register_matches / register_rogue),
-  // not the sealed bacnet_headline_metrics_v1 snapshot, so bacnetHeadlineMetrics
-  // above is null here; read them straight. Gated to a terminal bacnet-scanner run.
+  // GAP-C2 (BACnet): the native BACnet sidecar lane's six-card summary strip
+  // (register_expected / devices_discovered / register_matches / register_partial
+  // / register_missing / register_rogue). The sidecar engine records its totals
+  // directly on result_summary, not the sealed bacnet_headline_metrics_v1
+  // snapshot, so bacnetHeadlineMetrics above is null here; read them straight.
+  // Gated to a terminal bacnet-scanner run.
   const bacnetSidecarSummaryCards = useMemo<IpSidecarSummaryCard[] | null>(() => {
     if (module.route !== "bacnet-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
       return null;
@@ -4003,13 +4030,24 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             { label: "Not observed this run", value: "offline" },
             { label: "No verdict", value: "none" },
           ]
-        : [
-            { label: "All verdicts", value: "all" },
-            { label: "Pass", value: "pass" },
-            { label: "Fail", value: "fail" },
-            { label: "Warn", value: "warn" },
-            { label: "No verdict", value: "none" },
-          ];
+        : // The native IP/BACnet scanners tone their rows from the register
+          // verdict, so the filter names the verdict rather than the tone.
+          // Missing and Rogue share the red tone and so share one option.
+          module.route === "ip-scanner" || module.route === "bacnet-scanner"
+          ? [
+              { label: "All verdicts", value: "all" },
+              { label: "Match", value: "pass" },
+              { label: "Partial", value: "warn" },
+              { label: "Missing / Rogue", value: "fail" },
+              { label: "No verdict", value: "none" },
+            ]
+          : [
+              { label: "All verdicts", value: "all" },
+              { label: "Pass", value: "pass" },
+              { label: "Fail", value: "fail" },
+              { label: "Warn", value: "warn" },
+              { label: "No verdict", value: "none" },
+            ];
 
   // Keep the selected row inside the FILTERED view: if the active selection is
   // filtered out, move it to the first visible row's ORIGINAL index so the
@@ -7532,7 +7570,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               {usingLiveResults && (
                 <div className="sample-banner" role="note">
                   {isDiscoveryModule ? (
-                    module.route === "ip-scanner" || module.route === "ip-scanner-sct" ? (
+                    module.route === "ip-scanner" ? (
+                      'Live discovery observations. With a register uploaded, the Result column reports this scan’s register verdict — a red "Missing" row is a host the register expects that did not answer, and a red "Rogue" row answered but is not in the register. Silence is inconclusive: a TCP-connect miss is not proof a host is absent.'
+                    ) : module.route === "ip-scanner-sct" ? (
                       'Live discovery observations. The Result column reports this scan’s response and register-port verdicts; "no response on scanned ports" is inconclusive — a TCP-connect miss is not proof a host is absent.'
                     ) : (module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct") &&
                       discoveryResultsQuery.data?.register_comparison ? (
@@ -7550,11 +7590,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       ) : (
                         "No accepted MQTT register import for this project/site — upload one to compare observed topics against the template."
                       )
+                    ) : module.route === "bacnet-scanner" ? (
+                      'Live discovery observations. With a register uploaded, the Result column reports this scan’s register verdict — a red "Missing" row is a device the register expects that answered no Who-Is, and a red "Rogue" row answered but is not in the register.'
                     ) : (
-                      // No register comparison available (non-MQTT discovery, or an
-                      // MQTT run that observed nothing / has no register): the
-                      // discovery table shows observations, and register verdicts are
-                      // otherwise produced by validation.
+                      // No register comparison available (the built-in discovery
+                      // lanes, or an MQTT run that observed nothing / has no
+                      // register): the discovery table shows observations, and
+                      // register verdicts are produced by validation.
                       'Live discovery observations. Register-comparison verdicts (matched / rogue / missing) are produced by validation, not discovery, so no "Result" column is shown here.'
                     )
                   ) : (
@@ -7735,7 +7777,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <div className="empty-workspace">
                     <strong>No rows match the current filters</strong>
                     <span>
-                      Adjust or clear the filters to see the {resultRows.length} captured{" "}
+                      {/* "rows", not "captured rows": the scanner tables now also
+                      carry expected-but-silent rows, which were never captured
+                      from the wire — the register says they should exist. */}
+                      Adjust or clear the filters to see the {resultRows.length}{" "}
                       {resultRows.length === 1 ? "row" : "rows"}.
                     </span>
                   </div>
