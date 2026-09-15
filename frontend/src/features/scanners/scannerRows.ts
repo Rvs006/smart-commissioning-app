@@ -4,7 +4,12 @@ import type {
   DiscoveryRowRecord,
   ObservedPort,
 } from "../../api/client";
-import { bacnetRowVerdict, ipRowVerdict, mqttRowsFromResults } from "../workflow/discoveryRows";
+import {
+  bacnetRowVerdict,
+  ipRowVerdict,
+  mqttRowsFromResults,
+  registerStateOf,
+} from "../workflow/discoveryRows";
 import {
   formatBacnetSidecarSummaryCards,
   formatIpSidecarSummaryCards,
@@ -94,16 +99,6 @@ function attributesOf(record: DiscoveryRowRecord | undefined): Record<string, un
   return attributes && typeof attributes === "object"
     ? (attributes as Record<string, unknown>)
     : {};
-}
-
-// ponytail: a local copy of discoveryRows' private registerStateOf. The two
-// sidecars name the key differently (`register` for IP, `register_state` for
-// BACnet) and both spell "no register bound" as "none", which must read as no
-// verdict rather than as a state. Track A owns that file and keeps the helper
-// private; fold this back in if it is ever exported.
-function registerStateOf(source: Record<string, unknown>): string {
-  const value = source.register ?? source.register_state;
-  return typeof value === "string" && value !== "none" ? value : "";
 }
 
 function numberList(value: unknown): number[] {
@@ -213,23 +208,27 @@ function displayPayload(value: unknown): {
   text: string | null;
   compact: string | null;
   rawOnly: boolean;
+  // The unwrapped payload OBJECT, so the side panel can offer the JSON tree
+  // explorer without re-parsing the stringified cell.
+  value: unknown;
 } {
   if (value === null || value === undefined) {
-    return { text: null, compact: null, rawOnly: false };
+    return { text: null, compact: null, rawOnly: false, value: null };
   }
   if (typeof value === "object") {
     const record = value as Record<string, unknown>;
     if (record._raw_present === true) {
-      return { text: null, compact: null, rawOnly: true };
+      return { text: null, compact: null, rawOnly: true, value: null };
     }
     const unwrapped = "_value" in record ? record._value : value;
     return {
       text: JSON.stringify(unwrapped, null, 2),
       compact: JSON.stringify(unwrapped),
       rawOnly: false,
+      value: unwrapped,
     };
   }
-  return { text: String(value), compact: String(value), rawOnly: false };
+  return { text: String(value), compact: String(value), rawOnly: false, value };
 }
 
 /**
@@ -274,6 +273,7 @@ function mqttRows(results: DiscoveryResultsResponse): ScannerRow[] {
         last_qos: row.__qos,
         subscribe_qos: row.__subscribeQos,
         last_payload: payload.text,
+        last_payload_value: payload.value,
         payload_raw_only: payload.rawOnly,
         register_match: verdictText,
       },

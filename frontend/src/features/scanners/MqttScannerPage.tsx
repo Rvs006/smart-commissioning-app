@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
 import {
@@ -12,11 +12,13 @@ import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext"
 import { MqttFocusedDetail } from "../workflow/MqttFocusedDetail";
 import { MqttLiveTopicTree } from "../workflow/MqttLiveTopicTree";
 import { MqttPublishModal } from "../workflow/MqttPublishModal";
-import { mqttRegisterCompareNote } from "../workflow/discoveryRows";
+import { captureRowsToCsv, mqttRegisterCompareNote, type CaptureRow } from "../workflow/discoveryRows";
+import { triggerBlobDownload, useFileDownload } from "../workflow/fileDownload";
 import { useMqttLiveSession } from "../workflow/useMqttLiveSession";
 import { ScannerScreen, type SetupCell } from "./ScannerScreen";
+import { scannerRowsFromResults } from "./scannerRows";
 import { ScannerSidePanel } from "./ScannerSidePanel";
-import { useScannerDownload, useScannerRun, useStoredPanelWidth } from "./useScannerRun";
+import { useScannerRun, useStoredPanelWidth } from "./useScannerRun";
 
 // The scanner capture lane is bounded at 15 minutes by the sidecar adapter; the
 // setup card refuses a longer window rather than letting the adapter clamp it
@@ -25,6 +27,11 @@ const MQTT_CAPTURE_CAP_SECONDS = 900;
 const CAPTURE_UNIT_SECONDS = { hours: 3600, minutes: 60, seconds: 1 } as const;
 
 type CaptureUnit = keyof typeof CAPTURE_UNIT_SECONDS;
+
+/** A persisted attribute rendered as CSV text; an absent value is an empty cell. */
+function text(value: unknown): string {
+  return value === null || value === undefined ? "" : String(value);
+}
 
 /** The phases in which the sidecar's single broker connection is already held. */
 const LIVE_HOLDING_PHASES = new Set(["live", "connecting", "reconnecting", "unavailable"]);
@@ -50,8 +57,8 @@ export function MqttScannerPage() {
   // rather than a request that would silently do nothing, and it lifts as soon
   // as the operator focuses a different asset.
   const [focusDismissed, setFocusDismissed] = useState(false);
-  const archiveDownload = useScannerDownload();
-  const topicsXlsxDownload = useScannerDownload();
+  const archiveDownload = useFileDownload(apiClient);
+  const topicsXlsxDownload = useFileDownload(apiClient);
 
   // Run time is entered in the operator's unit and posted in seconds, exactly as
   // the module page did; a non-numeric value is left alone so the shared builder
@@ -151,6 +158,32 @@ export function MqttScannerPage() {
       ? results.result_summary.raw_evidence_artifact_id
       : null;
   const compareNote = results ? mqttRegisterCompareNote(results) : null;
+  // The client-side capture CSV the v0.1.58 payload panel offered. Built from
+  // the same persisted rows the table shows (topic, asset, last seen, message
+  // count, latest payload), so the file and the screen can never disagree; the
+  // XLSX beside it is the server-rebuilt equivalent.
+  const captureCsvRows: CaptureRow[] = useMemo(
+    () =>
+      scannerRowsFromResults("mqtt", results).map((row) => {
+        const a = row.attributes;
+        return {
+          asset: text(a.asset),
+          lastSeen: text(a.last_payload_seen),
+          messageCount: text(a.message_count),
+          // Compact, unwrapped JSON on ONE line: the same value the table's
+          // "Last value" cell shows, not the pretty-printed panel form, so a
+          // payload cannot straddle CSV rows.
+          payload:
+            a.payload_raw_only === true
+              ? "non-JSON (not stored)"
+              : a.last_payload_value === null || a.last_payload_value === undefined
+                ? ""
+                : JSON.stringify(a.last_payload_value),
+          topic: text(a.topic),
+        };
+      }),
+    [results],
+  );
   const registerAvailable = results?.register_comparison?.register_available === true;
 
   const setupCells: SetupCell[] = [
@@ -498,6 +531,21 @@ export function MqttScannerPage() {
               type="button"
             >
               {archiveDownload.pendingKey === "mqtt-archive" ? "Downloading..." : "Export archive"}
+            </button>
+          )}
+          {run.activeRun && captureCsvRows.length > 0 && (
+            <button
+              className="secondary-button compact"
+              onClick={() => {
+                const blob = new Blob([captureRowsToCsv(captureCsvRows)], {
+                  type: "text/csv;charset=utf-8",
+                });
+                triggerBlobDownload(blob, `mqtt-capture-${run.activeRun?.runId}.csv`);
+              }}
+              title="Download the latest payload per captured topic as CSV, built here from the rows on screen."
+              type="button"
+            >
+              Export to CSV
             </button>
           )}
           {run.activeRun && (results?.topics?.length ?? 0) > 0 && (

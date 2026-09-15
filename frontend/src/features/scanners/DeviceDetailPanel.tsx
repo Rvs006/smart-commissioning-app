@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import type { BacnetObjectBrowseResponse } from "../../api/client";
 import { bacnetDeviceDetailItems, ipDeviceDetailItems } from "../workflow/discoveryRows";
+import { JsonTree } from "../workflow/JsonTree";
 import { ScannerSidePanel } from "./ScannerSidePanel";
 import {
   bacnetDetailSections,
@@ -200,6 +201,16 @@ export function DeviceDetailPanel({
         )}
 
         <SectionList sections={sections} />
+
+        {/* The payload explorer the v0.1.58 capture inspector had. The section
+            above prints the payload and offers Copy; this walks it key by key,
+            which is the only practical way to read a large UDMI pointset. */}
+        {lane === "mqtt" && row.attributes.payload_raw_only !== true && (
+          <details className="json-inspector">
+            <summary>Explore JSON tree</summary>
+            <JsonTree value={row.attributes.last_payload_value} />
+          </details>
+        )}
 
         {lane === "ip" && !row.missing && (
           <section className="scanner-detail-section">

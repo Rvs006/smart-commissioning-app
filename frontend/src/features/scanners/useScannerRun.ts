@@ -5,7 +5,6 @@ import {
   ApiError,
   browseBacnetScannerObjects,
   cancelRun,
-  downloadFile,
   getDiscoveryComparison,
   getDiscoveryResults,
   getDiscoveryRun,
@@ -20,7 +19,7 @@ import {
 } from "../../api/client";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { useSession } from "../../app/sessionContext";
-import type { RunRef, SessionScopeId, WorkspaceRef } from "../../app/sessionScope";
+import type { RunRef } from "../../app/sessionScope";
 import { buildDiscoveryParameters } from "../workflow/buildDiscoveryParameters";
 import { getModuleByRoute, type ModuleRunAction } from "../workflow/moduleData";
 import { isTerminalStatus, runPollInterval } from "../workflow/runFormat";
@@ -30,6 +29,11 @@ import {
   runControllerReducer,
   toRunRef,
 } from "../workflow/runIsolation";
+import {
+  useRunOwnership,
+  useTerminalEvidenceBarrier,
+  type RunEpochOwner,
+} from "../workflow/runOwnership";
 import { useRunEvents } from "../workflow/useRunEvents";
 import {
   SCANNER_PANEL_DEFAULT_WIDTH,
@@ -92,58 +96,10 @@ type ActiveScannerRun = {
   ref: RunRef;
 };
 
-export type RunEpochOwner = {
-  epoch: number;
-  runId: string;
-  sessionScopeId: SessionScopeId;
-  workspaceRef: WorkspaceRef;
-};
+export type { RunEpochOwner };
 
-type RunAccessScope = {
-  moduleRoute: string;
-  sessionScopeId: SessionScopeId;
-  workspaceRef: WorkspaceRef;
-};
-
-const TERMINAL_RUN_STATUS_RETRY_DELAYS_MS = [300, 600, 1_000] as const;
-
-function sameRunEpochOwner(
-  left: RunEpochOwner | null | undefined,
-  right: RunEpochOwner | null | undefined,
-): boolean {
-  return Boolean(
-    left &&
-      right &&
-      left.runId === right.runId &&
-      left.epoch === right.epoch &&
-      left.sessionScopeId === right.sessionScopeId &&
-      left.workspaceRef.projectId === right.workspaceRef.projectId &&
-      left.workspaceRef.siteId === right.workspaceRef.siteId,
-  );
-}
-
-function sameRunAccessScope(
-  left: RunAccessScope | null | undefined,
-  right: RunAccessScope | null | undefined,
-): boolean {
-  return Boolean(
-    left &&
-      right &&
-      left.moduleRoute === right.moduleRoute &&
-      left.sessionScopeId === right.sessionScopeId &&
-      left.workspaceRef.projectId === right.workspaceRef.projectId &&
-      left.workspaceRef.siteId === right.workspaceRef.siteId,
-  );
-}
-
-function isTransientRunStatusError(error: unknown): boolean {
-  return (
-    !(error instanceof ApiError) ||
-    error.status === 408 ||
-    error.status === 429 ||
-    error.status >= 500
-  );
-}
+/** The scanner lanes always settle on the run record plus its results. */
+const DISCOVERY_EVIDENCE_REQUIREMENTS = ["run", "results"] as const;
 
 /**
  * The sidecar (native scanner) run lifecycle, lifted verbatim out of ModulePage
@@ -224,45 +180,14 @@ export function useScannerRun(lane: ScannerLane) {
     activeRun?.epoch ?? 0,
   );
 
-  const currentRunAccessScope: RunAccessScope = { moduleRoute, sessionScopeId, workspaceRef };
-  const currentRunAccessScopeRef = useRef(currentRunAccessScope);
-  currentRunAccessScopeRef.current = currentRunAccessScope;
-  const runAccessClosedScopeRef = useRef<RunAccessScope | null>(null);
-  const runEventAccessScope: RunAccessScope | null = runEvents.runRef
-    ? {
-        moduleRoute: runEvents.runRef.module,
-        sessionScopeId: runEvents.runRef.sessionScopeId,
-        workspaceRef: runEvents.runRef.workspace,
-      }
-    : null;
-  if (
-    runEvents.connectionState === "closed" &&
-    sameRunAccessScope(runEventAccessScope, currentRunAccessScope)
-  ) {
-    runAccessClosedScopeRef.current = runEventAccessScope;
-  }
-  const runAccessClosed = sameRunAccessScope(
-    runAccessClosedScopeRef.current,
-    currentRunAccessScope,
-  );
-
-  // Memoised because it is returned from the hook: a fresh object every render
-  // would defeat the returned useMemo and re-render every consumer.
-  const activeRunOwner: RunEpochOwner | null = useMemo(
-    () =>
-      activeRun
-        ? { epoch: activeRun.epoch, runId: activeRun.runId, sessionScopeId, workspaceRef }
-        : null,
-    [activeRun, sessionScopeId, workspaceRef],
-  );
-  const activeRunOwnerRef = useRef<RunEpochOwner | null>(activeRunOwner);
-  activeRunOwnerRef.current = activeRunOwner;
-  const ownsActiveRun = useCallback(
-    (owner: RunEpochOwner | null | undefined) =>
-      !sameRunAccessScope(runAccessClosedScopeRef.current, currentRunAccessScopeRef.current) &&
-      sameRunEpochOwner(owner, activeRunOwnerRef.current),
-    [],
-  );
+  const { activeRunOwner, ownsActiveRun, runAccessClosed, resetRunAccessScope } = useRunOwnership({
+    activeRun,
+    moduleRoute,
+    runEventConnectionState: runEvents.connectionState,
+    runEventRunRef: runEvents.runRef,
+    sessionScopeId,
+    workspaceRef,
+  });
 
   const sseEvent = runEvents.event;
   const sseDriving =
@@ -413,9 +338,9 @@ export function useScannerRun(lane: ScannerLane) {
     setRunAttachmentNotice(null);
     setSavedRegister(null);
     setObjectBrowseResult(null);
-    runAccessClosedScopeRef.current = null;
+    resetRunAccessScope();
     dispatchRun({ type: "reset" });
-  }, [moduleRoute, sessionScopeId, workspaceRef.projectId, workspaceRef.siteId]);
+  }, [moduleRoute, resetRunAccessScope, sessionScopeId, workspaceRef.projectId, workspaceRef.siteId]);
 
   useEffect(() => {
     const run = requestedRunId ? requestedRunMatches : lastRunQuery.data;
@@ -451,114 +376,28 @@ export function useScannerRun(lane: ScannerLane) {
     }
   }, [activeRun, activeRunTerminal]);
 
-  const evidenceSyncRef = useRef<number | null>(null);
-  useEffect(() => {
-    evidenceSyncRef.current = null;
-  }, [activeRun?.epoch]);
-
   const refetchDiscoveryRun = discoveryRunQuery.refetch;
   const refetchDiscoveryResults = discoveryResultsQuery.refetch;
-  useEffect(() => {
-    const run = activeRun;
-    if (
-      runAccessClosed ||
-      !run ||
-      runController.phase !== "terminal-sync" ||
-      runController.runRef?.runId !== run.runId ||
-      runController.epoch !== run.epoch ||
-      evidenceSyncRef.current === run.epoch
-    ) {
-      return;
-    }
-    evidenceSyncRef.current = run.epoch;
-    let disposed = false;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    let resolveRetry: (() => void) | null = null;
-
-    const waitForRunStatusRetry = (delay: number) =>
-      new Promise<void>((resolve) => {
-        resolveRetry = resolve;
-        retryTimer = setTimeout(() => {
-          retryTimer = null;
-          resolveRetry = null;
-          resolve();
-        }, delay);
-      });
-
-    void (async () => {
-      try {
-        let terminalRunConfirmed = false;
-        for (let attempt = 0; attempt <= TERMINAL_RUN_STATUS_RETRY_DELAYS_MS.length; attempt += 1) {
-          const runResult = await refetchDiscoveryRun();
-          if (disposed) {
-            return;
-          }
-          if (runResult.data?.run_id && runResult.data.run_id !== run.runId) {
-            throw new Error("Final run evidence did not match the active run.");
-          }
-          if (!runResult.isError && runResult.data?.run_id === run.runId) {
-            if (isTerminalStatus(runResult.data.status)) {
-              terminalRunConfirmed = true;
-              break;
-            }
-          } else if (!isTransientRunStatusError(runResult.error)) {
-            throw runResult.error ?? new Error("Final run status could not be refreshed.");
-          }
-          const delay = TERMINAL_RUN_STATUS_RETRY_DELAYS_MS[attempt];
-          if (delay === undefined) {
-            throw runResult.error ?? new Error("Final run status did not reach a terminal state.");
-          }
-          await waitForRunStatusRetry(delay);
-          if (disposed) {
-            return;
-          }
-        }
-        if (!terminalRunConfirmed || disposed) {
-          return;
-        }
-        const results = await refetchDiscoveryResults();
-        if (disposed) {
-          return;
-        }
-        if (results.isError || results.data?.run_id !== run.runId) {
-          throw new Error("Final discovery evidence did not match the active run.");
-        }
-        dispatchRun({
-          type: "evidence-succeeded",
-          runId: run.runId,
-          epoch: run.epoch,
-          requirements: ["run", "results"],
-        });
-      } catch (cause) {
-        if (!disposed) {
-          dispatchRun({
-            type: "evidence-failed",
-            runId: run.runId,
-            epoch: run.epoch,
-            error: cause instanceof Error ? cause.message : "Final evidence refresh failed.",
-          });
-        }
+  const refetchRunStatus = useCallback(() => refetchDiscoveryRun(), [refetchDiscoveryRun]);
+  const confirmEvidence = useCallback(
+    async (run: ActiveScannerRun) => {
+      const results = await refetchDiscoveryResults();
+      if (results.isError || results.data?.run_id !== run.runId) {
+        throw new Error("Final discovery evidence did not match the active run.");
       }
-    })();
-
-    return () => {
-      disposed = true;
-      if (retryTimer !== null) {
-        clearTimeout(retryTimer);
-        retryTimer = null;
-      }
-      resolveRetry?.();
-      resolveRetry = null;
-    };
-  }, [
+    },
+    [refetchDiscoveryResults],
+  );
+  const requirementsFor = useCallback(() => DISCOVERY_EVIDENCE_REQUIREMENTS, []);
+  useTerminalEvidenceBarrier({
     activeRun,
-    refetchDiscoveryResults,
-    refetchDiscoveryRun,
-    runAccessClosed,
-    runController.phase,
-    runController.epoch,
-    runController.runRef?.runId,
-  ]);
+    blocked: runAccessClosed,
+    confirmEvidence,
+    dispatchRun,
+    refetchRunStatus,
+    requirementsFor,
+    runController,
+  });
 
   const finalEvidenceReady =
     runController.phase === "settled" &&
@@ -833,74 +672,3 @@ export function useScannerRun(lane: ScannerLane) {
 }
 
 export type ScannerRunController = ReturnType<typeof useScannerRun>;
-
-/**
- * Authenticated file download for the scanner cards (import templates, the
- * BACnet per-asset export ZIP, the register CSV). Same contract as ModulePage's
- * private useFileDownload — one in-flight download per hook, aborted on unmount
- * — kept here so the lazily-loaded scanner route does not have to import the
- * 11k-line module component just to fetch a file.
- */
-export function useScannerDownload() {
-  const { apiClient } = useSession();
-  const [pendingKey, setPendingKey] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // The HTTP status behind `error`, so a caller can tell a real fault from an
-  // expected miss (a 404 on a path offered from a file-name heuristic) without
-  // pattern-matching the server prose. null when the failure carried no status.
-  const [errorStatus, setErrorStatus] = useState<number | null>(null);
-  const generationRef = useRef(0);
-  const controllerRef = useRef<AbortController | null>(null);
-
-  useEffect(
-    () => () => {
-      generationRef.current += 1;
-      controllerRef.current?.abort();
-      controllerRef.current = null;
-    },
-    [],
-  );
-
-  const download = useCallback(
-    async ({ fallbackFilename, key, path }: { fallbackFilename: string; key: string; path: string }) => {
-      controllerRef.current?.abort();
-      const controller = new AbortController();
-      controllerRef.current = controller;
-      const generation = generationRef.current + 1;
-      generationRef.current = generation;
-      setPendingKey(key);
-      setError(null);
-      setErrorStatus(null);
-      try {
-        const { blob, filename } = await downloadFile(path, undefined, {
-          client: apiClient,
-          signal: controller.signal,
-        });
-        if (generation !== generationRef.current) {
-          return;
-        }
-        const objectUrl = URL.createObjectURL(blob);
-        const anchor = document.createElement("a");
-        anchor.href = objectUrl;
-        anchor.download = filename ?? fallbackFilename;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(objectUrl);
-      } catch (cause) {
-        if (generation === generationRef.current && !controller.signal.aborted) {
-          setError(cause instanceof Error ? cause.message : "Download failed.");
-          setErrorStatus(cause instanceof ApiError ? cause.status : null);
-        }
-      } finally {
-        if (generation === generationRef.current) {
-          controllerRef.current = null;
-          setPendingKey(null);
-        }
-      }
-    },
-    [apiClient],
-  );
-
-  return { download, error, errorStatus, pendingKey };
-}

@@ -141,7 +141,7 @@ function registerVerdict(state: string): { label: string; tone: "pass" | "warn" 
 // fields on DiscoveryAssetObservation. Returns "" when no register was bound:
 // the sidecars spell that "none", and a built-in discovery run or a dry run
 // stamps nothing at all. Both must read as "no verdict", not as a state.
-function registerStateOf(source: Record<string, unknown>): string {
+export function registerStateOf(source: Record<string, unknown>): string {
   const value = source.register ?? source.register_state;
   return typeof value === "string" && value !== "none" ? value : "";
 }
@@ -1103,4 +1103,27 @@ export function discoveryEmptyStateFor(
   }
 
   return null;
+}
+
+// One latest-payload-per-topic row for the MQTT capture panel, and its CSV.
+// Shared so the module page's built-in MQTT lane and the native scanner page
+// hand the operator the same five columns.
+export type CaptureRow = {
+  topic: string;
+  asset: string;
+  lastSeen: string;
+  messageCount: string;
+  payload: string;
+};
+
+export function captureRowsToCsv(rows: CaptureRow[]): string {
+  const header = ["Topic", "Asset", "Last Seen", "Message Count", "Latest Payload"];
+  const escape = (value: string): string => `"${value.replace(/"/g, '""')}"`;
+  const lines = [header.map(escape).join(",")];
+  for (const row of rows) {
+    lines.push(
+      [row.topic, row.asset, row.lastSeen, row.messageCount, row.payload].map(escape).join(","),
+    );
+  }
+  return lines.join("\r\n");
 }

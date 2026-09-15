@@ -8,15 +8,16 @@ import {
 import { queryKeys } from "../../api/queryKeys";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 import { SourceInterfaceDetails } from "../workflow/SourceInterfaceDetails";
+import { useFileDownload } from "../workflow/fileDownload";
 import { resolveBacnetInstanceRange } from "../workflow/buildDiscoveryParameters";
 import { BacnetEvidenceCards } from "./BacnetEvidenceCards";
 import { ScannerScreen, type SetupCell } from "./ScannerScreen";
-import { useScannerDownload, useScannerRun } from "./useScannerRun";
+import { useScannerRun } from "./useScannerRun";
 
 export function BacnetScannerPage() {
   const { apiClient, sessionScopeId, workspace: workspaceRef } = useSession();
   const run = useScannerRun("bacnet");
-  const assetsDownload = useScannerDownload();
+  const assetsDownload = useFileDownload(run.apiClient);
 
   const [instanceLow, setInstanceLow] = useState("");
   const [instanceHigh, setInstanceHigh] = useState("");

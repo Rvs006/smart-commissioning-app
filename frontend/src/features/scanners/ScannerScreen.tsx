@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
 import {
   createImport,
   getImportErrors,
-  getImportTemplatePath,
   getLatestImport,
   getScanRegisterCsvPath,
   listImportProfiles,
@@ -17,7 +16,9 @@ import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { ENGINEER_REQUIRED_TOOLTIP } from "../../app/sessionContext";
 import { LiveRunConsole } from "../workflow/LiveRunConsole";
 import { bacnetBackendLabel, discoveryEmptyStateFor } from "../workflow/discoveryRows";
+import { useFileDownload } from "../workflow/fileDownload";
 import { formatRelativeTime, humanizeStage } from "../workflow/runFormat";
+import { RegisterImportFields } from "../workflow/RegisterImportFields";
 import { DeviceDetailPanel } from "./DeviceDetailPanel";
 import { GenerateReportCard } from "./GenerateReportCard";
 import {
@@ -32,14 +33,11 @@ import {
   type ScannerRow,
 } from "./scannerRows";
 import {
-  useScannerDownload,
   useStoredPanelWidth,
   type ScannerRunController,
   type ScannerRunInputs,
 } from "./useScannerRun";
 import "./scanners.css";
-
-const IMPORT_ERROR_DISPLAY_CAP = 50;
 
 export type SetupCell = {
   label: string;
@@ -202,8 +200,8 @@ export function ScannerScreen({
   const importType = (module.importTypes[0] ?? "") as ImportType | "";
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [importOutcome, setImportOutcome] = useState<ImportBatchSummary | null>(null);
-  const templateDownload = useScannerDownload();
-  const registerCsvDownload = useScannerDownload();
+  const templateDownload = useFileDownload(apiClient);
+  const registerCsvDownload = useFileDownload(apiClient);
 
   const profilesQuery = useQuery({
     queryFn: ({ signal }) => listImportProfiles({ client: apiClient, signal }),
@@ -264,23 +262,6 @@ export function ScannerScreen({
     scanRegisterRoute,
     latestRegisterFileName,
   );
-
-  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0] ?? null;
-    setSelectedFile(file);
-    setImportOutcome(null);
-    // Clear the native input so re-picking the same file still fires a change.
-    event.target.value = "";
-  };
-
-  const importErrors = (importErrorsQuery.data?.errors ?? []).filter(
-    (error) =>
-      error.code !== "missing_required_column" ||
-      (importOutcome?.missing_columns.length ?? 0) === 0,
-  );
-  const visibleImportErrors = importErrors.slice(0, IMPORT_ERROR_DISPLAY_CAP);
-  const hiddenImportErrorCount = Math.max(importErrors.length - IMPORT_ERROR_DISPLAY_CAP, 0);
-  const importWarnings = importOutcome?.warnings ?? [];
 
   const laneNoun = lane === "bacnet" ? "BACnet" : lane === "mqtt" ? "MQTT" : "IP";
   const laneRunNoun = lane === "mqtt" ? "capture" : "scan";
@@ -505,203 +486,34 @@ export function ScannerScreen({
           <span className="scanner-setup-sub">{importType.replace(/_/g, " ")}</span>
         </div>
         <div className="scanner-card-body form-stack">
-          {/* One import type per lane, so the profile is a fact, not a choice: a
-              permanently disabled single-option select invites a click that can
-              never do anything. The card head already names it. */}
-          <label>
-            CSV or XLSX file
-            <input accept=".csv,.xlsx" onChange={handleFileChange} type="file" />
-          </label>
-          {selectedFile && <p className="field-note">Selected: {selectedFile.name}</p>}
-          {!selectedFile && latestImportQuery.data && (
-            <div className="state-panel success import-on-file">
-              <strong>Register already imported</strong>
-              <span>
-                {latestImportQuery.data.file_name} — {latestImportQuery.data.accepted_rows} of{" "}
-                {latestImportQuery.data.total_rows} rows accepted,{" "}
-                {formatRelativeTime(latestImportQuery.data.created_at)}. This register is stored and
-                used by runs on this page; upload again only if the file changed.
-              </span>
-              {/* A register saved from a scan has no file the operator ever held;
-                  the run it came from can still rebuild the same CSV. */}
-              {latestRegisterCsvRunId && (
-                <button
-                  className="secondary-button compact"
-                  disabled={registerCsvDownload.pendingKey !== null}
-                  onClick={() => {
-                    void registerCsvDownload.download({
-                      fallbackFilename: latestRegisterFileName,
-                      key: "latest-register-csv",
-                      path: getScanRegisterCsvPath(scanRegisterRoute, latestRegisterCsvRunId),
-                    });
-                  }}
-                  type="button"
-                >
-                  {registerCsvDownload.pendingKey === "latest-register-csv"
-                    ? "Downloading..."
-                    : "Download register CSV"}
-                </button>
-              )}
-              {/* The link is offered on a file-name match, so a 404 here is the
-                  honest answer that the guess was wrong, not a fault. */}
-              {registerCsvDownload.error && (
-                <span className="field-note" role="alert">
-                  {registerCsvDownload.errorStatus === 404
-                    ? "This register was uploaded, so there is no scan behind it to rebuild the CSV from. Use your own copy of the file."
-                    : `Register CSV download failed: ${registerCsvDownload.error}`}
-                </span>
-              )}
-            </div>
-          )}
-          <button
-            className="primary-button"
-            disabled={!selectedFile || !importType || importMutation.isPending || !canEngineer}
-            onClick={() => {
+          <RegisterImportFields
+            canEngineer={canEngineer}
+            importErrorsQuery={importErrorsQuery}
+            importOutcome={importOutcome}
+            importType={importType}
+            latestImport={latestImportQuery.data}
+            onFileSelected={(file) => {
+              setSelectedFile(file);
+              setImportOutcome(null);
+            }}
+            onUpload={() => {
               if (selectedFile && importType) {
                 importMutation.mutate({ file: selectedFile, importType });
               }
             }}
-            title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
-            type="button"
-          >
-            {importMutation.isPending ? "Validating..." : "Upload and validate"}
-          </button>
-
-          {importType && (
-            <div className="schema-card template-card">
-              <div>
-                <strong>Default import template</strong>
-                <p>
-                  Use this format as the normal project template. It includes the required columns
-                  and one realistic example row.
-                </p>
-              </div>
-              <div className="inline-actions">
-                <button
-                  className="secondary-button compact"
-                  disabled={templateDownload.pendingKey !== null}
-                  onClick={() =>
-                    void templateDownload.download({
-                      fallbackFilename: `${importType}_template.xlsx`,
-                      key: "template-xlsx",
-                      path: getImportTemplatePath(importType, "xlsx"),
-                    })
-                  }
-                  type="button"
-                >
-                  {templateDownload.pendingKey === "template-xlsx"
-                    ? "Downloading..."
-                    : "Download XLSX"}
-                </button>
-                <button
-                  className="secondary-button compact"
-                  disabled={templateDownload.pendingKey !== null}
-                  onClick={() =>
-                    void templateDownload.download({
-                      fallbackFilename: `${importType}_template.csv`,
-                      key: "template-csv",
-                      path: getImportTemplatePath(importType, "csv"),
-                    })
-                  }
-                  type="button"
-                >
-                  {templateDownload.pendingKey === "template-csv"
-                    ? "Downloading..."
-                    : "Download CSV"}
-                </button>
-              </div>
-            </div>
-          )}
-          {templateDownload.error && (
-            <div className="state-panel error">
-              <strong>Template download failed</strong>
-              <span>{templateDownload.error}</span>
-            </div>
-          )}
-
-          {selectedProfile && (
-            <div className="schema-card">
-              <strong>Required columns</strong>
-              <div className="tag-cloud">
-                {selectedProfile.required_columns.slice(0, 8).map((column) => (
-                  <span key={column}>{column}</span>
-                ))}
-              </div>
-              {(selectedProfile.optional_columns ?? []).length > 0 && (
-                <>
-                  <strong>Optional columns</strong>
-                  <div className="tag-cloud">
-                    {(selectedProfile.optional_columns ?? []).slice(0, 8).map((column) => (
-                      <span className="optional" key={column}>
-                        {column}
-                      </span>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          {importMutation.isError && (
-            <div className="state-panel error">
-              <strong>Import failed</strong>
-              <span>{importMutation.error.message}</span>
-            </div>
-          )}
-          {importOutcome && (
-            <div className={`state-panel ${importOutcome.status}`}>
-              <strong>{importOutcome.status.toUpperCase()}</strong>
-              <span>
-                {importOutcome.accepted_rows} accepted · {importOutcome.rejected_rows} rejected
-              </span>
-            </div>
-          )}
-          {importOutcome && importOutcome.status !== "accepted" && (
-            <div className="state-panel error import-errors">
-              <strong>
-                {importOutcome.status === "rejected"
-                  ? "Import rejected — reasons below"
-                  : `${importOutcome.rejected_rows} of ${importOutcome.total_rows} rows rejected — reasons below`}
-              </strong>
-              {importOutcome.missing_columns.length > 0 && (
-                <span>Missing required columns: {importOutcome.missing_columns.join(", ")}</span>
-              )}
-              {importErrorsQuery.isLoading && <span>Loading rejection reasons...</span>}
-              {importErrorsQuery.isError && (
-                <span>Could not load rejection reasons: {importErrorsQuery.error.message}</span>
-              )}
-              {visibleImportErrors.length > 0 && (
-                <ul>
-                  {visibleImportErrors.map((error, index) => (
-                    <li key={`${error.row_number ?? "file"}-${error.field ?? ""}-${index}`}>
-                      {error.row_number != null ? `Row ${error.row_number} — ` : ""}
-                      {error.field ? `${error.field}: ` : ""}
-                      {error.message} ({error.code})
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {hiddenImportErrorCount > 0 && (
-                <span>
-                  ...and {hiddenImportErrorCount} more rejected rows not shown — fix the rows listed
-                  above and re-upload to see the rest.
-                </span>
-              )}
-            </div>
-          )}
-          {importWarnings.length > 0 && (
-            <div className="state-panel warning">
-              <strong>{importWarnings.length} warning(s) — affected rows are still accepted</strong>
-              <ul>
-                {importWarnings.map((warning, index) => (
-                  <li key={`${warning.row_number ?? "file"}-${warning.field ?? ""}-${index}`}>
-                    {warning.row_number != null ? `Row ${warning.row_number}: ` : ""}
-                    {warning.message}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+            registerCsv={{
+              download: registerCsvDownload,
+              fallbackFilename: latestRegisterFileName,
+              path: latestRegisterCsvRunId
+                ? getScanRegisterCsvPath(scanRegisterRoute, latestRegisterCsvRunId)
+                : null,
+            }}
+            selectedFile={selectedFile}
+            selectedProfile={selectedProfile}
+            templateDownload={templateDownload}
+            uploadError={importMutation.error}
+            uploading={importMutation.isPending}
+          />
         </div>
       </section>
 

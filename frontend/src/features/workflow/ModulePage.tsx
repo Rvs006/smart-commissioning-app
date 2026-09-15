@@ -1,5 +1,4 @@
 import {
-  ChangeEvent,
   FormEvent,
   Fragment,
   useCallback,
@@ -22,7 +21,6 @@ import {
   createScanAuthorization,
   deleteReports,
   deleteUdmiSchemaSet,
-  downloadFile,
   getConfiguration,
   getDiscoveryResults,
   getDiscoveryComparison,
@@ -38,7 +36,6 @@ import {
   getValidationIssues,
   getValidationJsonExportPath,
   getValidationRun,
-  getImportTemplatePath,
   getReportDownloadPath,
   getBacnetExportAssetsPath,
   getRawEvidenceDownloadPath,
@@ -84,7 +81,6 @@ import {
   UdmiReportScopeV1,
   UdmiValidationSummaryV1,
   ValidationIssueRecord,
-  type SessionBoundApiClient,
   type NmapProfileName,
   type BacnetPropertyName,
   type BacnetObjectBrowseResponse,
@@ -119,6 +115,7 @@ import {
 import {
   bacnetBackendLabel,
   bacnetDeviceDetailItems,
+  captureRowsToCsv,
   discoveryEmptyStateFor,
   discoveryMetrics,
   discoveryViewFor,
@@ -133,10 +130,10 @@ import {
   resultRowMatchesFilter,
   unexpectedOpenPorts,
   validationMetrics,
+  type CaptureRow,
 } from "./discoveryRows";
 import {
   formatAbsoluteTime,
-  formatRelativeTime,
   formatRunProgress,
   humanizeStage,
   isTerminalStatus,
@@ -144,11 +141,20 @@ import {
   toHealthState,
 } from "./runFormat";
 import { alignPayloadDiff, tokenizeJsonLine, type AlignedRow } from "./payloadDiff";
+import { useFileDownload, triggerBlobDownload } from "./fileDownload";
+import { JsonTree, MqttPayloadPanel } from "./JsonTree";
+import { RegisterImportFields } from "./RegisterImportFields";
+import {
+  sameRunEpochOwner,
+  useRunOwnership,
+  useTerminalEvidenceBarrier,
+  type RunEpochOwner,
+} from "./runOwnership";
 import { useRunEvents } from "./useRunEvents";
 import { LiveRunConsole } from "./LiveRunConsole";
 import { resolvePermittedNmapProfile } from "./nmapProfileSelection";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
-import type { RunRef, SessionScopeId, WorkspaceRef } from "../../app/sessionScope";
+import type { RunRef } from "../../app/sessionScope";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { isPlainObject } from "../../utils/isPlainObject";
 
@@ -242,48 +248,6 @@ type DetailItem = {
   value: string;
 };
 
-type RunEpochOwner = {
-  epoch: number;
-  runId: string;
-  sessionScopeId: SessionScopeId;
-  workspaceRef: WorkspaceRef;
-};
-
-type RunAccessScope = {
-  moduleRoute: string;
-  sessionScopeId: SessionScopeId;
-  workspaceRef: WorkspaceRef;
-};
-
-function sameRunEpochOwner(
-  left: RunEpochOwner | null | undefined,
-  right: RunEpochOwner | null | undefined,
-): boolean {
-  return Boolean(
-    left &&
-      right &&
-      left.runId === right.runId &&
-      left.epoch === right.epoch &&
-      left.sessionScopeId === right.sessionScopeId &&
-      left.workspaceRef.projectId === right.workspaceRef.projectId &&
-      left.workspaceRef.siteId === right.workspaceRef.siteId,
-  );
-}
-
-function sameRunAccessScope(
-  left: RunAccessScope | null | undefined,
-  right: RunAccessScope | null | undefined,
-): boolean {
-  return Boolean(
-    left &&
-      right &&
-      left.moduleRoute === right.moduleRoute &&
-      left.sessionScopeId === right.sessionScopeId &&
-      left.workspaceRef.projectId === right.workspaceRef.projectId &&
-      left.workspaceRef.siteId === right.workspaceRef.siteId,
-  );
-}
-
 const NMAP_PROFILE_LABELS: Record<NmapProfileName, string> = {
   tcp_connect_inventory: "TCP connect inventory",
   host_discovery: "Host discovery",
@@ -348,22 +312,11 @@ const DISCOVERY_ROUTES = new Set([
 // step — true for all three whether they render native or embedded.
 const SIDECAR_DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-scanner", "mqtt-scanner"]);
 
-// A large register can reject hundreds of rows. Render the first N and state the
-// honest remainder count rather than building pagination for a pre-1.0 fix:
-// fixing the listed rows and re-uploading surfaces the rest.
-const IMPORT_ERROR_DISPLAY_CAP = 50;
+// Which evidence the settled phase requires, per run kind.
+const DISCOVERY_EVIDENCE_REQUIREMENTS = ["run", "results"] as const;
+const VALIDATION_EVIDENCE_REQUIREMENTS = ["run", "issues"] as const;
 const LONG_PAYLOAD_ISSUE_THRESHOLD = 8;
 const REPORT_PAGE_SIZE = 100;
-const TERMINAL_RUN_STATUS_RETRY_DELAYS_MS = [300, 600, 1_000] as const;
-
-function isTransientRunStatusError(error: unknown): boolean {
-  return (
-    !(error instanceof ApiError) ||
-    error.status === 408 ||
-    error.status === 429 ||
-    error.status >= 500
-  );
-}
 
 function isDefinitiveLiveSubmissionRejection(error: unknown): boolean {
   return (
@@ -996,42 +949,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     apiClient,
     activeRun?.epoch ?? 0,
   );
-  // A disabled stream returns to its neutral `idle` state. Preserve a closed
-  // access boundary across submission fencing so a reserved epoch cannot make
-  // an already-denied workspace readable again.
-  const currentRunAccessScope: RunAccessScope = {
+  // A disabled stream returns to its neutral `idle` state. The shared hook
+  // preserves a closed access boundary across submission fencing so a reserved
+  // epoch cannot make an already-denied workspace readable again.
+  const {
+    activeRunOwner,
+    overrideActiveRunOwner,
+    ownsActiveRun,
+    runAccessClosed,
+    resetRunAccessScope,
+  } = useRunOwnership({
+    activeRun,
     moduleRoute: module.route,
+    runEventConnectionState: runEvents.connectionState,
+    runEventRunRef: runEvents.runRef,
     sessionScopeId,
     workspaceRef,
-  };
-  const currentRunAccessScopeRef = useRef(currentRunAccessScope);
-  currentRunAccessScopeRef.current = currentRunAccessScope;
-  const runAccessClosedScopeRef = useRef<RunAccessScope | null>(null);
-  const runEventAccessScope: RunAccessScope | null = runEvents.runRef
-    ? {
-        moduleRoute: runEvents.runRef.module,
-        sessionScopeId: runEvents.runRef.sessionScopeId,
-        workspaceRef: runEvents.runRef.workspace,
-      }
-    : null;
-  if (
-    runEvents.connectionState === "closed" &&
-    sameRunAccessScope(runEventAccessScope, currentRunAccessScope)
-  ) {
-    runAccessClosedScopeRef.current = runEventAccessScope;
-  }
-  const runAccessClosed = sameRunAccessScope(
-    runAccessClosedScopeRef.current,
-    currentRunAccessScope,
-  );
-  const activeRunOwner: RunEpochOwner | null = activeRun
-    ? { epoch: activeRun.epoch, runId: activeRun.runId, sessionScopeId, workspaceRef }
-    : null;
-  const activeRunOwnerRef = useRef<RunEpochOwner | null>(activeRunOwner);
-  activeRunOwnerRef.current = activeRunOwner;
-  const ownsActiveRun = (owner: RunEpochOwner | null | undefined) =>
-    !sameRunAccessScope(runAccessClosedScopeRef.current, currentRunAccessScopeRef.current) &&
-    sameRunEpochOwner(owner, activeRunOwnerRef.current);
+  });
   const canApplyReservedLiveSubmission = (owner: RunEpochOwner | null | undefined) =>
     canEngineerRef.current && ownsActiveRun(owner);
   const sseEvent = runEvents.event;
@@ -1823,7 +1757,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       queryClient.removeQueries({ queryKey: propertyRunQueryPrefix });
       queryClient.removeQueries({ queryKey: propertyAuthorizationsQueryPrefix });
     };
-  }, [propertyOwner, queryClient]);
+  }, [ownsActiveRun, propertyOwner, queryClient]);
 
   const discoveryComparisonQuery = useQuery({
     enabled:
@@ -2014,135 +1948,47 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
   }, [activeRun, activeRunTerminal]);
 
-  const evidenceSyncRef = useRef<number | null>(null);
-  useEffect(() => {
-    evidenceSyncRef.current = null;
-  }, [activeRun?.epoch]);
-
   const refetchValidationRun = validationRunQuery.refetch;
   const refetchDiscoveryRun = discoveryRunQuery.refetch;
   const refetchValidationIssues = validationIssuesQuery.refetch;
   const refetchDiscoveryResults = discoveryResultsQuery.refetch;
-  useEffect(() => {
-    const run = activeRun;
-    if (
-      runAccessClosed ||
-      !run ||
-      runController.phase !== "terminal-sync" ||
-      runController.runRef?.runId !== run.runId ||
-      runController.epoch !== run.epoch ||
-      evidenceSyncRef.current === run.epoch
-    ) {
-      return;
-    }
-    evidenceSyncRef.current = run.epoch;
-    let disposed = false;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    let resolveRetry: (() => void) | null = null;
-
-    const waitForRunStatusRetry = (delay: number) =>
-      new Promise<void>((resolve) => {
-        resolveRetry = resolve;
-        retryTimer = setTimeout(() => {
-          retryTimer = null;
-          resolveRetry = null;
-          resolve();
-        }, delay);
-      });
-
-    void (async () => {
-      try {
-        let terminalRunConfirmed = false;
-        for (let attempt = 0; attempt <= TERMINAL_RUN_STATUS_RETRY_DELAYS_MS.length; attempt += 1) {
-          const runResult =
-            run.kind === "discovery" ? await refetchDiscoveryRun() : await refetchValidationRun();
-          if (disposed) {
-            return;
-          }
-          if (runResult.data?.run_id && runResult.data.run_id !== run.runId) {
-            throw new Error("Final run evidence did not match the active run.");
-          }
-          if (!runResult.isError && runResult.data?.run_id === run.runId) {
-            if (isTerminalStatus(runResult.data.status)) {
-              terminalRunConfirmed = true;
-              break;
-            }
-          } else if (!isTransientRunStatusError(runResult.error)) {
-            throw runResult.error ?? new Error("Final run status could not be refreshed.");
-          }
-
-          const delay = TERMINAL_RUN_STATUS_RETRY_DELAYS_MS[attempt];
-          if (delay === undefined) {
-            throw runResult.error ?? new Error("Final run status did not reach a terminal state.");
-          }
-          await waitForRunStatusRetry(delay);
-          if (disposed) {
-            return;
-          }
+  // Stable callbacks: the barrier effect re-runs when they change, and a
+  // mid-flight re-run would abort the sequence it is holding open.
+  const refetchRunStatus = useCallback(
+    (run: ActiveRun) =>
+      run.kind === "discovery" ? refetchDiscoveryRun() : refetchValidationRun(),
+    [refetchDiscoveryRun, refetchValidationRun],
+  );
+  const confirmEvidence = useCallback(
+    async (run: ActiveRun) => {
+      if (run.kind === "validation") {
+        const issues = await refetchValidationIssues();
+        if (issues.isError || issues.data?.run_id !== run.runId) {
+          throw issues.error ?? new Error("Final issues did not match the active run.");
         }
-
-        if (!terminalRunConfirmed || disposed) {
-          return;
-        }
-
-        if (run.kind === "validation") {
-          const issues = await refetchValidationIssues();
-          if (disposed) {
-            return;
-          }
-          if (issues.isError || issues.data?.run_id !== run.runId) {
-            throw issues.error ?? new Error("Final issues did not match the active run.");
-          }
-        } else {
-          const results = await refetchDiscoveryResults();
-          if (disposed) {
-            return;
-          }
-          if (results.isError || results.data?.run_id !== run.runId) {
-            throw new Error("Final discovery evidence did not match the active run.");
-          }
-        }
-
-        if (!disposed) {
-          dispatchRun({
-            type: "evidence-succeeded",
-            runId: run.runId,
-            epoch: run.epoch,
-            requirements: run.kind === "validation" ? ["run", "issues"] : ["run", "results"],
-          });
-        }
-      } catch (cause) {
-        if (!disposed) {
-          dispatchRun({
-            type: "evidence-failed",
-            runId: run.runId,
-            epoch: run.epoch,
-            error: cause instanceof Error ? cause.message : "Final evidence refresh failed.",
-          });
-        }
+        return;
       }
-    })();
-
-    return () => {
-      disposed = true;
-      if (retryTimer !== null) {
-        clearTimeout(retryTimer);
-        retryTimer = null;
+      const results = await refetchDiscoveryResults();
+      if (results.isError || results.data?.run_id !== run.runId) {
+        throw new Error("Final discovery evidence did not match the active run.");
       }
-      resolveRetry?.();
-      resolveRetry = null;
-    };
-  }, [
+    },
+    [refetchDiscoveryResults, refetchValidationIssues],
+  );
+  const requirementsFor = useCallback(
+    (run: ActiveRun) =>
+      run.kind === "validation" ? VALIDATION_EVIDENCE_REQUIREMENTS : DISCOVERY_EVIDENCE_REQUIREMENTS,
+    [],
+  );
+  const { resetEvidenceSync } = useTerminalEvidenceBarrier({
     activeRun,
-    refetchDiscoveryResults,
-    refetchDiscoveryRun,
-    refetchValidationIssues,
-    refetchValidationRun,
-    runAccessClosed,
-    runController.phase,
-    runController.epoch,
-    runController.runRef?.runId,
-  ]);
+    blocked: runAccessClosed,
+    confirmEvidence,
+    dispatchRun,
+    refetchRunStatus,
+    requirementsFor,
+    runController,
+  });
 
   const observationBarrierRequired = Boolean(
     progressiveObservationRun && (progressiveObservationEnabled || currentObservationFold),
@@ -2170,7 +2016,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setReservedLiveSubmissionOwner(null);
     setDefinitiveLiveRejectionOwner(null);
     reservedLiveSubmissionOwnerRef.current = null;
-    runAccessClosedScopeRef.current = null;
+    resetRunAccessScope();
     setScanPreviewActive(false);
     setObservationFold(null);
     setCopyFeedback(null);
@@ -2216,6 +2062,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetExportDownload,
     resetCaptureExportDownload,
     resetGeneratedAllBundleDownload,
+    resetRunAccessScope,
     resetValidationJsonDownload,
     sessionScopeId,
     workspaceRef.projectId,
@@ -2628,7 +2475,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       // A preview and its authorized live run can share an id in local/test
       // adapters. Treat each submission as a fresh evidence barrier even when
       // the backend reuses that identifier.
-      evidenceSyncRef.current = null;
+      resetEvidenceSync();
       const action = module.runActions.find((candidate) => candidate.id === variables.actionId);
       const reservesAuthorizedLiveEpoch =
         action?.kind === "discovery" &&
@@ -2650,7 +2497,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         // epoch here fences same-ID preview evidence even when the adapter has
         // applied the live start but has not returned its HTTP response yet.
         flushSync(() => {
-          activeRunOwnerRef.current = reservedOwner;
+          overrideActiveRunOwner(reservedOwner);
           reservedLiveSubmissionOwnerRef.current = reservedOwner;
           setActiveRun(reservedRun);
           setReservedLiveSubmissionOwner(reservedOwner);
@@ -2732,8 +2579,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             setReservedLiveSubmissionOwner(null);
             reservedLiveSubmissionOwnerRef.current = null;
             setDefinitiveLiveRejectionOwner(null);
-            evidenceSyncRef.current = null;
-            activeRunOwnerRef.current = { epoch, runId: result.run_id, sessionScopeId, workspaceRef };
+            resetEvidenceSync();
+            overrideActiveRunOwner({ epoch, runId: result.run_id, sessionScopeId, workspaceRef });
           }
           setActiveRun({ epoch, kind: "discovery", ref, runId: result.run_id });
           dispatchRun({ type: "accepted", runRef: ref, epoch });
@@ -4313,19 +4160,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       ? `Download ${exportReport.file_name ?? "report"}`
       : "Generate a report first to enable a real download.";
 
-  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    setSelectedFile(event.target.files?.[0] ?? null);
-    setImportOutcome(null);
-    // Chromium fires no change event when the same path is re-picked while the
-    // input still holds it, so a corrected CSV saved over the original was
-    // silently never re-read (field engineer had to rename the file to get it uploaded).
-    // Clearing the value makes every pick deliver a fresh File snapshot. The
-    // File captured into state above stays valid for the upload, and the staged
-    // name is rendered from state since the native input now always reads
-    // "No file chosen".
-    event.target.value = "";
-  };
-
   const handleImport = () => {
     if (selectedFile && selectedImportType) {
       importMutation.mutate({
@@ -4764,22 +4598,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     (isSidecarDiscoveryModule && !scanAuthorized) ||
     nmapSelectionBlocked;
 
-  // Import warnings are informational (their rows stay accepted), so they get
-  // their own amber panel below the outcome — never the red error styling.
-  const importWarnings = importOutcome?.warnings ?? [];
-
-  // Rejection reasons for the red panel. When the summary already names the
-  // missing columns on its own line, the per-column missing_required_column
-  // records (import_service.py:698-706) would repeat it verbatim as bullets —
-  // drop them there only, so the reasons stay complete but nothing is said twice.
-  const importErrors = (importErrorsQuery.data?.errors ?? []).filter(
-    (error) =>
-      error.code !== "missing_required_column" ||
-      (importOutcome?.missing_columns.length ?? 0) === 0,
-  );
-  const visibleImportErrors = importErrors.slice(0, IMPORT_ERROR_DISPLAY_CAP);
-  const hiddenImportErrorCount = Math.max(importErrors.length - IMPORT_ERROR_DISPLAY_CAP, 0);
-
   const jumpToPayloadComparison = useCallback((payloadKey: string) => {
     const target = payloadComparisonControlRefs.current.get(payloadKey);
     if (!target) {
@@ -5108,223 +4926,31 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </select>
                   </label>
 
-                  <label>
-                    CSV or XLSX file
-                    <input accept=".csv,.xlsx" onChange={handleFileChange} type="file" />
-                  </label>
-                  {/* handleFileChange clears the input's value, so the native
-                  control always reads "No file chosen" — the staged file is
-                  named here from state instead. */}
-                  {selectedFile && <p className="field-note">Selected: {selectedFile.name}</p>}
-                  {/* When nothing is staged in this session, surface the server's
-                  own record of the last import so the empty file input does not
-                  imply nothing was ever uploaded (ISSUE-5). Only ever shown on a
-                  real hit — a 404/error leaves data undefined. */}
-                  {!selectedFile && latestImportQuery.data && (
-                    <div className="state-panel success import-on-file">
-                      <strong>Register already imported</strong>
-                      <span>
-                        {latestImportQuery.data.file_name} — {latestImportQuery.data.accepted_rows}{" "}
-                        of {latestImportQuery.data.total_rows} rows accepted,{" "}
-                        {formatRelativeTime(latestImportQuery.data.created_at)}. This register is
-                        stored and used by runs on this page; upload again only if the file changed.
-                      </span>
-                      {/* A register saved from a scan has no file the operator ever
-                        held; the run it came from can still rebuild the same CSV. */}
-                      {scanRegisterRoute && latestRegisterCsvRunId && (
-                        <button
-                          className="secondary-button compact"
-                          disabled={registerCsvDownload.pendingKey !== null}
-                          onClick={() => {
-                            void registerCsvDownload.download({
-                              fallbackFilename: latestRegisterCsvFileName,
-                              key: "latest-register-csv",
-                              path: getScanRegisterCsvPath(scanRegisterRoute, latestRegisterCsvRunId),
-                            });
-                          }}
-                          type="button"
-                        >
-                          {registerCsvDownload.pendingKey === "latest-register-csv"
-                            ? "Downloading..."
-                            : "Download register CSV"}
-                        </button>
-                      )}
-                      {/* The link is offered on a file-name match, so a 404 here is
-                        the honest answer that the guess was wrong, not a fault. */}
-                      {registerCsvDownload.error && (
-                        <span className="field-note" role="alert">
-                          {registerCsvDownload.errorStatus === 404
-                            ? "This register was uploaded, so there is no scan behind it to rebuild the CSV from. Use your own copy of the file."
-                            : `Register CSV download failed: ${registerCsvDownload.error}`}
-                        </span>
-                      )}
-                    </div>
-                  )}
-
-                  <button
-                    className="primary-button"
-                    disabled={
-                      !selectedFile ||
-                      !selectedImportType ||
-                      importMutation.isPending ||
-                      !canEngineer
-                    }
-                    onClick={handleImport}
-                    title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
-                    type="button"
-                  >
-                    {importMutation.isPending ? "Validating..." : "Upload and validate"}
-                  </button>
-
-                  {selectedImportType && (
-                    <div className="schema-card template-card">
-                      <div>
-                        <strong>Default import template</strong>
-                        <p>
-                          Use this format as the normal project template. It includes the required
-                          columns and one realistic example row.
-                        </p>
-                      </div>
-                      <div className="inline-actions">
-                        <button
-                          className="secondary-button compact"
-                          disabled={templateDownload.pendingKey !== null}
-                          onClick={() =>
-                            void templateDownload.download({
-                              fallbackFilename: `${selectedImportType}_template.xlsx`,
-                              key: "template-xlsx",
-                              path: getImportTemplatePath(selectedImportType, "xlsx"),
-                            })
-                          }
-                          type="button"
-                        >
-                          {templateDownload.pendingKey === "template-xlsx"
-                            ? "Downloading..."
-                            : "Download XLSX"}
-                        </button>
-                        <button
-                          className="secondary-button compact"
-                          disabled={templateDownload.pendingKey !== null}
-                          onClick={() =>
-                            void templateDownload.download({
-                              fallbackFilename: `${selectedImportType}_template.csv`,
-                              key: "template-csv",
-                              path: getImportTemplatePath(selectedImportType, "csv"),
-                            })
-                          }
-                          type="button"
-                        >
-                          {templateDownload.pendingKey === "template-csv"
-                            ? "Downloading..."
-                            : "Download CSV"}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {templateDownload.error && (
-                    <div className="state-panel error">
-                      <strong>Template download failed</strong>
-                      <span>{templateDownload.error}</span>
-                    </div>
-                  )}
-
-                  {selectedProfile && (
-                    <div className="schema-card">
-                      <strong>Required columns</strong>
-                      <div className="tag-cloud">
-                        {selectedProfile.required_columns.slice(0, 8).map((column) => (
-                          <span key={column}>{column}</span>
-                        ))}
-                      </div>
-                      {(selectedProfile.optional_columns ?? []).length > 0 && (
-                        <>
-                          <strong>Optional columns</strong>
-                          <div className="tag-cloud">
-                            {(selectedProfile.optional_columns ?? []).slice(0, 8).map((column) => (
-                              <span key={column} className="optional">
-                                {column}
-                              </span>
-                            ))}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  )}
-
-                  {importMutation.isError && (
-                    <div className="state-panel error">
-                      <strong>Import failed</strong>
-                      <span>{importMutation.error.message}</span>
-                    </div>
-                  )}
-
-                  {importOutcome && (
-                    <div className={`state-panel ${importOutcome.status}`}>
-                      <strong>{importOutcome.status.toUpperCase()}</strong>
-                      <span>
-                        {importOutcome.accepted_rows} accepted · {importOutcome.rejected_rows}{" "}
-                        rejected
-                      </span>
-                    </div>
-                  )}
-
-                  {importOutcome && importOutcome.status !== "accepted" && (
-                    <div className="state-panel error import-errors">
-                      <strong>
-                        {importOutcome.status === "rejected"
-                          ? "Import rejected — reasons below"
-                          : `${importOutcome.rejected_rows} of ${importOutcome.total_rows} rows rejected — reasons below`}
-                      </strong>
-                      {importOutcome.missing_columns.length > 0 && (
-                        <span>
-                          Missing required columns: {importOutcome.missing_columns.join(", ")}
-                        </span>
-                      )}
-                      {importErrorsQuery.isLoading && <span>Loading rejection reasons...</span>}
-                      {/* Never let a failed fetch look like "no reasons": say so. */}
-                      {importErrorsQuery.isError && (
-                        <span>
-                          Could not load rejection reasons: {importErrorsQuery.error.message}
-                        </span>
-                      )}
-                      {visibleImportErrors.length > 0 && (
-                        <ul>
-                          {visibleImportErrors.map((error, index) => (
-                            <li key={`${error.row_number ?? "file"}-${error.field ?? ""}-${index}`}>
-                              {error.row_number != null ? `Row ${error.row_number} — ` : ""}
-                              {error.field ? `${error.field}: ` : ""}
-                              {error.message} ({error.code})
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                      {hiddenImportErrorCount > 0 && (
-                        <span>
-                          ...and {hiddenImportErrorCount} more rejected rows not shown — fix the
-                          rows listed above and re-upload to see the rest.
-                        </span>
-                      )}
-                    </div>
-                  )}
-
-                  {importWarnings.length > 0 && (
-                    <div className="state-panel warning">
-                      <strong>
-                        {importWarnings.length} warning(s) — affected rows are still accepted
-                      </strong>
-                      <ul>
-                        {importWarnings.map((warning, index) => (
-                          <li
-                            key={`${warning.row_number ?? "file"}-${warning.field ?? ""}-${index}`}
-                          >
-                            {warning.row_number != null ? `Row ${warning.row_number}: ` : ""}
-                            {warning.message}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
+                  <RegisterImportFields
+                    canEngineer={canEngineer}
+                    importErrorsQuery={importErrorsQuery}
+                    importOutcome={importOutcome}
+                    importType={selectedImportType}
+                    latestImport={latestImportQuery.data}
+                    onFileSelected={(file) => {
+                      setSelectedFile(file);
+                      setImportOutcome(null);
+                    }}
+                    onUpload={handleImport}
+                    registerCsv={{
+                      download: registerCsvDownload,
+                      fallbackFilename: latestRegisterCsvFileName,
+                      path:
+                        scanRegisterRoute && latestRegisterCsvRunId
+                          ? getScanRegisterCsvPath(scanRegisterRoute, latestRegisterCsvRunId)
+                          : null,
+                    }}
+                    selectedFile={selectedFile}
+                    selectedProfile={selectedProfile}
+                    templateDownload={templateDownload}
+                    uploadError={importMutation.error}
+                    uploading={importMutation.isPending}
+                  />
                 </div>
               ) : (
                 <div className="empty-workspace">
@@ -8716,7 +8342,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   // Real captured payload for the selected topic, replacing the old
                   // fabricated sample issue-cards on this discovery route.
                   selectedMqttTopic ? (
-                    <MqttPayloadPanel topic={selectedMqttTopic} />
+                    <MqttPayloadPanel
+                      payload={selectedMqttTopic.last_payload}
+                      topicName={String(selectedMqttTopic.topic ?? "topic")}
+                    />
                   ) : (
                     <div className="empty-workspace">
                       <strong>No topic selected</strong>
@@ -10297,37 +9926,6 @@ function IssueCard({ issue, context }: { issue: IssueRow; context: string }) {
 
 // The MQTT discovery inspector's payload panel: the real last_payload OBJECT for
 // the selected topic (never a re-parse of the stringified "Raw Payload" cell).
-// Mirrors the UDMI observed-payload block (pre + Explore JSON tree). Honesty:
-// a non-JSON payload is stored as a presence marker, so we say exactly that and
-// render no tree; a JSON scalar/list is wrapped by the engine under `_value`,
-// so we unwrap it before display.
-function MqttPayloadPanel({ topic }: { topic: DiscoveryRowRecord }) {
-  const payload = topic.last_payload;
-  const topicName = String(topic.topic ?? "topic");
-  const isObject = payload !== null && typeof payload === "object";
-  const rawPresent = isObject && (payload as Record<string, unknown>)._raw_present === true;
-  const hasValueWrap = isObject && "_value" in (payload as Record<string, unknown>);
-  const display = hasValueWrap ? (payload as Record<string, unknown>)._value : payload;
-  return (
-    <div className="payload-inspector">
-      <h4>Last payload on {topicName}</h4>
-      {rawPresent ? (
-        <p className="section-copy">
-          Non-JSON payload observed. The engine stores a presence marker, not the raw bytes.
-        </p>
-      ) : (
-        <>
-          <pre className="payload-cell">{JSON.stringify(display, null, 2)}</pre>
-          <details className="json-inspector">
-            <summary>Explore JSON tree</summary>
-            <JsonTree value={display} />
-          </details>
-        </>
-      )}
-    </div>
-  );
-}
-
 // One aligned compare cell: a single JSON line coloured into syntax spans, with
 // the presence-diff mark class (only-expected amber / only-observed red) and, on
 // an engine-flagged point row, the red flagged tint. A null line is a filler that
@@ -10478,30 +10076,6 @@ function normaliseEvidencePath(path: string | null | undefined): string | null {
   return segments.length > 0
     ? `/${segments.map((segment) => segment.replace(/~/g, "~0").replace(/\//g, "~1")).join("/")}`
     : null;
-}
-
-function JsonTree({ value }: { value: unknown }) {
-  if (value === null || typeof value !== "object") {
-    return <span>{JSON.stringify(value)}</span>;
-  }
-  return (
-    <ul className="json-tree">
-      {Object.entries(value).map(([key, child]) => (
-        <li key={key}>
-          {child !== null && typeof child === "object" ? (
-            <details>
-              <summary>{key}</summary>
-              <JsonTree value={child} />
-            </details>
-          ) : (
-            <>
-              <strong>{key}</strong>: {JSON.stringify(child)}
-            </>
-          )}
-        </li>
-      ))}
-    </ul>
-  );
 }
 
 // A present-but-empty expected/observed value ("") is flagged as the explicit
@@ -10755,15 +10329,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-// One latest-payload-per-topic row for the MQTT Explorer-like capture panel.
-type CaptureRow = {
-  topic: string;
-  asset: string;
-  lastSeen: string;
-  messageCount: string;
-  payload: string;
-};
-
 function mqttCaptureRow(topic: DiscoveryRowRecord): CaptureRow {
   const attributes = (topic.attributes as Record<string, unknown> | undefined) ?? {};
   const lastPayload = topic.last_payload;
@@ -10785,111 +10350,6 @@ function stringOrDash(value: unknown): string {
     return "—";
   }
   return typeof value === "string" ? value : String(value);
-}
-
-function captureRowsToCsv(rows: CaptureRow[]): string {
-  const header = ["Topic", "Asset", "Last Seen", "Message Count", "Latest Payload"];
-  const escape = (value: string): string => `"${value.replace(/"/g, '""')}"`;
-  const lines = [header.map(escape).join(",")];
-  for (const row of rows) {
-    lines.push(
-      [row.topic, row.asset, row.lastSeen, row.messageCount, row.payload].map(escape).join(","),
-    );
-  }
-  return lines.join("\r\n");
-}
-
-/**
- * Drives an authenticated file download. Plain `<a download href>` anchors
- * navigate outside fetch(), so they cannot carry the X-API-Key header and
- * 401 in hosted deployments; this routes downloads through downloadFile().
- */
-function useFileDownload(apiClient: SessionBoundApiClient) {
-  const [pendingKey, setPendingKey] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // The HTTP status behind `error`, so a caller can tell a real fault from an
-  // expected miss (e.g. a 404 on a download path offered on a heuristic) without
-  // pattern-matching the server's prose. null when the failure carried no status.
-  const [errorStatus, setErrorStatus] = useState<number | null>(null);
-  const generationRef = useRef(0);
-  const controllerRef = useRef<AbortController | null>(null);
-
-  useEffect(
-    () => () => {
-      generationRef.current += 1;
-      controllerRef.current?.abort();
-      controllerRef.current = null;
-    },
-    [],
-  );
-
-  const download = useCallback(
-    async ({
-      fallbackFilename,
-      init,
-      isCurrent = () => true,
-      key,
-      path,
-    }: {
-      fallbackFilename: string;
-      init?: RequestInit;
-      isCurrent?: () => boolean;
-      key: string;
-      path: string;
-    }) => {
-      controllerRef.current?.abort();
-      const controller = new AbortController();
-      controllerRef.current = controller;
-      const generation = generationRef.current + 1;
-      generationRef.current = generation;
-      setPendingKey(key);
-      setError(null);
-      setErrorStatus(null);
-      try {
-        const { blob, filename } = await downloadFile(path, init, {
-          client: apiClient,
-          signal: controller.signal,
-        });
-        if (generation !== generationRef.current || !isCurrent()) {
-          return;
-        }
-        triggerBlobDownload(blob, filename ?? fallbackFilename);
-      } catch (cause) {
-        if (generation === generationRef.current && !controller.signal.aborted && isCurrent()) {
-          setError(cause instanceof Error ? cause.message : "Download failed.");
-          setErrorStatus(cause instanceof ApiError ? cause.status : null);
-        }
-      } finally {
-        if (generation === generationRef.current) {
-          controllerRef.current = null;
-          setPendingKey(null);
-        }
-      }
-    },
-    [apiClient],
-  );
-
-  const reset = useCallback(() => {
-    generationRef.current += 1;
-    controllerRef.current?.abort();
-    controllerRef.current = null;
-    setPendingKey(null);
-    setError(null);
-    setErrorStatus(null);
-  }, []);
-
-  return { download, error, errorStatus, pendingKey, reset };
-}
-
-function triggerBlobDownload(blob: Blob, filename: string): void {
-  const objectUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = objectUrl;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(objectUrl);
 }
 
 function buildResultDetailItems(
