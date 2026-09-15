@@ -112,6 +112,15 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Fixed
 
+- An IP register host whose address falls outside the scanned Start/End range is
+  no longer reported as unreachable. The sweep pings every address between start
+  and end, so a register row outside that window was never contacted, and the
+  row used to read "Unreachable" with a panel saying it "did not answer this
+  scan" — turning "we did not look" into negative evidence about a device. The
+  row now reads "Not probed", the panel says the scan never reached the address
+  and suggests widening the range, and a run that did not record the answer says
+  so instead of guessing. The register verdict stays red in all three cases,
+  because the register still expects the host and it is still unaccounted for.
 - The scanner screens' detail panel now actually sticks as the results scroll
   past it. Every card clipped its content with `overflow: hidden`, which makes
   the card a scroll container, and a scroll-container ancestor disables

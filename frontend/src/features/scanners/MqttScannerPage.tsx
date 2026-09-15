@@ -30,8 +30,15 @@ type CaptureUnit = keyof typeof CAPTURE_UNIT_SECONDS;
 const LIVE_HOLDING_PHASES = new Set(["live", "connecting", "reconnecting", "unavailable"]);
 
 export function MqttScannerPage() {
-  const { apiClient, authorizationEnforced, canEngineer, sessionScopeId, workspace: workspaceRef } =
-    useSession();
+  const {
+    apiClient,
+    authorizationEnforced,
+    canEngineer,
+    isLoading: sessionLoading,
+    me,
+    sessionScopeId,
+    workspace: workspaceRef,
+  } = useSession();
   const run = useScannerRun("mqtt");
   const queryClient = useQueryClient();
 
@@ -98,24 +105,40 @@ export function MqttScannerPage() {
   const noBrokerError = Boolean(mqttLive.error?.includes("No MQTT broker is configured"));
 
   // Live-first (plan section 4.4): open the session on arrival when a broker is
-  // configured and nobody else holds it. One attempt only — a failure lands in
-  // the state panel with a link to Configuration instead of a retry loop.
+  // configured and nobody else holds it.
   //
-  // run.runRestoreSettled is load-bearing: until the latest-run query answers,
-  // startedRunActive is false because nothing has been ATTACHED, not because
-  // nothing is running. Auto-connecting into an in-flight capture 409s ("An MQTT
-  // capture run is in progress") and leaves the operator with no session.
+  // The guard is spent ONLY by an actual start, or by a manual Start / Stop.
+  // Every other condition means "not yet", never "never": burning it on a
+  // blocker stranded the page for the rest of the visit, and three of those
+  // blockers are ordinary startup states that clear a moment later.
+  //  - `me` unresolved: authorizationEnforced fails closed to true while /me is
+  //    in flight (session.tsx:133), so scanAuthorized reads false even on a
+  //    frictionless portable build, which is the default.
+  //  - the consent box not ticked yet, under an enforced build.
+  //  - a capture run still in flight; it owns the same broker connection.
+  // runRestoreSettled is the one that must be waited on rather than trusted:
+  // until the latest-run query answers AND its run is attached, startedRunActive
+  // is false because nothing has been ATTACHED, not because nothing is running,
+  // and connecting into a live capture 409s.
   const autoStartAttempted = useRef(false);
   const startLive = mqttLive.start;
+  // A different project or site is a different broker and a different consent.
   useEffect(() => {
-    if (autoStartAttempted.current || !configurationQuery.isFetched || !run.runRestoreSettled) {
-      return;
-    }
-    if (!brokerConfigured || !canEngineer || !run.scanAuthorized || run.startedRunActive) {
-      autoStartAttempted.current = true;
-      return;
-    }
-    if (mqttLive.phase !== "no_session") {
+    autoStartAttempted.current = false;
+  }, [workspaceRef.projectId, workspaceRef.siteId]);
+  useEffect(() => {
+    if (
+      autoStartAttempted.current ||
+      sessionLoading ||
+      me === null ||
+      !configurationQuery.isFetched ||
+      !run.runRestoreSettled ||
+      !brokerConfigured ||
+      !canEngineer ||
+      !run.scanAuthorized ||
+      run.startedRunActive ||
+      mqttLive.phase !== "no_session"
+    ) {
       return;
     }
     autoStartAttempted.current = true;
@@ -124,10 +147,12 @@ export function MqttScannerPage() {
     brokerConfigured,
     canEngineer,
     configurationQuery.isFetched,
+    me,
     mqttLive.phase,
     run.runRestoreSettled,
     run.scanAuthorized,
     run.startedRunActive,
+    sessionLoading,
     startLive,
   ]);
 
@@ -256,7 +281,12 @@ export function MqttScannerPage() {
                 <button
                   className="secondary-button compact"
                   disabled={!canEngineer}
-                  onClick={() => void mqttLive.stop()}
+                  onClick={() => {
+                    // An explicit Stop settles it: the page must not reconnect
+                    // behind the operator the moment the phase goes idle.
+                    autoStartAttempted.current = true;
+                    void mqttLive.stop();
+                  }}
                   title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
                   type="button"
                 >

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearApiKey, setApiKey } from "../../api/client";
 import { IpScannerPage } from "./IpScannerPage";
 import { createSessionScopeId } from "../../app/sessionScope";
+import { scannerRowsFromResults } from "./scannerRows";
 import { createScannerQueryClient, scannerProviders } from "./scannerTestHarness";
 
 const RUN_ID = "run-ip-scanner-1";
@@ -77,6 +78,8 @@ const results = {
       last_seen_at: null,
       rag: "red",
       register: "missing",
+      // Inside the swept range: the sweep pinged it and it stayed silent.
+      directed_probe_sent: true,
     },
   ],
   devices: [
@@ -140,6 +143,8 @@ function stubFetch(
     latestImportFileName?: string;
     runStatus?: string;
     runError?: string | null;
+    // Flip the silent host to one the sweep never reached.
+    unprobedMissingHost?: boolean;
   } = {},
 ) {
   startBody = null;
@@ -217,6 +222,15 @@ function stubFetch(
         if (url.includes("/results")) {
           return jsonResponse({
             ...results,
+            ...(overrides.unprobedMissingHost
+              ? {
+                  discovered_assets: results.discovered_assets.map((asset) =>
+                    asset.register === "missing"
+                      ? { ...asset, directed_probe_sent: false }
+                      : asset,
+                  ),
+                }
+              : {}),
             run_id: runId,
             status: overrides.runStatus ?? results.status,
             ...(overrides.runStatus && overrides.runStatus !== "succeeded"
@@ -378,6 +392,35 @@ describe("IpScannerPage", () => {
     expect(within(panel).getByText("expected · chiller-2")).toBeInTheDocument();
     expect(
       within(panel).getByText("Expected, not resolved on the network"),
+    ).toBeInTheDocument();
+    // This one WAS probed, so its silence is a real observation.
+    expect(within(panel).getByText("Yes, inside the scanned range")).toBeInTheDocument();
+  });
+
+  it("does not call an unprobed register host unreachable", async () => {
+    // A register row outside Start/End was never contacted: reporting it as
+    // unreachable would turn "we did not look" into "it did not answer".
+    stubFetch({ unprobedMissingHost: true });
+    render(scannerProviders(<IpScannerPage />));
+    const cell = await screen.findByText("10.0.10.20");
+    const row = cell.closest("tr") as HTMLElement;
+
+    expect(within(row).getByText("Not probed")).toBeInTheDocument();
+    expect(within(row).queryByText("Unreachable")).not.toBeInTheDocument();
+    // Still red: the register expects it and it is not accounted for.
+    expect(row.className).toContain("row-fail");
+
+    fireEvent.click(row);
+    const panel = await screen.findByRole("complementary");
+    expect(
+      within(panel).getByRole("heading", { name: "Expected, not probed" }),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/its address falls outside the range this scan swept/),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText("No, address outside the scanned range")).toBeInTheDocument();
+    expect(
+      within(panel).getByText("Not attempted — the host was never contacted"),
     ).toBeInTheDocument();
   });
 
@@ -611,5 +654,45 @@ describe("IpScannerPage", () => {
     expect(screen.getAllByText(RUN_ID, { exact: false }).length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "View in Run History" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open in Reports" })).toBeInTheDocument();
+  });
+});
+
+describe("IP row projection: was the host actually probed?", () => {
+  // directed_probe_sent is the engine's answer to "did this scan send anything
+  // at that address". The row must never claim more than the engine recorded.
+  const project = (probe: unknown) =>
+    scannerRowsFromResults("ip", {
+      ...results,
+      // `undefined` means the KEY is absent, as it is on a run that predates the
+      // flag, not present-and-undefined.
+      discovered_assets: [
+        Object.fromEntries(
+          Object.entries({ ...results.discovered_assets[2], directed_probe_sent: probe }).filter(
+            ([, value]) => value !== undefined,
+          ),
+        ),
+      ],
+    } as never)[0];
+
+  it("reads Unreachable when the sweep probed it and heard nothing", () => {
+    const row = project(true);
+    expect(row.probed).toBe(true);
+    expect(row.cells.Status.text).toBe("Unreachable");
+    expect(row.tone).toBe("fail");
+  });
+
+  it("reads Not probed when the address was outside the swept range", () => {
+    const row = project(false);
+    expect(row.probed).toBe(false);
+    expect(row.cells.Status.text).toBe("Not probed");
+    // Red either way: the register expects it and it is unaccounted for.
+    expect(row.tone).toBe("fail");
+  });
+
+  it("stays neutral in wording when the engine recorded no answer either way", () => {
+    const row = project(undefined);
+    expect(row.probed).toBeUndefined();
+    expect(row.cells.Status.text).toBe("Expected");
+    expect(row.tone).toBe("fail");
   });
 });

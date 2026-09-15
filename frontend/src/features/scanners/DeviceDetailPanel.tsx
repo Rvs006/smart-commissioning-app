@@ -143,6 +143,16 @@ export function DeviceDetailPanel({
         ? bacnetDeviceDetailItems(row.attributes)
         : ipDeviceDetailItems(row.attributes);
   const registerLabel = registerChip(row.register, row.tone);
+  // BACnet has no probe flag: a global Who-Is reaches the whole local segment,
+  // so a silent device really was asked. Only the IP sweep can miss an address.
+  const missingHeading =
+    lane === "ip" && row.probed === false ? "Expected, not probed" : "Expected, no response";
+  const missingNote =
+    lane === "ip" && row.probed === false
+      ? "This host is in the register but its address falls outside the range this scan swept, so the scan never reached it. Its silence is not evidence: widen Start/End to cover it and scan again."
+      : lane === "ip" && row.probed === undefined
+        ? "This host is in the register and was not seen. Whether the scan reached its address was not recorded for this run, so nothing here says the host is absent."
+        : "This device is in the register but did not answer this scan. Nothing was observed, so there is no live evidence to show — only what the register expected.";
   const browseResult =
     objectBrowse?.result && objectBrowse.result.device_instance === row.deviceInstance
       ? objectBrowse.result
@@ -177,11 +187,11 @@ export function DeviceDetailPanel({
     >
         {row.missing && (
           <section className="scanner-detail-section">
-            <h4>Expected, no response</h4>
-            <p className="scanner-detail-note tone-fail">
-              This device is in the register but did not answer this scan. Nothing was observed, so
-              there is no live evidence to show — only what the register expected.
-            </p>
+            {/* Silence is only evidence if something was actually sent. A
+                register host outside the scanned range was never contacted, so
+                the panel must not report it as having failed to answer. */}
+            <h4>{missingHeading}</h4>
+            <p className="scanner-detail-note tone-fail">{missingNote}</p>
             <dl className="scanner-kv">
               <div>
                 <dt>{lane === "bacnet" ? "Expected instance" : "Expected address"}</dt>
@@ -196,12 +206,29 @@ export function DeviceDetailPanel({
                 <dd>{(lane === "bacnet" ? row.cells.Name?.text : row.cells.Hostname?.text) ?? "—"}</dd>
               </div>
               {lane === "ip" && (
-                <div>
-                  <dt>Hostname check</dt>
-                  {/* The engine deliberately leaves `hostname` null here, so the
-                      panel must not imply the name was resolved. */}
-                  <dd className="scanner-kv-fail">Expected, not resolved on the network</dd>
-                </div>
+                <>
+                  <div>
+                    <dt>Probe sent</dt>
+                    <dd className={row.probed === true ? undefined : "scanner-kv-fail"}>
+                      {row.probed === true
+                        ? "Yes, inside the scanned range"
+                        : row.probed === false
+                          ? "No, address outside the scanned range"
+                          : "Not recorded for this run"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Hostname check</dt>
+                    {/* The engine deliberately leaves `hostname` null here, so
+                        the panel must not imply the name was resolved — nor
+                        that a lookup failed on a host nothing was sent to. */}
+                    <dd className="scanner-kv-fail">
+                      {row.probed === false
+                        ? "Not attempted — the host was never contacted"
+                        : "Expected, not resolved on the network"}
+                    </dd>
+                  </div>
+                </>
               )}
             </dl>
           </section>
