@@ -22,6 +22,7 @@ import logging
 import threading
 import time
 import urllib.error
+import urllib.request
 from collections.abc import AsyncIterator, Mapping
 from functools import partial
 
@@ -55,6 +56,7 @@ from app.api.routes.scanners import _bind_scanner_register
 from app.core.auth import AuthPrincipal, get_principal
 from app.core.config import get_settings
 from app.core.scopes import load_scoped_run, require_project_site_access
+from app.schemas.imports import ImportBatchSummary
 from app.schemas.jobs import JobAcceptedResponse, JobCreateRequest
 from app.schemas.mqtt_live import (
     MqttLiveConnectRequest,
@@ -63,6 +65,7 @@ from app.schemas.mqtt_live import (
     MqttLiveDisconnectResponse,
     MqttLiveFocusRequest,
     MqttLiveFocusResponse,
+    MqttLiveSaveRegisterRequest,
     MqttLiveSearchRequest,
     MqttLiveSearchResponse,
     MqttLiveSessionInfo,
@@ -71,6 +74,7 @@ from app.schemas.mqtt_live import (
     MqttLiveSubscribeResponse,
 )
 from app.services.engine_dispatch import is_dry_run
+from app.services.import_service import ImportService
 from app.services.mqtt_live_session import LiveSession
 from app.services.mqtt_live_session import service as live_service
 from app.services.sidecar_supervisor import MQTT_SCANNER, SidecarUnavailable
@@ -127,6 +131,18 @@ def _resolve_base_url(http_request: Request) -> str:
         return str(supervisor.base_url_for(MQTT_SCANNER)).rstrip("/")
     except SidecarUnavailable as error:
         raise HTTPException(status_code=503, detail="MQTT discovery sidecar is not available.") from error
+
+
+def _get_text(base: str, path: str) -> str:
+    """GET a text body from the sidecar (its generated register CSV).
+
+    The engine's ``_get_json`` next door cannot read this one: /api/generate-register
+    answers ``text/csv``. Module-level so a test patches it the way it patches
+    ``_post_json``.
+    """
+    # Fixed loopback URL owned by SidecarSupervisor, never operator input.
+    with urllib.request.urlopen(f"{base}{path}", timeout=15.0) as response:
+        return response.read().decode("utf-8", "replace")
 
 
 def _sidecar_error_text(error: urllib.error.HTTPError) -> str:
@@ -367,6 +383,116 @@ def search_mqtt_live(
     except (urllib.error.URLError, OSError) as error:
         raise HTTPException(status_code=502, detail="The MQTT discovery sidecar could not be reached.") from error
     return MqttLiveSearchResponse(ok=True)
+
+
+@router.post(
+    "/mqtt_sidecar/live/save-as-register",
+    response_model=ImportBatchSummary,
+    dependencies=[Depends(require_engineer)],
+)
+def save_mqtt_live_as_register(
+    request: MqttLiveSaveRegisterRequest,
+    http_request: Request,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> ImportBatchSummary:
+    """Turn what the live session has seen so far into an mqtt_scanner_register.
+
+    The live mirror of ``save_mqtt_scan_as_register``: the capture lane can only
+    save a register once a bounded run has finished, but the live explorer is the
+    screen the operator actually works on, and the assets are already on screen.
+    The rows come from the sidecar's own generator (/api/generate-register, the
+    same 10-column shape as ``REGISTER_TEMPLATE_COLUMNS``), go through the same
+    ``ImportService`` pipeline as an upload, and are then pushed back into the
+    sidecar so the live tree's matched flags recolour without a reconnect.
+
+    Gated exactly like ``subscribe``: engineer role, and the caller must hold the
+    current lease and scope to its project/site. Project and site come from the
+    session, never from the browser.
+
+    The whole save is one ceremony under ``_connect_ceremony_lock``: read the
+    sidecar, create the import, push back. connect() acquires the lease inside
+    that same lock, so a take-over cannot land between the lease check and the
+    import - which would otherwise persist a register for a session the caller no
+    longer holds, and leave that import as the newest one ``_bind_scanner_register``
+    freezes into the next capture. The lock holds across one loopback GET, one DB
+    write and one loopback POST; it deliberately is NOT ``live_service.lock``,
+    which the async relay and reaper take.
+    """
+    base_url = _resolve_base_url(http_request)
+
+    with _connect_ceremony_lock:
+        session = _current_session_or_409(request.session_id, principal)
+        try:
+            csv_text = _get_text(base_url, "/api/generate-register")
+        except (urllib.error.URLError, OSError) as error:
+            raise HTTPException(
+                status_code=502, detail="The MQTT discovery sidecar could not be reached."
+            ) from error
+        # generateRegisterCsv always writes the header row, so "header only" is the
+        # honest empty case: nothing has been discovered on this session yet.
+        if len([line for line in csv_text.splitlines() if line.strip()]) < 2:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The live session has not discovered any assets yet, so there is "
+                    "nothing to save as a register."
+                ),
+            )
+
+        summary, _errors = ImportService(service.engine).create_import(
+            import_type="mqtt_scanner_register",
+            file_name=f"mqtt-live-register-{session.session_id}.csv",
+            file_bytes=csv_text.encode("utf-8"),
+            project_id=session.project_id,
+            site_id=session.site_id,
+        )
+        logger.info(
+            "mqtt live saved as register session_id=%s import_id=%s rows=%d by=%s",
+            session.session_id,
+            summary.import_id,
+            summary.accepted_rows,
+            principal.username,
+        )
+
+        if summary.accepted_rows == 0:
+            # Nothing was accepted, so there is nothing to compare against. Pushing
+            # a header-only CSV here would CLEAR the sidecar's register and wipe
+            # every matched flag in the tree; leave the live view on what it already
+            # had and let the 0-accepted summary say what happened.
+            # (_bind_scanner_register skips a no-accepted-rows import too, so the
+            # next capture is unaffected.)
+            return summary
+
+        # Push only the ACCEPTED rows back, so the live tree compares against exactly
+        # what SCT stored (a row the import rejected must not keep matching here).
+        register_rows = _load_register_rows(
+            {"register_import_id": summary.import_id}, ImportRepository(service.engine).get_accepted_rows
+        )
+        if not register_rows:
+            # accepted_rows > 0 yet nothing read back: _load_register_rows swallows
+            # a missing/unreadable store into []. Pushing that would clear the
+            # sidecar, and returning 200 would claim a recolour that never happened.
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"The register was saved as import {summary.import_id}, but its accepted "
+                    "rows could not be read back, so the live session was not refreshed. "
+                    "Reconnect to apply it."
+                ),
+            )
+        try:
+            _post_json(base_url, "/api/register", {"csv": _register_csv(register_rows)})
+        except (urllib.error.URLError, OSError) as error:
+            # The register IS saved; only the live recolour failed. Say so, so the
+            # operator reconnects rather than saving a second copy.
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"The register was saved as import {summary.import_id}, but the live "
+                    "session could not be refreshed with it. Reconnect to apply it."
+                ),
+            ) from error
+    return summary
 
 
 @router.get(

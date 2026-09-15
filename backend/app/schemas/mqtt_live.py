@@ -122,3 +122,11 @@ class MqttLiveSearchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ok: bool
+
+
+class MqttLiveSaveRegisterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Turn what the live session has discovered so far into an MQTT register.
+    # Project and site come from the held session, never from the browser.
+    session_id: str = Field(min_length=1, max_length=64)

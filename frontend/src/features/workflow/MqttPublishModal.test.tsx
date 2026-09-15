@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../api/client", () => ({
@@ -118,6 +118,11 @@ describe("MqttPublishModal", () => {
     expect(screen.queryByRole("button", { name: /Preview/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Send to live equipment/ }));
 
+    // There is no approver here, so the operator confirms the exact write first.
+    expect(screen.getByText("Confirm the write")).toBeInTheDocument();
+    expect(startDirectMqttPublish).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Send to device/ }));
+
     await screen.findByText(/Sent/);
     expect(startDirectMqttPublish).toHaveBeenCalledWith(
       expect.objectContaining({ topic: "site/ahu-1/cmd", payload: '{"cmd":1}' }),
@@ -125,6 +130,65 @@ describe("MqttPublishModal", () => {
     // The sealed preview path was never touched.
     expect(startMqttPublishPreview).not.toHaveBeenCalled();
     expect(createScanAuthorization).not.toHaveBeenCalled();
+  });
+
+  it("frictionless confirm shows the exact write and cancelling sends nothing", async () => {
+    render(<MqttPublishModal authorizationEnforced={false} onClose={() => {}} workspace={workspace} />);
+    fillCompose();
+    fireEvent.change(screen.getByLabelText("QoS"), { target: { value: "1" } });
+    fireEvent.click(screen.getByLabelText("Retain"));
+    fireEvent.click(screen.getByRole("button", { name: /Send to live equipment/ }));
+
+    // Topic, QoS/retain and the payload are all on screen before anything goes out.
+    expect(screen.getByText("site/ahu-1/cmd")).toBeInTheDocument();
+    expect(screen.getByText("1 / retained")).toBeInTheDocument();
+    expect(screen.getByText('{"cmd":1}')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    // Back to compose with the message intact, and not one byte published.
+    expect(startDirectMqttPublish).not.toHaveBeenCalled();
+    expect(screen.queryByText("Confirm the write")).toBeNull();
+    expect(screen.getByLabelText("Topic")).toHaveValue("site/ahu-1/cmd");
+  });
+
+  it("confirm step is an alertdialog and puts focus on Cancel, not Send", async () => {
+    render(<MqttPublishModal authorizationEnforced={false} onClose={() => {}} workspace={workspace} />);
+    fillCompose();
+    fireEvent.click(screen.getByRole("button", { name: /Send to live equipment/ }));
+
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog).toHaveAccessibleName("Confirm the write");
+    // A stray Enter or Space must not be the keystroke that writes to equipment.
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+  });
+
+  it("a poll timeout leaves the accepted run named instead of a live Send button", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(startDirectMqttPublish).mockResolvedValue({ run_id: "send-slow" } as never);
+      // Never terminal: pollRun exhausts its attempts and times out.
+      vi.mocked(getValidationRun).mockResolvedValue({ run_id: "send-slow", status: "running" } as never);
+
+      render(<MqttPublishModal authorizationEnforced={false} onClose={() => {}} workspace={workspace} />);
+      fillCompose();
+      fireEvent.click(screen.getByRole("button", { name: /Send to live equipment/ }));
+      fireEvent.click(screen.getByRole("button", { name: /Send to device/ }));
+      // pollRun gives up after 80 attempts spaced 500ms apart; act() flushes the
+      // state updates the timeout path schedules once the timers have run.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(80 * 500 + 1000);
+      });
+
+      // The publish was accepted, so the dialog must not offer a second send.
+      expect(screen.getByText("Still running")).toBeInTheDocument();
+      expect(screen.getByText(/run send-slow/)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Send to device/ })).toBeNull();
+      expect(screen.queryByText("Not sent")).toBeNull();
+      expect(startDirectMqttPublish).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows an honest failure when the send run fails", async () => {

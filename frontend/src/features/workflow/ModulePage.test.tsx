@@ -907,6 +907,58 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.queryByText("Register already imported")).not.toBeInTheDocument();
   });
 
+  // "Save scan as register" writes no file, and the operator went looking for one.
+  // A register on file that came from a scan names its run, so the same CSV can be
+  // downloaded back; an uploaded one has no run to rebuild it from.
+  function stubScannerLatestImportFetch(fileName: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/imports/latest")) {
+          return jsonResponse({
+            ...latestImportSummary,
+            import_type: "ip_scanner_register",
+            file_name: fileName,
+          });
+        }
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse([
+            {
+              import_type: "ip_scanner_register",
+              description: "Expected devices for the IP scanner sidecar.",
+              required_columns: ["IP Address"],
+              duplicate_key_fields: ["IP Address"],
+            },
+          ]);
+        }
+        if (url.includes("/api/v1/")) return jsonResponse({});
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("offers the register CSV back when the register on file came from a saved scan", async () => {
+    stubScannerLatestImportFetch("scan-register-run-ip-7.csv");
+
+    renderModule("ip-scanner");
+
+    expect(await screen.findByText("Register already imported")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download register CSV" })).toBeInTheDocument();
+  });
+
+  it("offers no register CSV when the register on file was uploaded", async () => {
+    stubScannerLatestImportFetch("site_ip_register.csv");
+
+    renderModule("ip-scanner");
+
+    expect(await screen.findByText("Register already imported")).toBeInTheDocument();
+    // There is no run behind an uploaded file, so there is nothing honest to rebuild.
+    expect(screen.queryByRole("button", { name: "Download register CSV" })).toBeNull();
+  });
+
   it("sends a CIDR target override as parameters.cidr with no addresses key and no fabricated authorization principal", async () => {
     let previewBody: { parameters: Record<string, unknown> } | null = null;
     let liveBody: { parameters: Record<string, unknown> } | null = null;
