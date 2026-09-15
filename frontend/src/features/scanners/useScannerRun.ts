@@ -57,7 +57,7 @@ type ActiveScannerRun = {
   ref: RunRef;
 };
 
-type RunEpochOwner = {
+export type RunEpochOwner = {
   epoch: number;
   runId: string;
   sessionScopeId: SessionScopeId;
@@ -130,7 +130,6 @@ export function useScannerRun(lane: ScannerLane) {
     apiClient,
     authorizationEnforced,
     canEngineer,
-    me,
     sessionScopeId,
     workspace: workspaceRef,
   } = useSession();
@@ -165,7 +164,13 @@ export function useScannerRun(lane: ScannerLane) {
   const [runController, dispatchRun] = useReducer(runControllerReducer, initialRunControllerState);
   const [runOutcome, setRunOutcome] = useState<string | null>(null);
   const [runAttachmentNotice, setRunAttachmentNotice] = useState<string | null>(null);
-  const [savedRegister, setSavedRegister] = useState<ImportBatchSummary | null>(null);
+  // The run id travels WITH the summary: the register CSV download is rebuilt
+  // from the run that was saved, and reading it off the mutable `activeRun`
+  // would hand run B's id to a download labelled with run A's file name.
+  const [savedRegister, setSavedRegister] = useState<{
+    runId: string;
+    summary: ImportBatchSummary;
+  } | null>(null);
   const [objectBrowseResult, setObjectBrowseResult] = useState<BacnetObjectBrowseResponse | null>(
     null,
   );
@@ -206,9 +211,15 @@ export function useScannerRun(lane: ScannerLane) {
     currentRunAccessScope,
   );
 
-  const activeRunOwner: RunEpochOwner | null = activeRun
-    ? { epoch: activeRun.epoch, runId: activeRun.runId, sessionScopeId, workspaceRef }
-    : null;
+  // Memoised because it is returned from the hook: a fresh object every render
+  // would defeat the returned useMemo and re-render every consumer.
+  const activeRunOwner: RunEpochOwner | null = useMemo(
+    () =>
+      activeRun
+        ? { epoch: activeRun.epoch, runId: activeRun.runId, sessionScopeId, workspaceRef }
+        : null,
+    [activeRun, sessionScopeId, workspaceRef],
+  );
   const activeRunOwnerRef = useRef<RunEpochOwner | null>(activeRunOwner);
   activeRunOwnerRef.current = activeRunOwner;
   const ownsActiveRun = useCallback(
@@ -583,14 +594,26 @@ export function useScannerRun(lane: ScannerLane) {
       lane === "bacnet"
         ? saveBacnetScanRunAsRegister({ context: { client: apiClient }, runId })
         : saveIpScanRunAsRegister({ context: { client: apiClient }, runId }),
-    onSuccess: (summary) => {
-      setSavedRegister(summary);
-      // Mirror the upload path: refresh the "register on file" note.
+    onSuccess: (summary, runId) => {
+      // A save that resolves after the operator switched runs must not repopulate
+      // the panel the run-change effect just cleared: the note would describe run
+      // A while the page shows run B.
+      if (runId === activeRunIdRef.current) {
+        setSavedRegister({ runId, summary });
+      }
+      // Mirror the upload path: refresh the "register on file" note. The ROOT key
+      // is what matches — queryKeys.latestImport ends in the import-type slot, so
+      // passing it without one produces a key nothing is stored under.
       void queryClient.invalidateQueries({
-        queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef),
+        queryKey: queryKeys.latestImportRoot(sessionScopeId, workspaceRef),
       });
     },
   });
+
+  // Read by saveRegisterMutation.onSuccess so a late save is compared against the
+  // run on screen NOW, not the one that was active when the mutation was issued.
+  const activeRunIdRef = useRef(activeRun?.runId);
+  activeRunIdRef.current = activeRun?.runId;
 
   // BACnet only: an ephemeral live read of one device's object list. Starts no
   // child run and persists nothing.
@@ -612,8 +635,12 @@ export function useScannerRun(lane: ScannerLane) {
   }, [activeRun?.runId, activeRun?.epoch]);
 
   const startedRunActive = Boolean(activeRun) && !activeRunTerminal;
+  // Boolean(activeRunStatus) matters: a just-restored run has no record yet, and
+  // without it Stop is enabled for a run whose real status may already be
+  // terminal — the same guard ModulePage applies.
   const canCancel =
     Boolean(activeRun) &&
+    Boolean(activeRunStatus) &&
     !activeRunTerminal &&
     canEngineer &&
     !runAccessClosed &&
@@ -670,7 +697,6 @@ export function useScannerRun(lane: ScannerLane) {
       apiClient,
       authorizationEnforced,
       canEngineer,
-      hasEvidenceReadAccess: me !== null,
       sessionScopeId,
       workspaceRef,
       // run state
@@ -682,13 +708,12 @@ export function useScannerRun(lane: ScannerLane) {
       activeRunStatus,
       activeRunTerminal,
       activeRunAuthoritativelyTerminal,
+      activeRunOwner,
       canCancel,
-      finalEvidenceReady,
       ownsActiveRun,
       runAccessClosed,
       runAttachmentNotice,
       runController,
-      runEvents,
       runOutcome,
       startedRunActive,
       // authorization
@@ -727,6 +752,7 @@ export function useScannerRun(lane: ScannerLane) {
       apiClient,
       authorizationEnforced,
       browseObjects,
+      activeRunOwner,
       canCancel,
       canEngineer,
       cancelMutation,
@@ -734,9 +760,7 @@ export function useScannerRun(lane: ScannerLane) {
       comparisonRunId,
       discoveryComparisonQuery,
       discoveryResultsQuery,
-      finalEvidenceReady,
       lane,
-      me,
       module,
       moduleRoute,
       objectBrowseMutation,
@@ -746,7 +770,6 @@ export function useScannerRun(lane: ScannerLane) {
       runAccessClosed,
       runAttachmentNotice,
       runController,
-      runEvents,
       runOutcome,
       saveAsRegister,
       saveRegisterMutation,
@@ -777,6 +800,10 @@ export function useScannerDownload() {
   const { apiClient } = useSession();
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The HTTP status behind `error`, so a caller can tell a real fault from an
+  // expected miss (a 404 on a path offered from a file-name heuristic) without
+  // pattern-matching the server prose. null when the failure carried no status.
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const generationRef = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
 
@@ -798,6 +825,7 @@ export function useScannerDownload() {
       generationRef.current = generation;
       setPendingKey(key);
       setError(null);
+      setErrorStatus(null);
       try {
         const { blob, filename } = await downloadFile(path, undefined, {
           client: apiClient,
@@ -817,6 +845,7 @@ export function useScannerDownload() {
       } catch (cause) {
         if (generation === generationRef.current && !controller.signal.aborted) {
           setError(cause instanceof Error ? cause.message : "Download failed.");
+          setErrorStatus(cause instanceof ApiError ? cause.status : null);
         }
       } finally {
         if (generation === generationRef.current) {
@@ -828,5 +857,5 @@ export function useScannerDownload() {
     [apiClient],
   );
 
-  return { download, error, pendingKey };
+  return { download, error, errorStatus, pendingKey };
 }

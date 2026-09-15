@@ -116,9 +116,11 @@
   overflow-wrap: anywhere;
 }
 
-.mono,
-.scanner-table td.mono,
-.scanner-object-row .mono {
+/* Scoped to this page: .mono is a common enough class name that a bare global
+   rule would reach into any other feature that ever uses it. */
+.scanner-page .mono,
+.scanner-page .scanner-table td.mono,
+.scanner-page .scanner-object-row .mono {
   font-family: var(--dc-mono);
 }
 
@@ -187,10 +189,17 @@
   gap: 8px;
 }
 
-.scanner-chip {
+/* Page-scoped on purpose. styles.css has `.data-table td span { display:block }`
+   at (0,1,2), which outranks a bare `.scanner-chip` (0,1,0) and turned every
+   status and register chip inside the results table into a full-width block bar.
+   Scoping the whole chip block under .scanner-page takes it to (0,2,0), which
+   wins, and keeps the tone variants above it. */
+.scanner-page .scanner-chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  /* Cancels the same global rule's 3px sub-line gap. */
+  margin-top: 0;
   padding: 3px 9px;
   border-radius: 20px;
   background: var(--surface-3);
@@ -199,22 +208,22 @@
   white-space: nowrap;
 }
 
-.scanner-chip.chip-pass {
+.scanner-page .scanner-chip.chip-pass {
   background: var(--green-bg);
   color: var(--green);
 }
 
-.scanner-chip.chip-warn {
+.scanner-page .scanner-chip.chip-warn {
   background: var(--amber-bg);
   color: var(--amber);
 }
 
-.scanner-chip.chip-fail {
+.scanner-page .scanner-chip.chip-fail {
   background: var(--red-bg);
   color: var(--red);
 }
 
-.scanner-chip.chip-info {
+.scanner-page .scanner-chip.chip-info {
   background: var(--accent-bg);
   color: var(--accent);
 }
@@ -287,7 +296,11 @@
   min-width: 0;
 }
 
-.scanner-table td span {
+/* The cell sub-line (the vendor under a MAC, say). It must NOT catch the status
+   and register chips, which are spans too: this selector is more specific than
+   .scanner-chip, so an unscoped rule turned every chip into a full-width block
+   bar with a 3px gap above it. */
+.scanner-table td > span:not(.scanner-chip) {
   display: block;
   margin-top: 3px;
   color: var(--muted);

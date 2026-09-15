@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearApiKey, setApiKey } from "../../api/client";
 import { IpScannerPage } from "./IpScannerPage";
-import { scannerProviders } from "./scannerTestHarness";
+import { createScannerQueryClient, scannerProviders } from "./scannerTestHarness";
 
 const RUN_ID = "run-ip-scanner-1";
 
@@ -132,14 +132,40 @@ const results = {
 
 let startBody: Record<string, unknown> | null = null;
 
-function stubFetch(overrides: { runs?: unknown[] } = {}) {
+function stubFetch(
+  overrides: {
+    runs?: unknown[] | (() => unknown[]);
+    onSaveRegister?: () => Promise<unknown>;
+    latestImportFileName?: string;
+    runStatus?: string;
+    runError?: string | null;
+  } = {},
+) {
   startBody = null;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/v1/runs?")) {
-        return jsonResponse({ runs: overrides.runs ?? [terminalRun] });
+        const base = { ...terminalRun, status: overrides.runStatus ?? terminalRun.status };
+        void base;
+        const runs =
+          typeof overrides.runs === "function" ? overrides.runs() : (overrides.runs ?? [terminalRun]);
+        return jsonResponse({ runs });
+      }
+      if (url.includes("/api/v1/imports") && init?.method === "POST") {
+        return jsonResponse({
+          import_id: "imp-upload-1",
+          import_type: "ip_scanner_register",
+          file_name: "register.csv",
+          status: "accepted",
+          total_rows: 1,
+          accepted_rows: 1,
+          rejected_rows: 0,
+          missing_columns: [],
+          warnings: [],
+          created_at: "2026-09-14T09:10:00Z",
+        });
       }
       if (url.endsWith("/api/v1/imports/profiles")) {
         return jsonResponse([
@@ -156,7 +182,7 @@ function stubFetch(overrides: { runs?: unknown[] } = {}) {
         return jsonResponse({
           import_id: "imp-1",
           import_type: "ip_scanner_register",
-          file_name: "ip-register.csv",
+          file_name: overrides.latestImportFileName ?? "ip-register.csv",
           status: "accepted",
           total_rows: 3,
           accepted_rows: 3,
@@ -174,11 +200,29 @@ function stubFetch(overrides: { runs?: unknown[] } = {}) {
       if (url.endsWith("/api/v1/system/interfaces")) {
         return jsonResponse([]);
       }
-      if (url.includes(`/api/v1/discovery/runs/${RUN_ID}/results`)) {
-        return jsonResponse(results);
-      }
-      if (url.includes(`/api/v1/discovery/runs/${RUN_ID}`)) {
-        return jsonResponse(terminalRun);
+      const runMatch = new RegExp("/api/v1/discovery/runs/([^/?]+)").exec(url);
+      if (runMatch) {
+        const runId = runMatch[1];
+        if (url.includes("/results")) {
+          return jsonResponse({
+            ...results,
+            run_id: runId,
+            status: overrides.runStatus ?? results.status,
+            ...(overrides.runStatus && overrides.runStatus !== "succeeded"
+              ? { discovered_assets: [], devices: [] }
+              : {}),
+          });
+        }
+        if (url.includes("/save-as-register")) {
+          // handled below
+        } else {
+          return jsonResponse({
+            ...terminalRun,
+            run_id: runId,
+            status: overrides.runStatus ?? terminalRun.status,
+            error_message: overrides.runError ?? terminalRun.error_message,
+          });
+        }
       }
       if (url.endsWith("/api/v1/discovery/ip_sidecar/runs") && init?.method === "POST") {
         startBody = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -189,7 +233,10 @@ function stubFetch(overrides: { runs?: unknown[] } = {}) {
           message: "IP scan accepted.",
         });
       }
-      if (url.includes(`/api/v1/discovery/ip_sidecar/runs/${RUN_ID}/save-as-register`)) {
+      if (url.includes("/save-as-register")) {
+        if (overrides.onSaveRegister) {
+          return jsonResponse(await overrides.onSaveRegister());
+        }
         return jsonResponse({
           import_id: "imp-saved-1",
           import_type: "ip_scanner_register",
@@ -286,7 +333,7 @@ describe("IpScannerPage", () => {
     expect(within(panel).getAllByText("Example BMS").length).toBeGreaterThan(0);
     expect(within(panel).getByText("5 ms")).toBeInTheDocument();
     expect(within(panel).getByText("ARP")).toBeInTheDocument();
-    // Pete's svcDescr formatting, reproduced for the services list.
+    // The vendored svcDescr() formatting, reproduced for the services list.
     expect(within(panel).getByText("tcp/443 https 🔒")).toBeInTheDocument();
     expect(
       within(panel).getByText('nginx 1.24 · “Plant controller” · cert: ahu-01.local'),
@@ -341,9 +388,130 @@ describe("IpScannerPage", () => {
 
     expect(await screen.findByText(/Saved as register/)).toBeInTheDocument();
     expect(
-      screen.getByText(/The next IP scan for this project and site compares against it\./),
+      screen.getByText(/It is stored here and applies automatically to the next IP scan/),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Download register CSV" })).toBeInTheDocument();
+  });
+
+  it("drops a save that lands after the operator switched runs", async () => {
+    const runB = { ...terminalRun, run_id: "run-ip-scanner-2" };
+    let currentRun: Record<string, unknown> = terminalRun;
+    let releaseSave!: () => void;
+    const savePending = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    stubFetch({
+      runs: () => [currentRun],
+      onSaveRegister: async () => {
+        await savePending;
+        return {
+          import_id: "imp-saved-1",
+          import_type: "ip_scanner_register",
+          file_name: `scan-register-${RUN_ID}.csv`,
+          status: "accepted",
+          total_rows: 2,
+          accepted_rows: 2,
+          rejected_rows: 0,
+          missing_columns: [],
+          warnings: [],
+          created_at: "2026-09-14T09:05:00Z",
+        };
+      },
+    });
+    render(scannerProviders(<IpScannerPage />));
+
+    const save = await screen.findByRole("button", {
+      name: /Save scan as register/,
+    });
+    await waitFor(() => expect(save).not.toBeDisabled());
+    fireEvent.click(save);
+    await screen.findByRole("button", { name: "Saving register..." });
+
+    // The operator moves to another run while run 1 save is still in flight.
+    currentRun = runB;
+    window.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(document.body.textContent).toContain("run-ip-scanner-2"));
+
+    releaseSave();
+
+    // Run 1 summary must not repopulate the panel over run 2: the note would
+    // name run 1 file while the download URL pointed at run 2.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Saving register..." })).toBeNull(),
+    );
+    expect(screen.queryByText("Saved as register")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Download register CSV" })).toBeNull();
+  });
+
+  it("offers the register CSV for a register on file that came from a scan", async () => {
+    stubFetch({ latestImportFileName: `scan-register-${RUN_ID}.csv` });
+    render(scannerProviders(<IpScannerPage />));
+
+    const note = await screen.findByText(/Register already imported/);
+    const panel = note.closest(".state-panel") as HTMLElement;
+    fireEvent.click(within(panel).getByRole("button", { name: "Download register CSV" }));
+
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(fetch)
+          .mock.calls.some(([input]) =>
+            String(input).includes(`/ip_sidecar/runs/${RUN_ID}/register.csv`),
+          ),
+      ).toBe(true),
+    );
+  });
+
+  it("offers no register CSV when the register on file was uploaded", async () => {
+    stubFetch({ latestImportFileName: "site_ip_register.csv" });
+    render(scannerProviders(<IpScannerPage />));
+
+    const note = await screen.findByText(/Register already imported/);
+    const panel = note.closest(".state-panel") as HTMLElement;
+    expect(within(panel).queryByRole("button", { name: "Download register CSV" })).toBeNull();
+  });
+
+  it("refreshes the register-on-file note after an upload", async () => {
+    stubFetch();
+    const queryClient = createScannerQueryClient();
+    render(scannerProviders(<IpScannerPage />, { queryClient }));
+    await screen.findByText(/Register already imported/);
+
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const file = new File(["asset_id,ip_address"], "register.csv", { type: "text/csv" });
+    fireEvent.change(screen.getByLabelText(/CSV or XLSX file/i), { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: "Upload and validate" }));
+
+    // The ROOT key, not the one ending in an empty import-type slot, is what the
+    // "Register already imported" query is actually stored under.
+    await waitFor(() =>
+      expect(
+        invalidate.mock.calls.some(
+          ([options]) =>
+            Array.isArray(options?.queryKey) &&
+            options.queryKey[options.queryKey.length - 1] === "latest-import",
+        ),
+      ).toBe(true),
+    );
+  });
+
+  it("says a failed run failed instead of claiming it found nothing", async () => {
+    stubFetch({ runStatus: "failed", runError: "sidecar refused the scan range" });
+    render(scannerProviders(<IpScannerPage />));
+
+    expect(await screen.findByText("Run failed — no results recorded")).toBeInTheDocument();
+    expect(screen.getAllByText("sidecar refused the scan range").length).toBeGreaterThan(0);
+    expect(screen.queryByText("No results yet")).not.toBeInTheDocument();
+  });
+
+  it("says a cancelled run was stopped", async () => {
+    stubFetch({ runStatus: "cancelled" });
+    render(scannerProviders(<IpScannerPage />));
+
+    expect(await screen.findByText("Run stopped")).toBeInTheDocument();
+    expect(
+      screen.getByText("The run was stopped before any results were recorded."),
+    ).toBeInTheDocument();
   });
 
   it("names the run in the footer and links Run History and Reports", async () => {

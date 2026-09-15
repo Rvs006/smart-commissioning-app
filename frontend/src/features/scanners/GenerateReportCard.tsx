@@ -9,7 +9,7 @@ import {
 } from "../../api/client";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { ENGINEER_REQUIRED_TOOLTIP } from "../../app/sessionContext";
-import type { ScannerRunController } from "./useScannerRun";
+import type { RunEpochOwner, ScannerRunController } from "./useScannerRun";
 
 const ALL_FORMATS = ["pdf", "docx", "xlsx", "zip"] as const satisfies readonly ReportFormat[];
 type FormatSelection = ReportFormat | "all";
@@ -28,9 +28,11 @@ export function GenerateReportCard({ run }: { run: ScannerRunController }) {
   const {
     activeRun,
     activeRunAuthoritativelyTerminal,
+    activeRunOwner,
     apiClient,
     canEngineer,
     lane,
+    ownsActiveRun,
     runAccessClosed,
     sessionScopeId,
     workspaceRef,
@@ -44,12 +46,26 @@ export function GenerateReportCard({ run }: { run: ScannerRunController }) {
 
   const mutation = useMutation({
     mutationKey: mutationKeys.reports(sessionScopeId, workspaceRef),
-    mutationFn: async ({ runId, reportTitle }: { runId: string; reportTitle: string }) => {
+    mutationFn: async ({
+      owner,
+      runId,
+      reportTitle,
+    }: {
+      owner: RunEpochOwner;
+      runId: string;
+      reportTitle: string;
+    }) => {
       const formats: readonly ReportFormat[] = format === "all" ? ALL_FORMATS : [format];
       const reports: ReportSummary[] = [];
       const failedFormats: ReportFormat[] = [];
       let firstFailure: unknown;
       for (const entry of formats) {
+        // Generate-All is a loop of requests; if the operator starts another run
+        // partway through, the remaining formats belong to a run that is no
+        // longer on screen. Stop and say nothing rather than report success.
+        if (!ownsActiveRun(owner)) {
+          return { failedFormats, ownerLost: true, reports, requestedCount: formats.length };
+        }
         try {
           reports.push(
             await createReport({
@@ -69,9 +85,12 @@ export function GenerateReportCard({ run }: { run: ScannerRunController }) {
       if (reports.length === 0) {
         throw firstFailure instanceof Error ? firstFailure : new Error("Report generation failed.");
       }
-      return { failedFormats, reports, requestedCount: formats.length };
+      return { failedFormats, ownerLost: false, reports, requestedCount: formats.length };
     },
-    onSuccess: ({ failedFormats, reports, requestedCount }) => {
+    onSuccess: ({ failedFormats, ownerLost, reports, requestedCount }, { owner }) => {
+      if (ownerLost || !ownsActiveRun(owner)) {
+        return;
+      }
       setToast(
         failedFormats.length > 0
           ? {
@@ -104,8 +123,11 @@ export function GenerateReportCard({ run }: { run: ScannerRunController }) {
     if (!trimmed || trimmed.length > 160 || mutation.isPending) {
       return;
     }
+    if (!activeRunOwner) {
+      return;
+    }
     setToast(null);
-    mutation.mutate({ reportTitle: trimmed, runId: activeRun.runId });
+    mutation.mutate({ owner: activeRunOwner, reportTitle: trimmed, runId: activeRun.runId });
   };
 
   return (

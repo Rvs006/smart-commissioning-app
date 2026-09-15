@@ -77,8 +77,8 @@ export function DeviceDetailPanel({
   const dragFromRef = useRef<{ x: number; width: number } | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
-  // Esc collapses the expanded panel (Pete's pop-out behaviour); a second Esc
-  // is left to the browser so nothing traps the operator.
+  // Esc collapses the expanded panel (the vendored tool's pop-out behaviour); a
+  // second Esc is left to the browser so nothing traps the operator.
   useEffect(() => {
     if (!expanded) {
       return;

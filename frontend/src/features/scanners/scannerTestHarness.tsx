@@ -9,9 +9,20 @@ import { DEFAULT_WORKSPACE, createSessionScopeId } from "../../app/sessionScope"
 // SessionContext directly rather than SessionProvider, so a test never has to
 // stub /me just to get an engineer role, and keeps the query client isolated per
 // render. Fetch stubbing stays in each test file.
+export function createScannerQueryClient() {
+  return new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+}
+
 export function scannerProviders(
   ui: ReactNode,
-  options: { canEngineer?: boolean; authorizationEnforced?: boolean; initialEntry?: string } = {},
+  options: {
+    canEngineer?: boolean;
+    authorizationEnforced?: boolean;
+    initialEntry?: string;
+    queryClient?: QueryClient;
+  } = {},
 ) {
   const sessionScopeId = createSessionScopeId();
   const workspace = DEFAULT_WORKSPACE;
@@ -36,9 +47,7 @@ export function scannerProviders(
     signOut: () => {},
     workspace,
   };
-  const queryClient = new QueryClient({
-    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
-  });
+  const queryClient = options.queryClient ?? createScannerQueryClient();
   return (
     <QueryClientProvider client={queryClient}>
       <SessionContext.Provider value={value}>
