@@ -369,7 +369,9 @@ describe("BacnetScannerPage", () => {
 
     expect(await screen.findByText(/Saved as register/)).toBeInTheDocument();
     expect(
-      screen.getByText(/The next BACnet scan for this project and site compares against it\./),
+      screen.getByText(
+        /It is stored here and applies automatically to the next BACnet scan for this project and site\./,
+      ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Download register CSV" })).toBeInTheDocument();
   });

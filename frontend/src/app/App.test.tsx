@@ -238,6 +238,18 @@ describe("App shell", () => {
     expect(await screen.findByRole("button", { name: "Set API key" })).toBeInTheDocument();
   });
 
+  it("leaves the /mqtt-scanner title to the page so the head is named once", async () => {
+    // Same contract as /ip-scanner: the native MQTT screen carries its own
+    // eyebrow + title + purpose, so the shell must not print a second h1.
+    stubDashboardFetch();
+    renderApp({ path: "mqtt-scanner", initialEntry: "/mqtt-scanner" });
+
+    expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "MQTT Discovery" })).toBeInTheDocument();
+
+    expect(await screen.findByRole("button", { name: "Set API key" })).toBeInTheDocument();
+  });
+
   it("still prints the shell title on a route that does not own it", async () => {
     stubDashboardFetch();
     renderApp({ path: "configuration", initialEntry: "/configuration" });

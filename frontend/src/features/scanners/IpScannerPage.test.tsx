@@ -286,7 +286,7 @@ describe("IpScannerPage", () => {
     expect(within(panel).getAllByText("Example BMS").length).toBeGreaterThan(0);
     expect(within(panel).getByText("5 ms")).toBeInTheDocument();
     expect(within(panel).getByText("ARP")).toBeInTheDocument();
-    // Pete's svcDescr formatting, reproduced for the services list.
+    // The vendored tool's svcDescr formatting, reproduced for the services list.
     expect(within(panel).getByText("tcp/443 https 🔒")).toBeInTheDocument();
     expect(
       within(panel).getByText('nginx 1.24 · “Plant controller” · cert: ahu-01.local'),
@@ -341,7 +341,9 @@ describe("IpScannerPage", () => {
 
     expect(await screen.findByText(/Saved as register/)).toBeInTheDocument();
     expect(
-      screen.getByText(/The next IP scan for this project and site compares against it\./),
+      screen.getByText(
+        /It is stored here and applies automatically to the next IP scan for this project and site\./,
+      ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Download register CSV" })).toBeInTheDocument();
   });
