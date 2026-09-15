@@ -82,12 +82,28 @@ database migration in this release.
   register saved this way has no CSV download, because there is no scan run
   behind it to rebuild the file from; download one from a capture run instead.
 - The captured-topics table has an "Export to CSV" button beside "Export topics
-  (XLSX)". It is built in the browser from the rows on screen (topic, asset, last
-  seen, message count, latest payload), so it needs no round trip; the XLSX
-  beside it is still the server-rebuilt copy.
+  (XLSX)". It writes the rows the table is currently showing (topic, asset, last
+  seen, message count, latest payload), so narrowing the RAG chips or the text
+  filter narrows the file to match what is on screen, and it needs no round trip.
+  "Export topics (XLSX)" beside it stays the whole run, rebuilt server-side.
 
 ### Changed
 
+- The captured-topics Ret column reports what the broker actually delivered. The
+  vendored capture records the retained flag per topic and its export carries it,
+  but the scanner lane never read it, so every row showed "-" whether the payload
+  was retained or not. Delivery QoS stays "Not recorded" for this lane, honestly:
+  the vendored tool records no per-message QoS anywhere, and the run's
+  subscription QoS is a different number that must not be passed off as it.
+- "Write config" on a live MQTT asset now opens at QoS 1 with retain ticked, the
+  same defaults the vendored config editor uses, so a config written by following
+  that tool goes out the same way. A plain "Publish message..." still opens at
+  QoS 0, unretained.
+- The live run console shows only what a scan produces while an IP or BACnet scan
+  is running: status, elapsed, progress and open issues. The registered-asset
+  chart and the topic-observation breakdown are gone from those screens; they
+  belong to UDMI validation and could only ever read "Waiting for evidence" on a
+  scanner run. The UDMI workbench console is unchanged.
 - The MQTT capture table's payload-size column is named "JSON size" and measures
   the stored JSON exactly as the "Last value" cell renders it. The engine records
   no wire message length, so the column says what it is rather than implying it

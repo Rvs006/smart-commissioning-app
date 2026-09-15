@@ -387,6 +387,29 @@ describe("BacnetScannerPage", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(/Enter both bounds or leave both blank/);
   });
 
+  // Carried over from the deleted ModulePage test: a complete but INVERTED pair
+  // is not a half-filled range, and the builder would omit it and silently scan
+  // every instance, so Start has to stay down for that too.
+  it("blocks Send Who-Is on an inverted instance range, and clears once it is valid", async () => {
+    stubFetch();
+    render(scannerProviders(<BacnetScannerPage />));
+    const low = await screen.findByLabelText(/Device instance range — low/i);
+    const high = screen.getByLabelText(/Device instance range — high/i);
+    const start = screen.getByRole("button", { name: "Send Who-Is" });
+
+    // Both blank is a valid global Who-Is.
+    await waitFor(() => expect(start).not.toBeDisabled());
+
+    fireEvent.change(low, { target: { value: "1000" } });
+    fireEvent.change(high, { target: { value: "999" } });
+    await waitFor(() => expect(start).toBeDisabled());
+    expect(screen.getByRole("alert")).toHaveTextContent(/Enter both bounds or leave both blank/);
+
+    fireEvent.change(high, { target: { value: "1999" } });
+    await waitFor(() => expect(start).not.toBeDisabled());
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   // Moved from ModulePage.test.tsx (P2b) when the sidecar branches were deleted:
   // this lane posts authorized=scanAuthorized and the server rejects an
   // unauthorized run, so Start must stay disabled until the operator confirms

@@ -3610,12 +3610,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             { label: "No verdict", value: "none" },
           ]
         : [
-              { label: "All verdicts", value: "all" },
-              { label: "Pass", value: "pass" },
-              { label: "Fail", value: "fail" },
-              { label: "Warn", value: "warn" },
-              { label: "No verdict", value: "none" },
-            ];
+            { label: "All verdicts", value: "all" },
+            { label: "Pass", value: "pass" },
+            { label: "Fail", value: "fail" },
+            { label: "Warn", value: "warn" },
+            { label: "No verdict", value: "none" },
+          ];
 
   // Keep the selected row inside the FILTERED view: if the active selection is
   // filtered out, move it to the first visible row's ORIGINAL index so the
@@ -4726,7 +4726,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     const mqttOverCapBlocked =
                       mqttCaptureOverCap &&
                       action.kind === "discovery" &&
-                      (action.runKind === "mqtt" || action.runKind === "mqtt_sidecar");
+                      action.runKind === "mqtt";
                     const overCapBlocked =
                       (udmiCaptureOverCap &&
                         action.kind === "validation" &&
@@ -5432,8 +5432,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   : "blank (run until you press Stop run)"}
               </strong>
               .{" "}
-              Blank runs until you press Stop run, the 500-distinct-topic cap, or the 48-hour safety
-              limit. Closing the app ends the run, which is then marked interrupted at next start.{" "}
+              Blank runs until you press Stop run, the 30,000-distinct-topic cap, or the 48-hour
+              safety limit. Closing the app ends the run, which is then marked interrupted at next start.{" "}
               Captured topics appear here when the run completes.
             </p>
             {activeRunTerminal &&

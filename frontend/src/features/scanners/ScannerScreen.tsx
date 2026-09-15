@@ -73,8 +73,14 @@ export type ScannerScreenProps = {
    */
   panelWidth?: number;
   onPanelWidthChange?: (width: number) => void;
-  /** Extra buttons in the results heading (BACnet export assets, MQTT archive). */
-  resultsActions?: ReactNode;
+  /**
+   * Extra buttons in the results heading (BACnet export assets, MQTT archive).
+   * Pass a function to receive the rows the table is CURRENTLY showing, after
+   * the RAG chip and text filters: an action that exports what the operator can
+   * see has to read the same list the table renders, or the file and the
+   * "Showing N of M rows" line disagree.
+   */
+  resultsActions?: ReactNode | ((visibleRows: ScannerRow[]) => ReactNode);
   /** Lane-specific evidence cards below the results table (BACnet routers / points). */
   evidenceCards?: ReactNode;
   /** Setup-card heading. MQTT names it "Broker & capture". */
@@ -467,9 +473,9 @@ export function ScannerScreen({
               </p>
             )}
             {/* The live console belongs to a run in flight. Once the run is
-                terminal the results table below IS the outcome, and the
-                console's UDMI/topic panels only render "waiting for evidence"
-                placeholders for a lane that never produces them. */}
+                terminal the results table below IS the outcome. variant="scanner"
+                drops the registered-asset chart and the topic breakdown, which a
+                scan never produces. */}
             {activeRunRecord && !activeRunTerminal && (
               <LiveRunConsole
                 key={activeRunRecord.run_id}
@@ -485,6 +491,7 @@ export function ScannerScreen({
                 stage={activeRunStage ?? ""}
                 status={activeRunStatus ?? "queued"}
                 validationSummary={null}
+                variant="scanner"
               />
             )}
             {runController.phase === "terminal-sync" && (
@@ -624,7 +631,7 @@ export function ScannerScreen({
                 ? "Saving register..."
                 : `Save ${laneRunNoun} as register (applies to the next ${laneRunNoun})`}
             </button>
-            {resultsActions}
+            {typeof resultsActions === "function" ? resultsActions(visibleRows) : resultsActions}
           </div>
         </div>
 

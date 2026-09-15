@@ -3,6 +3,7 @@ import type { DiscoveryResultsResponse } from "../../api/client";
 import { assetIdentity } from "./runIsolation";
 import {
   bacnetBackendLabel,
+  captureRowsToCsv,
   bacnetDeviceDetailItems,
   bacnetResultColumns,
   bacnetRowVerdict,
@@ -1481,5 +1482,44 @@ describe("bacnetDeviceDetailItems (GAP-B2 row-detail drawer)", () => {
     expect(items.map((item) => item.label)).toEqual(["RAG", "Register"]);
     expect(bacnetDeviceDetailItems(undefined)).toEqual([]);
     expect(bacnetDeviceDetailItems(null)).toEqual([]);
+  });
+});
+
+describe("captureRowsToCsv", () => {
+  const row = {
+    topic: "example/AHU-01/pointset",
+    asset: "AHU-01",
+    lastSeen: "2026-09-14T09:00:30Z",
+    messageCount: "12",
+    payload: '{"temp":18.4}',
+  };
+
+  it("writes the five-column header and CRLF line endings", () => {
+    const lines = captureRowsToCsv([row]).split("\r\n");
+    expect(lines[0]).toBe('"Topic","Asset","Last Seen","Message Count","Latest Payload"');
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toBe(
+      '"example/AHU-01/pointset","AHU-01","2026-09-14T09:00:30Z","12","{""temp"":18.4}"',
+    );
+  });
+
+  it("doubles every quote in a value so a JSON payload cannot break the row", () => {
+    // A payload is JSON, so it is nothing but quotes. Escaping one but not the
+    // rest would end the field early and shift every later column.
+    const csv = captureRowsToCsv([
+      { ...row, payload: '{"a":"x","b":"y"}', asset: 'AHU "1"' },
+    ]);
+    // Asserted whole: a quoted JSON payload contains the `","` sequence itself,
+    // so counting separators would be meaningless. Every field is quoted and
+    // every inner quote doubled, which is what keeps the columns aligned.
+    expect(csv.split("\r\n")[1]).toBe(
+      '"example/AHU-01/pointset","AHU ""1""","2026-09-14T09:00:30Z","12","{""a"":""x"",""b"":""y""}"',
+    );
+  });
+
+  it("writes a header-only file for no rows rather than an empty one", () => {
+    expect(captureRowsToCsv([])).toBe(
+      '"Topic","Asset","Last Seen","Message Count","Latest Payload"',
+    );
   });
 });

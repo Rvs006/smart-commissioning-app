@@ -222,4 +222,34 @@ describe("LiveRunConsole", () => {
     expect(within(alternate as HTMLElement).getByText("0 / 4 assets")).toBeInTheDocument();
     expect(within(noMatch as HTMLElement).getByText("1 / 4 assets")).toBeInTheDocument();
   });
+
+  // An IP or BACnet scan has no registered-asset ledger and no topic discovery,
+  // so those two panels sat there reading "Waiting for evidence" and
+  // "Expected-topic observed 0" for the whole run. That is not pending evidence,
+  // it is evidence this kind of run never produces.
+  it("drops the registered-asset chart and the topic breakdown for a scanner run", () => {
+    const { rerender } = render(consoleView(null));
+    // Default (UDMI) is unchanged: ModulePage passes no variant at all.
+    expect(screen.getByText("Registered assets observed")).toBeInTheDocument();
+    expect(screen.getByLabelText("Topic observation breakdown")).toBeInTheDocument();
+
+    rerender(
+      <LiveRunConsole
+        assetTopicDiscovery={null}
+        elapsed="1m 0s"
+        issueCount={2}
+        progress={35}
+        run={run}
+        stage="scanning"
+        status="running"
+        validationSummary={null}
+        variant="scanner"
+      />,
+    );
+    expect(screen.queryByText("Registered assets observed")).toBeNull();
+    expect(screen.queryByLabelText("Topic observation breakdown")).toBeNull();
+    // What a scan DOES report stays: status, progress, elapsed and open issues.
+    expect(screen.getByText("Open issues")).toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument();
+  });
 });

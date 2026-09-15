@@ -207,4 +207,27 @@ describe("MqttPublishModal", () => {
     await screen.findByText(/Not sent/);
     expect(screen.getByText(/not connected/i)).toBeInTheDocument();
   });
+
+  // The vendored config editor ships QoS 1 with retain ticked
+  // (scanners/vendor/mqtt-discovery/public/index.html:215-216). "Write config"
+  // has to open the same way or an operator following that tool sends a config
+  // at QoS 0 without noticing the difference.
+  it("opens a Write config prefill at QoS 1, and a plain publish at QoS 0", () => {
+    const { unmount } = render(
+      <MqttPublishModal
+        defaultQos={1}
+        defaultRetain
+        defaultTopic="site/ahu-1/config"
+        onClose={() => {}}
+        workspace={workspace}
+      />,
+    );
+    expect((screen.getByLabelText("QoS") as HTMLSelectElement).value).toBe("1");
+    expect(screen.getByLabelText(/Retain/i)).toBeChecked();
+    unmount();
+
+    render(<MqttPublishModal onClose={() => {}} workspace={workspace} />);
+    expect((screen.getByLabelText("QoS") as HTMLSelectElement).value).toBe("0");
+    expect(screen.getByLabelText(/Retain/i)).not.toBeChecked();
+  });
 });

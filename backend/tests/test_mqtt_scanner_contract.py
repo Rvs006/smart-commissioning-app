@@ -87,6 +87,59 @@ class ManifestContractTest(unittest.TestCase):
         self.assertEqual(record["attributes"]["schema"], "udmi-v2")
 
 
+class RetainedFlagContractTest(unittest.TestCase):
+    """The Ret column read "-" on every captured topic until the adapter mapped
+    the export's own retained flag. server.js records it per topic
+    (``t.retained = m.retain``) and exports it as ``topicsDetail[].retained``."""
+
+    def test_vendored_export_carries_the_retained_flag(self) -> None:
+        self.assertIn("retained: !!t.retained", _SERVER_JS)
+
+    def test_retained_and_not_retained_topics_map_to_json_booleans(self) -> None:
+        manifest = {
+            "assetCount": 1, "topicCount": 2,
+            "assets": [{
+                "asset": "AHU-01", "matched": True,
+                "topics": ["site/x/ahu/01/state", "site/x/ahu/01/events/pointset"],
+                "topicsDetail": [
+                    {"topic": "site/x/ahu/01/state", "retained": True, "count": 1},
+                    {"topic": "site/x/ahu/01/events/pointset", "retained": False, "count": 4},
+                ],
+            }],
+        }
+        payloads = {
+            "site/x/ahu/01/state": {"raw": '{"a":1}', "history_count": 1},
+            "site/x/ahu/01/events/pointset": {"raw": '{"b":2}', "history_count": 4},
+        }
+        result = _map_manifest(manifest, payloads, [], {})
+        by_topic = {record["topic"]: record["attributes"] for record in result.structured_records}
+        # Identity, not truthiness: the frontend distinguishes True / False /
+        # ABSENT, so "yes" / "no" / "-" stay three different answers.
+        self.assertIs(by_topic["site/x/ahu/01/state"]["last_retained"], True)
+        self.assertIs(by_topic["site/x/ahu/01/events/pointset"]["last_retained"], False)
+
+    def test_a_topic_with_no_detail_entry_leaves_the_key_absent(self) -> None:
+        # An older export (or a topic the manifest never detailed) must read as
+        # unknown, never as an asserted "not retained".
+        manifest = {"assets": [{"asset": "AHU-01", "topics": ["site/x/ahu/01/state"]}]}
+        payloads = {"site/x/ahu/01/state": {"raw": "{}", "history_count": 1}}
+        result = _map_manifest(manifest, payloads, [], {})
+        self.assertNotIn("last_retained", result.structured_records[0]["attributes"])
+
+    def test_delivery_qos_is_never_fabricated(self) -> None:
+        # The vendored tool records no per-message QoS, so the adapter must not
+        # invent one from the run's subscription QoS parameter.
+        manifest = {
+            "assets": [{
+                "asset": "AHU-01", "topics": ["site/x/ahu/01/state"],
+                "topicsDetail": [{"topic": "site/x/ahu/01/state", "retained": True}],
+            }],
+        }
+        payloads = {"site/x/ahu/01/state": {"raw": "{}", "history_count": 1}}
+        result = _map_manifest(manifest, payloads, [], {"qos": 1})
+        self.assertNotIn("last_qos", result.structured_records[0]["attributes"])
+
+
 class LastPayloadDictContractTest(unittest.TestCase):
     def test_last_payload_is_always_a_dict(self) -> None:
         self.assertEqual(_as_payload_dict('{"a":1}'), {"a": 1})

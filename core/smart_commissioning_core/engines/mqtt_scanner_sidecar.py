@@ -296,6 +296,18 @@ def _map_manifest(
         for topic in asset.get("topics") or []:
             topic_to_asset[str(topic)] = asset
 
+    # topic -> the manifest's per-topic detail entry. The vendored tool records
+    # the retained flag of the LAST message it saw on each topic
+    # (scanners/vendor/mqtt-discovery/server.js: ``t.retained = m.retain``,
+    # exported as ``topicsDetail[].retained``). Without this the Ret column read
+    # "-" on every captured topic, because the frontend looks for
+    # ``attributes.last_retained`` and only the built-in engine stamped it.
+    topic_to_detail: dict[str, Mapping[str, Any]] = {}
+    for asset in manifest_assets:
+        for detail in asset.get("topicsDetail") or []:
+            if isinstance(detail, Mapping) and detail.get("topic") is not None:
+                topic_to_detail[str(detail["topic"])] = detail
+
     discovered_assets: list[dict[str, Any]] = []
     for asset in manifest_assets:
         matched = bool(asset.get("matched"))
@@ -316,21 +328,32 @@ def _map_manifest(
     for position, topic in enumerate(payloads):
         asset = topic_to_asset.get(str(topic), {})
         entry = payloads[topic] or {}
+        attributes: dict[str, Any] = {
+            "device_ref": asset.get("asset"),
+            "schema": asset.get("schema"),
+            "site": asset.get("site"),
+            "room": asset.get("room"),
+            "gateway_id": asset.get("gatewayId"),
+            "matched": bool(asset.get("matched")),
+            "position": position,
+        }
+        # A JSON boolean, matching mqtt_discovery's contract exactly: the reader
+        # distinguishes True / False / ABSENT, so a topic the export carries no
+        # detail entry for must leave the key off rather than claim "not
+        # retained". Deliberately NOT stamping last_qos: the vendored tool records
+        # no per-message QoS anywhere in its export, so the delivery QoS is
+        # genuinely unknown and the panel's honest "Not recorded" is correct. The
+        # run's subscription QoS cap is a separate, run-level value.
+        detail = topic_to_detail.get(str(topic))
+        if detail is not None and "retained" in detail:
+            attributes["last_retained"] = bool(detail["retained"])
         structured_records.append(
             json_safe_value(
                 {
                     "topic": topic,
                     "message_count": _message_count(entry),
                     "last_payload": _as_payload_dict(entry.get("raw")),
-                    "attributes": {
-                        "device_ref": asset.get("asset"),
-                        "schema": asset.get("schema"),
-                        "site": asset.get("site"),
-                        "room": asset.get("room"),
-                        "gateway_id": asset.get("gatewayId"),
-                        "matched": bool(asset.get("matched")),
-                        "position": position,
-                    },
+                    "attributes": attributes,
                 }
             )
         )

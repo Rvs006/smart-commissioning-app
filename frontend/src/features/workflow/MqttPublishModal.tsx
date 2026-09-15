@@ -28,6 +28,13 @@ type Props = {
   // config topic + last-seen config payload, with retain defaulting on.
   defaultPayload?: string;
   defaultRetain?: boolean;
+  /**
+   * QoS the dialog opens on. The vendored tool's config editor ships QoS 1 and
+   * retain ticked (scanners/vendor/mqtt-discovery/public/index.html:215-216),
+   * so "Write config" must open the same way or an operator following that tool
+   * silently sends a config at QoS 0. A plain "Publish message..." keeps 0.
+   */
+  defaultQos?: 0 | 1 | 2;
   onClose: () => void;
 };
 
@@ -69,13 +76,14 @@ export function MqttPublishModal({
   defaultTopic,
   defaultPayload,
   defaultRetain,
+  defaultQos,
   onClose,
 }: Props) {
   const context = apiClient ? { client: apiClient } : undefined;
   const [stage, setStage] = useState<Stage>("compose");
   const [topic, setTopic] = useState(defaultTopic ?? "");
   const [payload, setPayload] = useState(defaultPayload ?? "");
-  const [qos, setQos] = useState(0);
+  const [qos, setQos] = useState<number>(defaultQos ?? 0);
   const [retain, setRetain] = useState(defaultRetain ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

@@ -198,17 +198,11 @@ export type TerminalEvidenceBarrierInput<TRun extends { runId: string; epoch: nu
   blocked: boolean;
   dispatchRun: (action: RunControllerAction) => void;
   runController: RunControllerState;
-  /**
-   * Re-read the run record. MUST be referentially stable (useCallback): the
-   * effect re-runs when it changes, and a mid-flight re-run aborts the sequence.
-   */
+  /** Re-read the run record. */
   refetchRunStatus: (run: TRun) => Promise<RefetchOutcome>;
-  /**
-   * Re-read the run's evidence and THROW if it does not name this run. Stable,
-   * like refetchRunStatus.
-   */
+  /** Re-read the run's evidence and THROW if it does not name this run. */
   confirmEvidence: (run: TRun) => Promise<void>;
-  /** Which evidence the settled phase requires for this run. Stable. */
+  /** Which evidence the settled phase requires for this run. */
   requirementsFor: (run: TRun) => readonly EvidenceRequirement[];
 };
 
@@ -227,6 +221,16 @@ export function useTerminalEvidenceBarrier<TRun extends { runId: string; epoch: 
   requirementsFor,
   runController,
 }: TerminalEvidenceBarrierInput<TRun>): { resetEvidenceSync: () => void } {
+  // The three callbacks are latched in a ref and read through it inside the
+  // async body, so they are NOT effect dependencies. Asking every caller to
+  // memoise them would have been a trap: an unmemoised callback re-runs the
+  // effect mid-flight, the cleanup sets `disposed`, and the re-run then returns
+  // early on the `evidenceSyncRef` guard, so the barrier never settles and the
+  // run hangs at "terminal-sync" with no error. The sequence always calls the
+  // newest callbacks, which is what a caller re-rendering with fresh closures
+  // means anyway.
+  const callbacksRef = useRef({ confirmEvidence, refetchRunStatus, requirementsFor });
+  callbacksRef.current = { confirmEvidence, refetchRunStatus, requirementsFor };
   const evidenceSyncRef = useRef<number | null>(null);
   useEffect(() => {
     evidenceSyncRef.current = null;
@@ -263,7 +267,7 @@ export function useTerminalEvidenceBarrier<TRun extends { runId: string; epoch: 
       try {
         let terminalRunConfirmed = false;
         for (let attempt = 0; attempt <= TERMINAL_RUN_STATUS_RETRY_DELAYS_MS.length; attempt += 1) {
-          const runResult = await refetchRunStatus(run);
+          const runResult = await callbacksRef.current.refetchRunStatus(run);
           if (disposed) {
             return;
           }
@@ -290,13 +294,13 @@ export function useTerminalEvidenceBarrier<TRun extends { runId: string; epoch: 
         if (!terminalRunConfirmed || disposed) {
           return;
         }
-        await confirmEvidence(run);
+        await callbacksRef.current.confirmEvidence(run);
         if (!disposed) {
           dispatchRun({
             type: "evidence-succeeded",
             runId: run.runId,
             epoch: run.epoch,
-            requirements: requirementsFor(run),
+            requirements: callbacksRef.current.requirementsFor(run),
           });
         }
       } catch (cause) {
@@ -323,10 +327,7 @@ export function useTerminalEvidenceBarrier<TRun extends { runId: string; epoch: 
   }, [
     activeRun,
     blocked,
-    confirmEvidence,
     dispatchRun,
-    refetchRunStatus,
-    requirementsFor,
     runController.phase,
     runController.epoch,
     runController.runRef?.runId,

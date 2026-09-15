@@ -411,11 +411,25 @@ describe("IpScannerPage", () => {
     await waitFor(() => expect(save).not.toBeDisabled());
     fireEvent.click(save);
 
-    expect(await screen.findByText(/Saved as register/)).toBeInTheDocument();
+    const note = await screen.findByText(/Saved as register/);
     expect(
       screen.getByText(/It is stored here and applies automatically to the next IP scan/),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Download register CSV" })).toBeInTheDocument();
+
+    // The CSV is rebuilt from the run that was SAVED. Reading the id off the
+    // mutable active run once handed run B's URL to a note naming run A's file,
+    // so assert the URL, not just that a button exists.
+    const panel = note.closest(".state-panel") as HTMLElement;
+    fireEvent.click(within(panel).getByRole("button", { name: "Download register CSV" }));
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(fetch)
+          .mock.calls.some(([input]) =>
+            String(input).includes(`/ip_sidecar/runs/${RUN_ID}/register.csv`),
+          ),
+      ).toBe(true),
+    );
   });
 
   it("drops a save that lands after the operator switched runs", async () => {

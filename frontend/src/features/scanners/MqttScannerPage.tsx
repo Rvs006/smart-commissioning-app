@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
 import {
@@ -16,7 +16,7 @@ import { captureRowsToCsv, mqttRegisterCompareNote, type CaptureRow } from "../w
 import { triggerBlobDownload, useFileDownload } from "../workflow/fileDownload";
 import { useMqttLiveSession } from "../workflow/useMqttLiveSession";
 import { ScannerScreen, type SetupCell } from "./ScannerScreen";
-import { scannerRowsFromResults } from "./scannerRows";
+import type { ScannerRow } from "./scannerRows";
 import { ScannerSidePanel } from "./ScannerSidePanel";
 import { useScannerRun, useStoredPanelWidth } from "./useScannerRun";
 
@@ -31,6 +31,30 @@ type CaptureUnit = keyof typeof CAPTURE_UNIT_SECONDS;
 /** A persisted attribute rendered as CSV text; an absent value is an empty cell. */
 function text(value: unknown): string {
   return value === null || value === undefined ? "" : String(value);
+}
+
+/**
+ * One captured-topic row as the client-side CSV writes it. Built from the row
+ * the TABLE is showing, so the file always matches what the operator filtered
+ * down to; the XLSX beside it is the server-rebuilt copy of the whole run.
+ */
+function captureCsvRow(row: ScannerRow): CaptureRow {
+  const a = row.attributes;
+  return {
+    asset: text(a.asset),
+    lastSeen: text(a.last_payload_seen),
+    messageCount: text(a.message_count),
+    // Compact, unwrapped JSON on ONE line: the same value the table's "Last
+    // value" cell shows, not the pretty-printed panel form, so a payload cannot
+    // straddle CSV rows.
+    payload:
+      a.payload_raw_only === true
+        ? "non-JSON (not stored)"
+        : a.last_payload_value === null || a.last_payload_value === undefined
+          ? ""
+          : JSON.stringify(a.last_payload_value),
+    topic: text(a.topic),
+  };
 }
 
 /** The phases in which the sidecar's single broker connection is already held. */
@@ -170,32 +194,6 @@ export function MqttScannerPage() {
       ? results.result_summary.raw_evidence_artifact_id
       : null;
   const compareNote = results ? mqttRegisterCompareNote(results) : null;
-  // The client-side capture CSV the v0.1.58 payload panel offered. Built from
-  // the same persisted rows the table shows (topic, asset, last seen, message
-  // count, latest payload), so the file and the screen can never disagree; the
-  // XLSX beside it is the server-rebuilt equivalent.
-  const captureCsvRows: CaptureRow[] = useMemo(
-    () =>
-      scannerRowsFromResults("mqtt", results).map((row) => {
-        const a = row.attributes;
-        return {
-          asset: text(a.asset),
-          lastSeen: text(a.last_payload_seen),
-          messageCount: text(a.message_count),
-          // Compact, unwrapped JSON on ONE line: the same value the table's
-          // "Last value" cell shows, not the pretty-printed panel form, so a
-          // payload cannot straddle CSV rows.
-          payload:
-            a.payload_raw_only === true
-              ? "non-JSON (not stored)"
-              : a.last_payload_value === null || a.last_payload_value === undefined
-                ? ""
-                : JSON.stringify(a.last_payload_value),
-          topic: text(a.topic),
-        };
-      }),
-    [results],
-  );
   const registerAvailable = results?.register_comparison?.register_available === true;
 
   const unread = configurationQuery.isError ? "could not be read" : "not set";
@@ -551,6 +549,9 @@ export function MqttScannerPage() {
                 apiClient={apiClient}
                 authorizationEnforced={authorizationEnforced}
                 defaultPayload={publishPrefill?.payload}
+                // Write config opens exactly as the vendored config editor does:
+                // QoS 1, retain on. A blank publish from the toolbar keeps QoS 0.
+                defaultQos={publishPrefill ? 1 : undefined}
                 defaultRetain={publishPrefill ? true : undefined}
                 defaultTopic={publishPrefill?.topic}
                 onClose={() => {
@@ -572,7 +573,7 @@ export function MqttScannerPage() {
       onPanelWidthChange={setPanelWidth}
       panelWidth={panelWidth}
       purpose="Subscribe, watch the topic tree, capture retained payloads — native mqtt_scanner run."
-      resultsActions={
+      resultsActions={(visibleRows) => (
         <>
           {archiveArtifactId && run.activeRun && (
             <button
@@ -591,16 +592,16 @@ export function MqttScannerPage() {
               {archiveDownload.pendingKey === "mqtt-archive" ? "Downloading..." : "Export archive"}
             </button>
           )}
-          {run.activeRun && captureCsvRows.length > 0 && (
+          {run.activeRun && visibleRows.length > 0 && (
             <button
               className="secondary-button compact"
               onClick={() => {
-                const blob = new Blob([captureRowsToCsv(captureCsvRows)], {
+                const blob = new Blob([captureRowsToCsv(visibleRows.map(captureCsvRow))], {
                   type: "text/csv;charset=utf-8",
                 });
                 triggerBlobDownload(blob, `mqtt-capture-${run.activeRun?.runId}.csv`);
               }}
-              title="Download the latest payload per captured topic as CSV, built here from the rows on screen."
+              title="Download the rows this table is currently showing as CSV, built here in the browser. Narrowing the filters narrows the file; 'Export topics (XLSX)' beside it is the whole run, rebuilt server-side."
               type="button"
             >
               Export to CSV
@@ -626,7 +627,7 @@ export function MqttScannerPage() {
             </button>
           )}
         </>
-      }
+      )}
       resultsHeading="Captured topics"
       resultsNote={
         <>

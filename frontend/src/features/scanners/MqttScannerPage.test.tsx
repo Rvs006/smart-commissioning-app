@@ -115,6 +115,21 @@ const results = {
         status_detail: "observed",
       },
     },
+    {
+      // A non-JSON payload: the engine keeps a presence marker, never the bytes.
+      // The CSV and the side panel both have to say so rather than go blank.
+      topic: "example/AHU-01/raw",
+      message_count: 1,
+      last_payload: { _raw_present: true },
+      created_at: "2026-09-14T09:00:50Z",
+      attributes: {
+        device_ref: "AHU-01",
+        register_match: "matched",
+        register_matched_filter: "example/AHU-01/#",
+        last_retained: false,
+        status_detail: "observed",
+      },
+    },
   ],
 };
 
@@ -311,6 +326,13 @@ const runningRun = { ...terminalRun, status: "running", progress_percent: 40 };
 
 beforeEach(() => {
   setApiKey("engineer-key");
+  // jsdom implements neither, and the client-side CSV export goes through both.
+  // Stubbing createObjectURL is also how these tests read the written bytes back.
+  vi.stubGlobal("URL", {
+    ...URL,
+    createObjectURL: vi.fn(() => "blob:csv"),
+    revokeObjectURL: vi.fn(),
+  });
   liveState = {};
   liveHookCalls = [];
   configuration = mqttConfiguration("broker.example.test");
@@ -638,7 +660,8 @@ describe("MqttScannerPage", () => {
     }
 
     expect(within(card).getByText("example/AHU-01/pointset")).toBeInTheDocument();
-    expect(within(card).getByText("In register (wildcard example/AHU-01/#)")).toBeInTheDocument();
+    // Two topics sit under the same wildcard register row, so the chip appears twice.
+    expect(within(card).getAllByText("In register (wildcard example/AHU-01/#)")).toHaveLength(2);
     const rogueRow = within(card).getByText("example/ROGUE-09/state").closest("tr") as HTMLElement;
     expect(rogueRow.className).toContain("row-fail");
     expect(within(rogueRow).getByText("Not in register")).toBeInTheDocument();
@@ -652,6 +675,60 @@ describe("MqttScannerPage", () => {
       expect(within(card).queryByText("example/AHU-01/pointset")).not.toBeInTheDocument(),
     );
     expect(within(card).getByText("example/ROGUE-09/state")).toBeInTheDocument();
+  });
+
+  // The client-side CSV the v0.1.58 payload panel offered, restored here. It is
+  // built in the browser from the rows the table is SHOWING, so it has to track
+  // the chip filter; the XLSX beside it is the whole run, rebuilt server-side.
+  async function captureCsvText(): Promise<string> {
+    const blobs = vi.mocked(URL.createObjectURL).mock.calls.map(([value]) => value as Blob);
+    expect(blobs.length).toBeGreaterThan(0);
+    return await blobs[blobs.length - 1].text();
+  }
+
+  it("exports the captured topics on screen as CSV, non-JSON payloads included", async () => {
+    stubFetch();
+    render(scannerProviders(<MqttScannerPage />));
+
+    const heading = await screen.findByRole("heading", { name: "Captured topics" });
+    const card = heading.closest("section") as HTMLElement;
+    // The heading renders before the run's results land; wait for a real row so
+    // the export is exercised against the populated table, not an empty one.
+    await within(card).findByText("example/AHU-01/pointset");
+    fireEvent.click(within(card).getByRole("button", { name: "Export to CSV" }));
+
+    const text = await captureCsvText();
+    const lines = text.split("\r\n");
+    expect(lines[0]).toBe('"Topic","Asset","Last Seen","Message Count","Latest Payload"');
+    // All three rows, unfiltered.
+    expect(lines).toHaveLength(4);
+    // The compact UNWRAPPED payload, the same value the "Last value" cell shows.
+    expect(text).toContain('"example/AHU-01/pointset","AHU-01"');
+    expect(text).toContain('"{""temp"":18.4}"');
+    // A payload the engine kept only as a presence marker says so; it must not
+    // export as an empty cell, which would read as "no payload seen".
+    expect(text).toContain('"example/AHU-01/raw","AHU-01"');
+    expect(text).toContain('"non-JSON (not stored)"');
+  });
+
+  it("narrows the CSV to the rows the chip filter leaves on screen", async () => {
+    stubFetch();
+    render(scannerProviders(<MqttScannerPage />));
+
+    const heading = await screen.findByRole("heading", { name: "Captured topics" });
+    const card = heading.closest("section") as HTMLElement;
+    await within(card).findByText("example/AHU-01/pointset");
+    fireEvent.click(within(card).getByRole("button", { name: /Not in register/ }));
+    await waitFor(() =>
+      expect(within(card).queryByText("example/AHU-01/pointset")).not.toBeInTheDocument(),
+    );
+    fireEvent.click(within(card).getByRole("button", { name: "Export to CSV" }));
+
+    const lines = (await captureCsvText()).split("\r\n");
+    // Header plus the one rogue row the table is still showing.
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("example/ROGUE-09/state");
+    expect(lines[1]).not.toContain("example/AHU-01");
   });
 
   it("saves the capture as a register and offers the register CSV", async () => {

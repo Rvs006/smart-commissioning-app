@@ -1106,8 +1106,18 @@ export function discoveryEmptyStateFor(
 }
 
 // One latest-payload-per-topic row for the MQTT capture panel, and its CSV.
-// Shared so the module page's built-in MQTT lane and the native scanner page
-// hand the operator the same five columns.
+//
+// The SHAPE and the header are shared, not the bytes, and the difference is
+// deliberate rather than an oversight. The two callers read different evidence:
+// the module page's built-in lane projects the live capture-topics query
+// (DiscoveryRowRecord), so an absent asset is "—", Last Seen is the record's
+// created_at, and the payload is the stored wrapper as JSON. The scanner page
+// projects the run's persisted ScannerRows, so an absent asset is an empty cell,
+// Last Seen is the engine's own last_payload_seen, and the payload is unwrapped
+// to match the "Last value" the table shows. Folding those together would mean
+// changing what the built-in lane exports, for a lane that reads a different
+// source and is out of scope here; a reader comparing the two files should
+// expect the same columns, not identical cells.
 export type CaptureRow = {
   topic: string;
   asset: string;
