@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearApiKey, setApiKey } from "../../api/client";
 import { IpScannerPage } from "./IpScannerPage";
+import { createSessionScopeId } from "../../app/sessionScope";
 import { createScannerQueryClient, scannerProviders } from "./scannerTestHarness";
 
 const RUN_ID = "run-ip-scanner-1";
@@ -152,6 +153,16 @@ function stubFetch(
         const runs =
           typeof overrides.runs === "function" ? overrides.runs() : (overrides.runs ?? [terminalRun]);
         return jsonResponse({ runs });
+      }
+      if (url.endsWith("/api/v1/reports") && init?.method === "POST") {
+        return jsonResponse({
+          report_id: "rep-run-1",
+          report_type: "ip_discovery",
+          output_format: "pdf",
+          file_name: "ip-discovery.pdf",
+          status: "succeeded",
+          created_at: "2026-09-14T09:20:00Z",
+        });
       }
       if (url.includes("/api/v1/imports") && init?.method === "POST") {
         return jsonResponse({
@@ -444,7 +455,11 @@ describe("IpScannerPage", () => {
     // The operator moves to another run while run 1 save is still in flight.
     currentRun = runB;
     window.dispatchEvent(new Event("visibilitychange"));
-    await waitFor(() => expect(document.body.textContent).toContain("run-ip-scanner-2"));
+    // The refetch this event triggers is a real round trip through the query
+    // cache; the default 1s window is tight on a loaded machine.
+    await waitFor(() => expect(document.body.textContent).toContain("run-ip-scanner-2"), {
+      timeout: 5000,
+    });
 
     releaseSave();
 
@@ -526,6 +541,67 @@ describe("IpScannerPage", () => {
     expect(
       screen.getByText("The run was stopped before any results were recorded."),
     ).toBeInTheDocument();
+  });
+
+  it("withdraws scan authorization when the workspace changes", async () => {
+    stubFetch({ runs: [] });
+    const sessionScopeId = createSessionScopeId();
+    const queryClient = createScannerQueryClient();
+    const view = render(
+      scannerProviders(<IpScannerPage />, {
+        authorizationEnforced: true,
+        queryClient,
+        sessionScopeId,
+      }),
+    );
+
+    const consent = await screen.findByLabelText(/I am authorized to scan this network/i);
+    fireEvent.click(consent);
+    expect(consent).toBeChecked();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Start scan" })).not.toBeDisabled(),
+    );
+
+    // Same page, different project/site: the tick said "this network".
+    view.rerender(
+      scannerProviders(<IpScannerPage />, {
+        authorizationEnforced: true,
+        queryClient,
+        sessionScopeId,
+        workspace: { projectId: "other-project", siteId: "other-site" },
+      }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/I am authorized to scan this network/i)).not.toBeChecked(),
+    );
+    expect(screen.getByRole("button", { name: "Start scan" })).toBeDisabled();
+  });
+
+  it("clears a report confirmation when the run changes", async () => {
+    const runB = { ...terminalRun, run_id: "run-ip-scanner-2" };
+    let currentRun: Record<string, unknown> = terminalRun;
+    stubFetch({ runs: () => [currentRun] });
+    render(scannerProviders(<IpScannerPage />));
+
+    const titleField = await screen.findByLabelText(/Report title/i);
+    fireEvent.change(titleField, { target: { value: "Plant room sweep" } });
+    fireEvent.click(screen.getByRole("button", { name: "Generate report from this run" }));
+
+    expect(await screen.findByText(/Report ID: rep-run-1./)).toBeInTheDocument();
+
+    // A report describes ONE run; the confirmation must not follow the operator
+    // onto the next one and claim run 1 report id belongs to run 2.
+    currentRun = runB;
+    window.dispatchEvent(new Event("visibilitychange"));
+    // The refetch this event triggers is a real round trip through the query
+    // cache; the default 1s window is tight on a loaded machine.
+    await waitFor(() => expect(document.body.textContent).toContain("run-ip-scanner-2"), {
+      timeout: 5000,
+    });
+
+    await waitFor(() => expect(screen.queryByText(/Report ID: rep-run-1./)).toBeNull());
+    expect(screen.queryByText("Report generated")).not.toBeInTheDocument();
   });
 
   it("names the run in the footer and links Run History and Reports", async () => {
