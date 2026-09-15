@@ -154,6 +154,27 @@ class MqttLiveSessionApiTest(ApiTestCase):
         self.assertIn("broker", response.text.lower())
         self.assertIsNone(self.live_service.current(), "no lease left after a 400")
 
+    def test_connect_without_broker_returns_the_pinned_sentence(self) -> None:
+        # The MQTT scanner page decides "no broker is configured, show a link to
+        # Configuration" by matching this exact phrase on the error it gets back
+        # (MqttScannerPage.tsx, noBrokerError). There is no machine-readable code
+        # on the response, so the prose IS the contract: reword the route and
+        # this test fails here rather than the page silently losing the link.
+        def no_broker(_params, _root):
+            raise ValueError("Live broker mode requires an MQTT broker FQDN or IP address.")
+
+        with patch.object(self.live_routes, "_connect_config", no_broker):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/connect",
+                json={"project_id": "p", "site_id": "s", "authorized": True},
+            )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(
+            response.json()["detail"],
+            "No MQTT broker is configured. Enter the broker FQDN or IP address "
+            "on the Configuration page and save it.",
+        )
+
     def test_connect_requires_authorization(self) -> None:
         response = self.client.post(
             "/api/v1/discovery/mqtt_sidecar/live/connect",

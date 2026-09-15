@@ -68,7 +68,7 @@ export const MQTT_COLUMNS = [
   "Topic",
   "Ret",
   "QoS",
-  "Bytes",
+  "JSON size",
   "Last value",
   "Register Match",
 ] as const;
@@ -186,22 +186,28 @@ export function scannerRowsFromResults(
 }
 
 /**
- * Payload size in bytes. The engine stamps no byte count, so this is measured
- * from the persisted payload text with TextEncoder (UTF-8) rather than guessed
- * from string length. Unknown reads "—", never 0: a run that recorded no payload,
- * and a non-JSON payload the engine kept only a presence marker for, both have no
- * honest size to report.
+ * UTF-8 size of the STORED JSON payload — the same text the "Last value" cell
+ * shows, so the two cells always describe one thing. The engine records no wire
+ * message length, so this is not it; the column is named "JSON size" and carries
+ * that caveat as its title. Unknown reads "—", never 0: a run with no payload,
+ * and a non-JSON payload kept only as a presence marker, have no honest size.
  */
-function payloadBytes(raw: string): string {
-  if (!raw) {
+function payloadBytes(stored: string | null): string {
+  if (stored === null) {
     return DASH;
   }
   try {
-    return String(new TextEncoder().encode(raw).length);
+    return String(new TextEncoder().encode(stored).length);
   } catch {
-    return String(raw.length);
+    return String(stored.length);
   }
 }
+
+/** Column headers that need a caveat the header itself cannot carry. */
+export const COLUMN_TITLES: Record<string, string> = {
+  "JSON size":
+    "Size of the stored JSON payload; the engine does not record the wire message length.",
+};
 
 /**
  * The engine's stored payload shapes, unwrapped for display exactly as the
@@ -251,7 +257,6 @@ function mqttRows(results: DiscoveryResultsResponse): ScannerRow[] {
     // MQTT engine actually reports ("matched" / "unmatched") in the shared
     // vocabulary the filters use.
     const register = tone === "pass" ? "match" : tone === "fail" ? "rogue" : "";
-    const rawPayload = row["Raw Payload"] ?? "";
     const payload = displayPayload(results.topics[index]?.last_payload);
     const retained = row.__retained;
     const lastSeen = row["Last Payload Seen"] ?? DASH;
@@ -283,7 +288,10 @@ function mqttRows(results: DiscoveryResultsResponse): ScannerRow[] {
         // must not be confused with an observed "not retained".
         Ret: { text: retained === "yes" ? "✓" : retained === "no" ? "✗" : DASH },
         QoS: { text: row.__qos ? row.__qos : DASH, mono: true },
-        Bytes: { text: payload.rawOnly ? DASH : payloadBytes(rawPayload), mono: true },
+        // Measured on the SAME text "Last value" renders (payload.compact), not
+        // on the re-serialized wrapper: {"_value":42} would have read 13 bytes
+        // beside a cell showing "42".
+        "JSON size": { text: payloadBytes(payload.compact), mono: true },
         "Last value": {
           text: payload.rawOnly ? "non-JSON (not stored)" : (payload.compact ?? DASH),
           mono: true,

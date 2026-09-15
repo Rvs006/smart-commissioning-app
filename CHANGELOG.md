@@ -63,6 +63,10 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Changed
 
+- The MQTT capture table's payload-size column is named "JSON size" and measures
+  the stored JSON exactly as the "Last value" cell renders it. The engine records
+  no wire message length, so the column says what it is rather than implying it
+  is the size of the message on the broker.
 - Row colour on the native IP and BACnet results tables now comes from the
   register verdict the scan actually reached, instead of being guessed from the
   status text. A device that answered but is not in the register reads "Rogue
@@ -92,8 +96,28 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   payload, with Cancel and "Send to device". Nothing is published until "Send to
   device" is pressed. Builds that enforce approval are unchanged.
 
+### Removed
+
+- Three things the old MQTT module page had are not on the new MQTT Discovery
+  screen. The captured-topics "Export to CSV" button is gone; the same rows and
+  the same topic filter still download as XLSX from the run, and the raw capture
+  archive still holds every payload. The "Explore JSON tree" inspector under a
+  selected topic is gone; the side panel shows the stored payload pretty-printed
+  with a copy button, and says so plainly when the engine kept only a presence
+  marker for a non-JSON payload. Both come back with the module-page cleanup
+  that removes the old screen. The results filter's "No verdict" option is gone
+  for good: within one capture a register is either bound, so every topic
+  carries a verdict, or it is not, so none do, and the option could never select
+  a subset.
+
 ### Fixed
 
+- The scanner screens' detail panel now actually sticks as the results scroll
+  past it. Every card clipped its content with `overflow: hidden`, which makes
+  the card a scroll container, and a scroll-container ancestor disables
+  `position: sticky` on everything inside it, so the panel had been scrolling
+  away on all three screens. The cards clip with `overflow: clip` instead, which
+  trims to the same rounded corner without creating a scrollport.
 - The "Register already imported" note now refreshes after an upload or a
   save-as-register instead of showing the previous register until the page is
   reloaded. The refresh was asking for a query key with an empty import-type

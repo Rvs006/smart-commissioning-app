@@ -44,6 +44,19 @@ export function ScannerSidePanel({
   children,
 }: ScannerSidePanelProps) {
   const dragFromRef = useRef<{ x: number; width: number } | null>(null);
+  // Whatever had focus when the panel opened (the results row, the rail's Focus
+  // button). Closing hands focus back there instead of dropping it on <body>.
+  const openerRef = useRef<Element | null>(
+    typeof document === "undefined" ? null : document.activeElement,
+  );
+  const closeToOpener = () => {
+    const opener = openerRef.current;
+    if (opener instanceof HTMLElement && opener.isConnected) {
+      opener.focus();
+    }
+    // After, so a caller with a better target (ScannerScreen's row map) wins.
+    onClose();
+  };
 
   // Esc collapses the expanded panel (the vendored tool's pop-out behaviour); a
   // second Esc is left to the browser so nothing traps the operator.
@@ -121,7 +134,7 @@ export function ScannerSidePanel({
               <span className="visually-hidden">{expanded ? "Collapse" : "Expand"} detail panel</span>
             </button>
           )}
-          <button className="scanner-icon-button" onClick={onClose} type="button">
+          <button className="scanner-icon-button" onClick={closeToOpener} type="button">
             <span aria-hidden="true">✕</span>
             <span className="visually-hidden">Close detail panel</span>
           </button>

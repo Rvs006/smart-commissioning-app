@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { BacnetObjectBrowseResponse } from "../../api/client";
 import { bacnetDeviceDetailItems, ipDeviceDetailItems } from "../workflow/discoveryRows";
 import { ScannerSidePanel } from "./ScannerSidePanel";
@@ -37,6 +37,14 @@ export type DeviceDetailPanelProps = {
 function SectionList({ sections }: { sections: DetailSection[] }) {
   const [copied, setCopied] = useState<string | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current !== null) {
+        clearTimeout(copyTimerRef.current);
+      }
+    },
+    [],
+  );
   // Carried over from the v0.1.58 capture table's per-row "Copy payload": a long
   // recorded value (an MQTT payload, a banner) is worth taking out whole.
   const copy = (key: string, value: string) => {

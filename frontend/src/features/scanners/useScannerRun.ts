@@ -403,6 +403,17 @@ export function useScannerRun(lane: ScannerLane) {
     },
   });
 
+  // True once the page knows whether a run is already in flight. Until then
+  // `startedRunActive` is false because nothing has been attached yet, not
+  // because nothing is running - a caller that acts on it early (the MQTT
+  // page's live auto-connect) would fight a capture run for the broker. The
+  // second clause is what makes it honest: the query answering is not enough,
+  // the run it returned has to have been seeded into activeRun below.
+  const restorableRun = requestedRunId ? requestedRunMatches : lastRunQuery.data;
+  const runRestoreSettled =
+    (requestedRunId ? requestedRunQuery.isFetched : lastRunQuery.isFetched) &&
+    (!restorableRun || activeRun?.runId === restorableRun.run_id);
+
   // Route/workspace change resets the page's run state BEFORE the seed effect
   // below re-attaches, exactly as in ModulePage. Declaration order is
   // load-bearing: React runs effects in order, so the reset must come first or
@@ -760,6 +771,7 @@ export function useScannerRun(lane: ScannerLane) {
       runAttachmentNotice,
       runController,
       runOutcome,
+      runRestoreSettled,
       startedRunActive,
       // authorization
       scanAuthorized,
@@ -816,6 +828,7 @@ export function useScannerRun(lane: ScannerLane) {
       runAttachmentNotice,
       runController,
       runOutcome,
+      runRestoreSettled,
       saveAsRegister,
       saveRegisterMutation,
       saveableDeviceCount,
