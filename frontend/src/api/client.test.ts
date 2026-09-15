@@ -15,6 +15,8 @@ import {
   getDiscoveryRun,
   getDiscoveryTopicsXlsxPath,
   getHealth,
+  getScanRegisterCsvPath,
+  scanRegisterRunIdFromFileName,
   getLatestImport,
   getMe,
   getNmapCapability,
@@ -832,6 +834,40 @@ describe("getDiscoveryTopicsXlsxPath", () => {
 
   it("encodes the run id", () => {
     expect(getDiscoveryTopicsXlsxPath("run/1")).toBe("/discovery/runs/run%2F1/topics.xlsx");
+  });
+});
+
+describe("getScanRegisterCsvPath / scanRegisterRunIdFromFileName", () => {
+  it("points each lane at its own sidecar register.csv route", () => {
+    expect(getScanRegisterCsvPath("ip-scanner", "run_1")).toBe(
+      "/discovery/ip_sidecar/runs/run_1/register.csv",
+    );
+    expect(getScanRegisterCsvPath("bacnet-scanner", "run_1")).toBe(
+      "/discovery/bacnet_sidecar/runs/run_1/register.csv",
+    );
+    expect(getScanRegisterCsvPath("mqtt-scanner", "run_1")).toBe(
+      "/discovery/mqtt_sidecar/runs/run_1/register.csv",
+    );
+    expect(getScanRegisterCsvPath("ip-scanner", "run/1")).toBe(
+      "/discovery/ip_sidecar/runs/run%2F1/register.csv",
+    );
+  });
+
+  it("recovers the run id only from that lane's own save-as-register file name", () => {
+    expect(scanRegisterRunIdFromFileName("ip-scanner", "scan-register-run_1.csv")).toBe("run_1");
+    expect(scanRegisterRunIdFromFileName("bacnet-scanner", "bacnet-scan-register-run_1.csv")).toBe(
+      "run_1",
+    );
+    expect(scanRegisterRunIdFromFileName("mqtt-scanner", "mqtt-scan-register-run_1.csv")).toBe(
+      "run_1",
+    );
+    // Another lane's file, an uploaded register, a live save, and nothing at all
+    // all have no run behind them on this page.
+    expect(scanRegisterRunIdFromFileName("ip-scanner", "bacnet-scan-register-run_1.csv")).toBeNull();
+    expect(scanRegisterRunIdFromFileName("ip-scanner", "site_ip_register.csv")).toBeNull();
+    expect(scanRegisterRunIdFromFileName("mqtt-scanner", "mqtt-live-register-abc.csv")).toBeNull();
+    expect(scanRegisterRunIdFromFileName("ip-scanner", "scan-register-.csv")).toBeNull();
+    expect(scanRegisterRunIdFromFileName("ip-scanner", undefined)).toBeNull();
   });
 });
 

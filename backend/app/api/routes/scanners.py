@@ -662,6 +662,86 @@ def save_mqtt_scan_as_register(
     return summary
 
 
+def _register_csv_download(lane: str, run_id: str, principal: AuthPrincipal) -> Response:
+    """Serve a succeeded scanner run's register as a downloadable CSV file.
+
+    The operator-facing half of save-as-register: that route imports the register
+    into SCT (so the next scan for this project/site RAG-compares against it) but
+    writes no file the operator can keep, and they went looking for one. Built
+    from the SAME rows helper and the SAME serializer as the save route for the
+    same lane, so the downloaded bytes are byte-identical to the bytes the save
+    SUBMITTED to the importer.
+
+    That is not the same as the register SCT applies: the import profile can
+    reject a row, and only accepted rows are compared against. A rejected row is
+    therefore present in this file and absent from the applied register - which is
+    what makes the file useful for finding out why a device is not being matched.
+
+    A DB read only: no sidecar, no network I/O, so like save-as-register it skips
+    the scan-authorization consent gate and the inline-only 503 (both untrue
+    here), and keeps that route's scoped access + 404 / 409 semantics.
+    """
+    noun = {"ip": "IP", "bacnet": "BACnet", "mqtt": "MQTT"}[lane]
+    run = _load_discovery_run(run_id, principal)  # scoped access + 404
+    if run.job_type != f"{lane}_scanner":
+        raise HTTPException(status_code=404, detail=f"{noun} scanner run was not found.")
+    if run.status != "succeeded":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Downloading the register CSV requires a succeeded {noun} scanner run.",
+        )
+
+    repository = DiscoveryRepository(service.engine)
+    if lane == "mqtt":
+        rows = register_rows_from_topics(repository.list_topics(run_id))
+        serialize, file_name, subject = _mqtt_register_csv, f"mqtt-scan-register-{run_id}.csv", "discovered assets"
+    elif lane == "bacnet":
+        rows = register_rows_from_bacnet_devices(repository.list_devices(run_id))
+        serialize, file_name, subject = (
+            _bacnet_register_csv,
+            f"bacnet-scan-register-{run_id}.csv",
+            "discovered devices",
+        )
+    else:
+        rows = register_rows_from_devices(repository.list_devices(run_id))
+        serialize, file_name, subject = _ip_register_csv, f"scan-register-{run_id}.csv", "responding devices"
+    if not rows:
+        raise HTTPException(status_code=409, detail=f"This run recorded no {subject} to save as a register.")
+
+    return Response(
+        content=serialize(rows).encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+    )
+
+
+@router.get("/ip_sidecar/runs/{run_id}/register.csv", dependencies=[Depends(require_engineer)])
+def download_ip_scan_register_csv(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> Response:
+    """Download this IP run's register CSV (the save route's exact bytes)."""
+    return _register_csv_download("ip", run_id, principal)
+
+
+@router.get("/bacnet_sidecar/runs/{run_id}/register.csv", dependencies=[Depends(require_engineer)])
+def download_bacnet_scan_register_csv(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> Response:
+    """Download this BACnet run's register CSV (the save route's exact bytes)."""
+    return _register_csv_download("bacnet", run_id, principal)
+
+
+@router.get("/mqtt_sidecar/runs/{run_id}/register.csv", dependencies=[Depends(require_engineer)])
+def download_mqtt_scan_register_csv(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> Response:
+    """Download this MQTT run's register CSV (the save route's exact bytes)."""
+    return _register_csv_download("mqtt", run_id, principal)
+
+
 # Fixed zip member timestamp so the same run exports byte-stable bytes (the export
 # is rebuilt from sealed evidence, so it should not churn on every download).
 _ASSET_ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import csv
 import io
+import ipaddress
 import json
 import urllib.error
 import urllib.parse
@@ -205,16 +206,28 @@ def _map_result(
     project_id = parameters.get("project_id")
     site_id = parameters.get("site_id")
     now = datetime.now(UTC).isoformat()
+    # The range this run actually swept, so a silent host's report row can say
+    # whether it was genuinely probed instead of assuming it was.
+    scan_query = _scan_query(parameters)
 
     discovered_assets: list[dict[str, Any]] = []
     structured_records: list[dict[str, Any]] = []
     issues: list[ValidationIssueRecord] = []
+    # The register rows that answered nothing, mirroring the key bacnet_discovery
+    # stamps. NOTE: the inventory report's "expected not responding" section is
+    # BACnet-only today (reports.py reads this key inside the bacnet branch), so
+    # on an IP run this is currently descriptive evidence on the run summary
+    # rather than a rendered report section.
+    expected_not_responding: list[dict[str, Any]] = []
 
     for row in rows:
         register = row.get("register")
         rag = row.get("rag")
         ip = row.get("ip")
-        # "missing" = expected-but-unreachable: it is an issue, not a device.
+        # "missing" = expected-but-unreachable. It is NOT a device (it never
+        # entered structured_records, and must not: the devices table is
+        # observed-only), but it IS a result row the operator has to see, so it
+        # gets an observation entry alongside its issue.
         is_device = register != "missing" and row.get("status") != "unreachable"
 
         if is_device:
@@ -240,6 +253,12 @@ def _map_result(
                         "match_basis": "ip",
                         "status_detail": _status_detail(row),
                         "last_seen_at": now,
+                        # The register verdict the sidecar's compare() reached,
+                        # carried on the observation itself (schema is
+                        # extra="allow") so the results table can colour the row
+                        # without re-deriving a verdict from status_detail text.
+                        "rag": rag,
+                        "register": register,
                     }
                 )
             )
@@ -281,6 +300,45 @@ def _map_result(
                     }
                 )
             )
+        elif register == "missing":
+            # Expected by the register, silent on the wire. Observation-only: no
+            # structured device record (nothing was observed), no ports, and
+            # last_seen_at stays None because this host was never seen.
+            #
+            # hostname stays None: nothing resolved it. The register's expected
+            # hostname travels as expected_hostname, never in the observed field,
+            # so the results table cannot render an expectation as a discovery —
+            # the same laundering register_rows_from_devices refuses. ip_address
+            # IS kept: that address was genuinely probed.
+            expected_hostname = row.get("expectedHostname") or row.get("hostname") or None
+            discovered_assets.append(
+                json_safe_value(
+                    {
+                        "asset_id": None,
+                        "ip_address": ip,
+                        "mac_address": None,
+                        "hostname": None,
+                        "expected_hostname": expected_hostname,
+                        "observed_ports": [],
+                        "match_basis": "register",
+                        "status_detail": _status_detail(row),
+                        "last_seen_at": None,
+                        "rag": rag,
+                        "register": register,
+                    }
+                )
+            )
+            expected_not_responding.append(
+                {
+                    "asset_id": None,
+                    "asset_name": expected_hostname,
+                    "address": ip,
+                    "expected_ports": list(row.get("expectedPorts") or []),
+                    # True only when this address really sat inside the swept
+                    # range; None when it cannot be told. Never a blanket claim.
+                    "directed_probe_sent": _probed_directly(ip, scan_query),
+                }
+            )
 
         severity = _RAG_SEVERITY.get(str(rag))
         if severity is not None:
@@ -295,6 +353,9 @@ def _map_result(
             "register_partial": summary.get("partial"),
             "register_missing": summary.get("missing"),
             "register_rogue": summary.get("rogue"),
+            # Always stamped (an empty list when every expected host answered),
+            # so a consumer can tell "none silent" from a pre-upgrade run.
+            "expected_not_responding": expected_not_responding,
             "scanner": ENGINE_NAME,
         }
     )
@@ -304,6 +365,40 @@ def _map_result(
         issues=issues,
         result_summary_extra=result_summary_extra,
     )
+
+
+def _probed_directly(ip: Any, scan_query: Mapping[str, str]) -> bool | None:
+    """Did this scan actually send a probe at ``ip``?
+
+    The vendored sweep ICMP-pings EVERY address between start and end and then
+    reads the ARP cache (scanners/vendor/network-ip-scanner/scanner.js, "Pass 1:
+    ping sweep"), so an address inside the scanned range was genuinely probed
+    and its silence is a real observation. A register row whose address falls
+    OUTSIDE that range was never touched, and reporting it as probed would be a
+    fabrication — the whole point of the honesty rule.
+
+    Returns None when the question cannot be answered (a register row with no
+    usable address, or a run with no recorded range), so the report can say
+    "not recorded" rather than guess either way.
+    """
+    start_raw = scan_query.get("start")
+    if not start_raw:
+        return None
+    try:
+        address = ipaddress.IPv4Address(str(ip).strip())
+        start = ipaddress.IPv4Address(str(start_raw).strip())
+    except ValueError:
+        return None
+    end_raw = scan_query.get("end")
+    if end_raw:
+        try:
+            end = ipaddress.IPv4Address(str(end_raw).strip())
+        except ValueError:
+            return None
+    else:
+        # No end bound: the sidecar sweeps the single start address only.
+        end = start
+    return start <= address <= end
 
 
 def _status_detail(row: Mapping[str, Any]) -> str | None:
@@ -630,11 +725,53 @@ def _demo() -> None:
     ]
     summary = {"expected": 3, "reachable": 3, "expectedReachable": 2,
                "matches": 1, "partial": 1, "missing": 1, "rogue": 1}
-    result = _map_result(rows, summary, {"project_id": "p", "site_id": "s"})
+    # A real scan range, so the silent host's "was it actually probed?" answer
+    # is computed from evidence rather than assumed.
+    result = _map_result(
+        rows,
+        summary,
+        {"project_id": "p", "site_id": "s", "start_ip": "192.0.2.1", "end_ip": "192.0.2.99"},
+    )
 
-    # missing (unreachable) is an issue, not a device; the other 3 are devices.
-    assert len(result.discovered_assets) == 3, result.discovered_assets
+    # Every compare() row becomes an observation, including the expected-but-
+    # silent one, so the results table can show it. Only the 3 that answered
+    # become devices: the devices table stays observed-only.
+    assert len(result.discovered_assets) == 4, result.discovered_assets
     assert len(result.structured_records) == 3, result.structured_records
+    missing_asset = next(a for a in result.discovered_assets if a["register"] == "missing")
+    assert missing_asset["ip_address"] == "192.0.2.12", missing_asset
+    assert missing_asset["rag"] == "red", missing_asset
+    # Nothing observed may be claimed for a host that never answered.
+    assert missing_asset["observed_ports"] == [], missing_asset
+    assert missing_asset["last_seen_at"] is None, missing_asset
+    assert missing_asset["hostname"] is None, missing_asset
+    assert missing_asset["asset_id"] is None, missing_asset
+    assert missing_asset["status_detail"] == "unreachable/missing", missing_asset
+    # The register verdict rides every observation, not just the devices.
+    assert {a["register"] for a in result.discovered_assets} == {
+        "match", "partial", "missing", "rogue"
+    }, result.discovered_assets
+    silent = result.result_summary_extra["expected_not_responding"]
+    assert [entry["address"] for entry in silent] == ["192.0.2.12"], silent
+    # 192.0.2.12 sits inside the swept range, so it really was pinged.
+    assert silent[0]["directed_probe_sent"] is True, silent
+    # A register host OUTSIDE the swept range was never touched; claiming it was
+    # probed would be a fabrication, so the engine says so.
+    out_of_range = _map_result(
+        [{"ip": "198.51.100.7", "register": "missing", "rag": "red",
+          "status": "unreachable", "openPorts": []}],
+        {},
+        {"start_ip": "192.0.2.1", "end_ip": "192.0.2.99"},
+    ).result_summary_extra["expected_not_responding"]
+    assert out_of_range[0]["directed_probe_sent"] is False, out_of_range
+    # No recorded range -> unknowable, never a guess in either direction.
+    unknown = _map_result(
+        [{"ip": "192.0.2.12", "register": "missing", "rag": "red",
+          "status": "unreachable", "openPorts": []}],
+        {},
+        {},
+    ).result_summary_extra["expected_not_responding"]
+    assert unknown[0]["directed_probe_sent"] is None, unknown
     # observed_ports must be {port, protocol} objects (readback schema shape),
     # never raw ints - the exact gap that shipped once. udp is tagged from openUdp.
     for asset in result.discovered_assets:

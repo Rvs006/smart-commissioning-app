@@ -103,10 +103,142 @@ class RagVocabularyContractTest(unittest.TestCase):
             {"ip": "10.0.0.4", "register": "rogue", "rag": "red", "status": "rogue", "openPorts": [23]},
         ]
         result = _map_result(rows, {}, {})
-        # missing (unreachable) -> issue only; the other three -> devices.
+        # missing (unreachable) -> issue + an observation row; the other three
+        # additionally become devices.
         self.assertEqual({r["address"] for r in result.structured_records}, {"10.0.0.1", "10.0.0.2", "10.0.0.4"})
         # green raises no issue; amber + two reds do.
         self.assertEqual(len(result.issues), 3)
+
+
+class RegisterRowVisibilityTest(unittest.TestCase):
+    """Field report: after uploading a register the results table showed no RAG
+    at all. The verdict was persisted on the structured device only, and an
+    expected-but-silent device was an issue with no row anywhere, so an operator
+    could not see it. Every compare() row must reach discovered_assets."""
+
+    ROWS = [
+        {"ip": "10.0.0.1", "register": "match", "rag": "green", "status": "reachable",
+         "hostname": "ok-host", "openPorts": [80], "expectedPorts": [80]},
+        {"ip": "10.0.0.2", "register": "partial", "rag": "amber", "status": "reachable",
+         "openPorts": [80], "expectedPorts": [80, 443]},
+        {"ip": "10.0.0.3", "register": "missing", "rag": "red", "status": "unreachable",
+         "hostname": "expected-host", "expectedHostname": "expected-host",
+         "openPorts": [], "expectedPorts": [443]},
+        {"ip": "10.0.0.4", "register": "rogue", "rag": "red", "status": "rogue", "openPorts": [23]},
+    ]
+
+    def _assets(self) -> dict[str, object]:
+        result = _map_result(self.ROWS, {}, {"project_id": "p", "site_id": "s"})
+        return {a["ip_address"]: a for a in result.discovered_assets}
+
+    def test_every_compare_row_reaches_discovered_assets(self) -> None:
+        self.assertEqual(
+            set(self._assets()), {"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"}
+        )
+
+    def test_rag_and_register_stamped_on_every_asset(self) -> None:
+        assets = self._assets()
+        for row in self.ROWS:
+            asset = assets[row["ip"]]
+            self.assertEqual(asset["rag"], row["rag"])
+            self.assertEqual(asset["register"], row["register"])
+
+    def test_missing_asset_claims_nothing_it_did_not_observe(self) -> None:
+        missing = self._assets()["10.0.0.3"]
+        self.assertEqual(missing["register"], "missing")
+        self.assertEqual(missing["rag"], "red")
+        self.assertEqual(missing["observed_ports"], [])
+        self.assertEqual(missing["match_basis"], "register")
+        self.assertEqual(missing["status_detail"], "unreachable/missing")
+        # Never seen, so no MAC, no asset id, and no last-seen timestamp.
+        self.assertIsNone(missing["last_seen_at"])
+        self.assertIsNone(missing["mac_address"])
+        self.assertIsNone(missing["asset_id"])
+        # The register's expected hostname must NOT be laundered into the
+        # observed field: nothing resolved it. It rides as expected_hostname.
+        self.assertIsNone(missing["hostname"])
+        self.assertEqual(missing["expected_hostname"], "expected-host")
+
+    def test_silent_rows_are_stamped_on_the_run_summary(self) -> None:
+        extra = _map_result(
+            self.ROWS, {}, {"start_ip": "10.0.0.1", "end_ip": "10.0.0.50"}
+        ).result_summary_extra
+        self.assertEqual(
+            extra["expected_not_responding"],
+            [
+                {
+                    "asset_id": None,
+                    "asset_name": "expected-host",
+                    "address": "10.0.0.3",
+                    "expected_ports": [443],
+                    # Inside the swept range, so the sweep really pinged it.
+                    "directed_probe_sent": True,
+                }
+            ],
+        )
+
+    def test_probe_claim_is_computed_from_the_swept_range(self) -> None:
+        # The vendored sweep pings every address between start and end
+        # (scanner.js "Pass 1: ping sweep"), so a register host outside that
+        # range was never probed and the report must not claim it was.
+        rows = [
+            {"ip": "10.0.0.3", "register": "missing", "rag": "red",
+             "status": "unreachable", "openPorts": []},
+            {"ip": "198.51.100.7", "register": "missing", "rag": "red",
+             "status": "unreachable", "openPorts": []},
+            # A register row with no usable address: unknowable, never guessed.
+            {"ip": "\u2014", "register": "missing", "rag": "red",
+             "status": "unreachable", "openPorts": []},
+        ]
+        extra = _map_result(
+            rows, {}, {"start_ip": "10.0.0.1", "end_ip": "10.0.0.50"}
+        ).result_summary_extra
+        self.assertEqual(
+            [entry["directed_probe_sent"] for entry in extra["expected_not_responding"]],
+            [True, False, None],
+        )
+
+    def test_probe_claim_is_none_without_a_recorded_range(self) -> None:
+        extra = _map_result(self.ROWS, {}, {}).result_summary_extra
+        self.assertIsNone(extra["expected_not_responding"][0]["directed_probe_sent"])
+
+    def test_single_address_scan_counts_only_that_address_as_probed(self) -> None:
+        # No end bound: the sidecar sweeps the start address alone.
+        rows = [
+            {"ip": "10.0.0.1", "register": "missing", "rag": "red",
+             "status": "unreachable", "openPorts": []},
+            {"ip": "10.0.0.2", "register": "missing", "rag": "red",
+             "status": "unreachable", "openPorts": []},
+        ]
+        extra = _map_result(rows, {}, {"start_ip": "10.0.0.1"}).result_summary_extra
+        self.assertEqual(
+            [entry["directed_probe_sent"] for entry in extra["expected_not_responding"]],
+            [True, False],
+        )
+
+    def test_expected_not_responding_is_always_stamped(self) -> None:
+        # Empty list, never an absent key: a consumer must be able to tell "no
+        # expected host was silent" from "this run predates the field".
+        reachable_only = [
+            {"ip": "10.0.0.1", "register": "match", "rag": "green",
+             "status": "reachable", "openPorts": []},
+        ]
+        extra = _map_result(reachable_only, {}, {}).result_summary_extra
+        self.assertEqual(extra["expected_not_responding"], [])
+
+    def test_missing_asset_parses_against_the_readback_schema(self) -> None:
+        DiscoveryAssetObservation(**self._assets()["10.0.0.3"])
+
+    def test_summary_carries_all_six_register_counters(self) -> None:
+        summary = {"expected": 3, "reachable": 3, "expectedReachable": 2,
+                   "matches": 1, "partial": 1, "missing": 1, "rogue": 1}
+        extra = _map_result(self.ROWS, summary, {}).result_summary_extra
+        self.assertEqual(extra["register_expected"], 3)
+        self.assertEqual(extra["hosts_scanned"], 3)
+        self.assertEqual(extra["register_matches"], 1)
+        self.assertEqual(extra["register_partial"], 1)
+        self.assertEqual(extra["register_missing"], 1)
+        self.assertEqual(extra["register_rogue"], 1)
 
 
 class SseEventContractTest(unittest.TestCase):
