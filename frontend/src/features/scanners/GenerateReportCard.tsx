@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
 import {
@@ -112,6 +112,23 @@ export function GenerateReportCard({ run }: { run: ScannerRunController }) {
       });
     },
   });
+
+  // A report describes ONE run. Carrying its confirmation across to the next run
+  // would show run A report id under run B heading the moment B went terminal,
+  // and the same is true across a workspace switch. Reset on the run identity
+  // (id AND epoch, so a re-run of the same id still clears) and on the workspace.
+  const mutationReset = mutation.reset;
+  useEffect(() => {
+    setToast(null);
+    mutationReset();
+  }, [
+    activeRun?.epoch,
+    activeRun?.runId,
+    mutationReset,
+    sessionScopeId,
+    workspaceRef.projectId,
+    workspaceRef.siteId,
+  ]);
 
   if (!activeRun || !activeRunAuthoritativelyTerminal || !canEngineer || runAccessClosed) {
     return null;

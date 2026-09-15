@@ -378,6 +378,11 @@ export function useScannerRun(lane: ScannerLane) {
     setRunAttachmentNotice(null);
     setSavedRegister(null);
     setObjectBrowseResult(null);
+    // Consent does not travel between workspaces. The tick said "I am authorized
+    // to scan THIS network"; carrying it into another project or site would send
+    // authorized:true for a network nobody agreed to probe, with Start still
+    // enabled and nothing on screen to show the claim had been reused.
+    setScanAuthorizedChecked(false);
     runAccessClosedScopeRef.current = null;
     dispatchRun({ type: "reset" });
   }, [moduleRoute, sessionScopeId, workspaceRef.projectId, workspaceRef.siteId]);
@@ -619,14 +624,31 @@ export function useScannerRun(lane: ScannerLane) {
   // child run and persists nothing.
   const objectBrowseMutation = useMutation({
     mutationKey: mutationKeys.action(sessionScopeId, "bacnet-scanner.object-browse"),
-    mutationFn: ({ runId, deviceInstance }: { runId: string; deviceInstance: number }) =>
+    mutationFn: ({
+      runId,
+      deviceInstance,
+    }: {
+      owner: RunEpochOwner;
+      runId: string;
+      deviceInstance: number;
+    }) =>
       browseBacnetScannerObjects({
         context: { client: apiClient },
         runId,
         deviceInstance,
         authorized: scanAuthorized,
       }),
-    onSuccess: (result) => setObjectBrowseResult(result),
+    // A live read is slow enough to outlive the run it was asked for. The panel
+    // only checks device_instance, so the same instance in a later run would show
+    // the earlier run values as if they had just been read. Drop any response
+    // whose owner is no longer the run on screen, and check the run id the server
+    // itself echoed rather than trusting the request we sent.
+    onSuccess: (result, { owner }) => {
+      if (!ownsActiveRun(owner) || result.run_id !== owner.runId) {
+        return;
+      }
+      setObjectBrowseResult(result);
+    },
   });
 
   useEffect(() => {
@@ -664,11 +686,15 @@ export function useScannerRun(lane: ScannerLane) {
 
   const browseObjects = useCallback(
     (deviceInstance: number) => {
-      if (activeRun) {
-        objectBrowseMutation.mutate({ runId: activeRun.runId, deviceInstance });
+      if (activeRun && activeRunOwner) {
+        objectBrowseMutation.mutate({
+          deviceInstance,
+          owner: activeRunOwner,
+          runId: activeRun.runId,
+        });
       }
     },
-    [activeRun, objectBrowseMutation],
+    [activeRun, activeRunOwner, objectBrowseMutation],
   );
 
   const clearComparison = useCallback(() => {
