@@ -97,93 +97,105 @@ export function MqttPublishModal({
 
   const fail = (err: unknown) => setError(err instanceof Error ? err.message : "The request failed.");
 
-  const doPreview = async () => {
+  // `busy` is React state, so it is not applied until React commits. Two clicks
+  // delivered in the same tick both sail past `disabled={busy}` and both fire the
+  // request, and the backend creates one run per accepted request: a fast
+  // double-click published TWICE while the dialog showed a single "Sent". A ref
+  // flips synchronously, so the second click returns before it can reach the
+  // network. `busy` stays as the visual disabled state.
+  const sendingRef = useRef(false);
+  const singleFlight = async (operation: () => Promise<void>): Promise<void> => {
+    if (sendingRef.current) {
+      return;
+    }
+    sendingRef.current = true;
     setBusy(true);
     setError(null);
     try {
-      const accepted = await startMqttPublishPreview({ workspace, topic, payload, qos, retain, context });
-      const run = await pollRun(accepted.run_id, apiClient);
-      if (run.status !== "succeeded") {
-        setError((run.error_message as string) || "The preview failed.");
-      } else {
-        setPreviewRun(run);
-        setStage("preview");
-      }
-    } catch (err) {
-      fail(err);
+      await operation();
     } finally {
+      // Cleared on every outcome (success, error, poll timeout) so the dialog is
+      // never wedged shut after a failure the operator can retry.
+      sendingRef.current = false;
       setBusy(false);
     }
   };
 
-  const doDirectSend = async () => {
-    // Frictionless: no preview/approval. The backend seals the bytes server-side.
-    setBusy(true);
-    setError(null);
-    try {
-      const accepted = await startDirectMqttPublish({ workspace, topic, payload, qos, retain, context });
-      setSendRun(await pollRun(accepted.run_id, apiClient));
-      setStage("result");
-    } catch (err) {
-      if (err instanceof RunPollTimeout) {
-        // The send was accepted; only our watch gave up. Move OFF the confirm
-        // step, so its live "Send to device" button cannot publish a second copy
-        // of a message that may already be on the wire, and name the run instead.
-        setSendRun({ run_id: err.runId, status: "running" } as RunRecord);
-        setStage("result");
-      } else {
+  const doPreview = () =>
+    singleFlight(async () => {
+      try {
+        const accepted = await startMqttPublishPreview({ workspace, topic, payload, qos, retain, context });
+        const run = await pollRun(accepted.run_id, apiClient);
+        if (run.status !== "succeeded") {
+          setError((run.error_message as string) || "The preview failed.");
+        } else {
+          setPreviewRun(run);
+          setStage("preview");
+        }
+      } catch (err) {
         fail(err);
       }
-    } finally {
-      setBusy(false);
-    }
-  };
+    });
 
-  const doApprove = async () => {
-    if (!previewRun) {
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const now = new Date();
-      const auth = await createScanAuthorization({
-        previewRunId: previewRun.run_id,
-        ticket,
-        purpose,
-        notBefore: new Date(now.getTime() - 60_000).toISOString(),
-        notAfter: new Date(now.getTime() + 60 * 60_000).toISOString(),
-        context,
-      });
-      setAuthorization(auth);
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const doDirectSend = () =>
+    // Frictionless: no preview/approval. The backend seals the bytes server-side.
+    singleFlight(async () => {
+      try {
+        const accepted = await startDirectMqttPublish({ workspace, topic, payload, qos, retain, context });
+        setSendRun(await pollRun(accepted.run_id, apiClient));
+        setStage("result");
+      } catch (err) {
+        if (err instanceof RunPollTimeout) {
+          // The send was accepted; only our watch gave up. Move OFF the confirm
+          // step, so its live "Send to device" button cannot publish a second copy
+          // of a message that may already be on the wire, and name the run instead.
+          setSendRun({ run_id: err.runId, status: "running" } as RunRecord);
+          setStage("result");
+        } else {
+          fail(err);
+        }
+      }
+    });
 
-  const doSend = async () => {
-    if (!previewRun || !authorization) {
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const accepted = await startAuthorizedMqttPublish({
-        workspace,
-        previewRunId: previewRun.run_id,
-        scanAuthorizationId: authorization.authorization_id,
-        context,
-      });
-      setSendRun(await pollRun(accepted.run_id, apiClient));
-      setStage("result");
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const doApprove = () =>
+    singleFlight(async () => {
+      if (!previewRun) {
+        return;
+      }
+      try {
+        const now = new Date();
+        const auth = await createScanAuthorization({
+          previewRunId: previewRun.run_id,
+          ticket,
+          purpose,
+          notBefore: new Date(now.getTime() - 60_000).toISOString(),
+          notAfter: new Date(now.getTime() + 60 * 60_000).toISOString(),
+          context,
+        });
+        setAuthorization(auth);
+      } catch (err) {
+        fail(err);
+      }
+    });
+
+  const doSend = () =>
+    singleFlight(async () => {
+      if (!previewRun || !authorization) {
+        return;
+      }
+      try {
+        const accepted = await startAuthorizedMqttPublish({
+          workspace,
+          previewRunId: previewRun.run_id,
+          scanAuthorizationId: authorization.authorization_id,
+          context,
+        });
+        setSendRun(await pollRun(accepted.run_id, apiClient));
+        setStage("result");
+      } catch (err) {
+        fail(err);
+      }
+    });
 
   const publishEvidence = (sendRun?.result_summary as { publish?: Record<string, unknown> } | undefined)?.publish;
 
