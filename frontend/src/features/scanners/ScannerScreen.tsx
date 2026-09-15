@@ -8,13 +8,15 @@ import {
   getLatestImport,
   getScanRegisterCsvPath,
   listImportProfiles,
+  scanRegisterRunIdFromFileName,
   type ImportBatchSummary,
   type ImportType,
+  type ScanRegisterRoute,
 } from "../../api/client";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { ENGINEER_REQUIRED_TOOLTIP } from "../../app/sessionContext";
 import { LiveRunConsole } from "../workflow/LiveRunConsole";
-import { bacnetBackendLabel } from "../workflow/discoveryRows";
+import { bacnetBackendLabel, discoveryEmptyStateFor } from "../workflow/discoveryRows";
 import { formatRelativeTime, humanizeStage } from "../workflow/runFormat";
 import { DeviceDetailPanel } from "./DeviceDetailPanel";
 import { GenerateReportCard } from "./GenerateReportCard";
@@ -113,7 +115,6 @@ export function ScannerScreen({
     module,
     results,
     runAccessClosed,
-    moduleRoute,
     runAttachmentNotice,
     runController,
     runOutcome,
@@ -144,6 +145,10 @@ export function ScannerScreen({
     () => (lane === "bacnet" && results ? bacnetBackendLabel(results) : null),
     [lane, results],
   );
+  const emptyState = useMemo(
+    () => discoveryEmptyStateFor(module.route, results ?? undefined, activeRunError),
+    [activeRunError, module.route, results],
+  );
 
   const [textFilter, setTextFilter] = useState("");
   const [ragFilter, setRagFilter] = useState<RagFilter>("all");
@@ -151,6 +156,7 @@ export function ScannerScreen({
   const [panelExpanded, setPanelExpanded] = useState(false);
   const [panelWidth, setPanelWidth] = useStoredPanelWidth();
   const rowRefs = useRef(new Map<string, HTMLTableRowElement>());
+  const filterInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setSelectedRowId(null);
@@ -163,14 +169,33 @@ export function ScannerScreen({
     () => rows.filter((row) => rowMatchesRagFilter(row, ragFilter) && rowMatchesText(row, textFilter)),
     [ragFilter, rows, textFilter],
   );
+  // The panel only ever describes a row the operator can still see. A selection
+  // filtered out of the table would otherwise leave the panel open with no row
+  // to return focus to when it closes, dropping focus to <body>.
+  useEffect(() => {
+    if (selectedRowId && !visibleRows.some((row) => row.id === selectedRowId)) {
+      setSelectedRowId(null);
+      setPanelExpanded(false);
+    }
+  }, [selectedRowId, visibleRows]);
+
   const selectedRow: ScannerRow | null =
-    rows.find((row) => row.id === selectedRowId) ?? null;
+    visibleRows.find((row) => row.id === selectedRowId) ?? null;
+  const browsingSelectedDevice =
+    selectedRow?.deviceInstance !== undefined &&
+    run.objectBrowseMutation.variables?.deviceInstance === selectedRow.deviceInstance;
 
   const closePanel = () => {
     const focusTarget = selectedRowId ? rowRefs.current.get(selectedRowId) : null;
     setSelectedRowId(null);
     setPanelExpanded(false);
-    focusTarget?.focus();
+    // The row is still on screen (see the effect above), so focus goes back to
+    // where it came from; the filter box is the fallback if it has gone.
+    if (focusTarget) {
+      focusTarget.focus();
+    } else {
+      filterInputRef.current?.focus();
+    }
   };
 
   // ---- Register import card -------------------------------------------------
@@ -214,14 +239,31 @@ export function ScannerScreen({
       }),
     onSuccess: (summary) => {
       setImportOutcome(summary);
-      // The ROOT key, not latestImport(scope, workspace): the latter appends an
-      // `undefined` import-type slot that partial-matches no live query, so the
-      // "register already imported" note would never refresh after an upload.
+      // The ROOT key is what matches: queryKeys.latestImport ends in the
+      // import-type slot, so passing it without one builds a key nothing is
+      // stored under and the "Register already imported" note never refreshed.
       void queryClient.invalidateQueries({
         queryKey: queryKeys.latestImportRoot(sessionScopeId, workspaceRef),
       });
     },
   });
+
+  // A project/site switch must not leave the previous workspace's staged file or
+  // import verdict on screen: they describe a register that does not apply here.
+  useEffect(() => {
+    setSelectedFile(null);
+    setImportOutcome(null);
+  }, [sessionScopeId, workspaceRef.projectId, workspaceRef.siteId]);
+
+  // A register on file that came from "Save scan as register" names the run that
+  // produced it, so the same CSV can be downloaded again; an uploaded register
+  // has no run to rebuild it from.
+  const scanRegisterRoute = module.route as ScanRegisterRoute;
+  const latestRegisterFileName = latestImportQuery.data?.file_name ?? "";
+  const latestRegisterCsvRunId = scanRegisterRunIdFromFileName(
+    scanRegisterRoute,
+    latestRegisterFileName,
+  );
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
@@ -240,7 +282,6 @@ export function ScannerScreen({
   const hiddenImportErrorCount = Math.max(importErrors.length - IMPORT_ERROR_DISPLAY_CAP, 0);
   const importWarnings = importOutcome?.warnings ?? [];
 
-  const registerCsvPath = (runId: string) => getScanRegisterCsvPath(moduleRoute, runId);
   const laneNoun = lane === "bacnet" ? "BACnet" : lane === "mqtt" ? "MQTT" : "IP";
   const laneRunNoun = lane === "mqtt" ? "capture" : "scan";
 
@@ -464,12 +505,9 @@ export function ScannerScreen({
           <span className="scanner-setup-sub">{importType.replace(/_/g, " ")}</span>
         </div>
         <div className="scanner-card-body form-stack">
-          <label>
-            Import profile
-            <select disabled value={importType}>
-              <option value={importType}>{importType.replace(/_/g, " ")}</option>
-            </select>
-          </label>
+          {/* One import type per lane, so the profile is a fact, not a choice: a
+              permanently disabled single-option select invites a click that can
+              never do anything. The card head already names it. */}
           <label>
             CSV or XLSX file
             <input accept=".csv,.xlsx" onChange={handleFileChange} type="file" />
@@ -484,6 +522,35 @@ export function ScannerScreen({
                 {formatRelativeTime(latestImportQuery.data.created_at)}. This register is stored and
                 used by runs on this page; upload again only if the file changed.
               </span>
+              {/* A register saved from a scan has no file the operator ever held;
+                  the run it came from can still rebuild the same CSV. */}
+              {latestRegisterCsvRunId && (
+                <button
+                  className="secondary-button compact"
+                  disabled={registerCsvDownload.pendingKey !== null}
+                  onClick={() => {
+                    void registerCsvDownload.download({
+                      fallbackFilename: latestRegisterFileName,
+                      key: "latest-register-csv",
+                      path: getScanRegisterCsvPath(scanRegisterRoute, latestRegisterCsvRunId),
+                    });
+                  }}
+                  type="button"
+                >
+                  {registerCsvDownload.pendingKey === "latest-register-csv"
+                    ? "Downloading..."
+                    : "Download register CSV"}
+                </button>
+              )}
+              {/* The link is offered on a file-name match, so a 404 here is the
+                  honest answer that the guess was wrong, not a fault. */}
+              {registerCsvDownload.error && (
+                <span className="field-note" role="alert">
+                  {registerCsvDownload.errorStatus === 404
+                    ? "This register was uploaded, so there is no scan behind it to rebuild the CSV from. Use your own copy of the file."
+                    : `Register CSV download failed: ${registerCsvDownload.error}`}
+                </span>
+              )}
             </div>
           )}
           <button
@@ -720,41 +787,46 @@ export function ScannerScreen({
           </div>
         </div>
 
-        {savedRegister && (
+        {/* Only while the panel still describes the run on screen: a save that
+            resolved after the operator started another run would otherwise show
+            run A file name beside run B download URL. */}
+        {savedRegister && savedRegister.runId === activeRun?.runId && (
           <div className="state-panel success" role="status">
             <strong>Saved as register</strong>
             <span>
-              {savedRegister.file_name}: {savedRegister.accepted_rows} of{" "}
-              {savedRegister.total_rows} rows accepted ({savedRegister.import_id}). It is stored here
-              and applies automatically to the next {laneNoun} {laneRunNoun} for this project and
-              site. There is nothing to upload. Keep a copy if you want one:
+              {savedRegister.summary.file_name}: {savedRegister.summary.accepted_rows} of{" "}
+              {savedRegister.summary.total_rows} rows accepted ({savedRegister.summary.import_id}).
+              It is stored here and applies automatically to the next {laneNoun} {laneRunNoun} for
+              this project and site. There is nothing to upload. Keep a copy if you want one:
             </span>
-            {activeRun && (
-              <button
-                className="secondary-button compact inline-link-button"
-                disabled={registerCsvDownload.pendingKey !== null}
-                onClick={() =>
-                  void registerCsvDownload.download({
-                    fallbackFilename: `${lane}-scan-register-${activeRun.runId}.csv`,
-                    key: "register-csv",
-                    path: registerCsvPath(activeRun.runId),
-                  })
-                }
-                type="button"
-              >
-                {registerCsvDownload.pendingKey === "register-csv"
-                  ? "Downloading..."
-                  : "Download register CSV"}
-              </button>
-            )}
+            <button
+              className="secondary-button compact inline-link-button"
+              disabled={registerCsvDownload.pendingKey !== null}
+              onClick={() =>
+                void registerCsvDownload.download({
+                  fallbackFilename: savedRegister.summary.file_name,
+                  key: "register-csv",
+                  // The run that was SAVED, so the file and the URL always
+                  // describe the same run.
+                  path: getScanRegisterCsvPath(scanRegisterRoute, savedRegister.runId),
+                })
+              }
+              type="button"
+            >
+              {registerCsvDownload.pendingKey === "register-csv"
+                ? "Downloading..."
+                : "Download register CSV"}
+            </button>
           </div>
         )}
-        {registerCsvDownload.error && (
-          <div className="state-panel error" role="alert">
-            <strong>Register CSV download failed</strong>
-            <span>{registerCsvDownload.error}</span>
-          </div>
-        )}
+        {registerCsvDownload.pendingKey === null &&
+          registerCsvDownload.error &&
+          registerCsvDownload.errorStatus !== 404 && (
+            <div className="state-panel error" role="alert">
+              <strong>Register CSV download failed</strong>
+              <span>{registerCsvDownload.error}</span>
+            </div>
+          )}
         {run.saveRegisterMutation.isError && (
           <div className="state-panel error" role="alert">
             <strong>Save as register failed</strong>
@@ -804,6 +876,7 @@ export function ScannerScreen({
                 placeholder={
                   lane === "mqtt" ? "Topic, asset, payload" : "Address, name, vendor, status"
                 }
+                ref={filterInputRef}
                 value={textFilter}
               />
             </label>
@@ -837,18 +910,26 @@ export function ScannerScreen({
           <div className="data-table-wrap results-scroll scanner-table-wrap">
             {rows.length === 0 ? (
               <div className="empty-workspace">
+                {/* A failed, stopped or dry run must never read as "looked and
+                    found nothing": discoveryEmptyStateFor echoes what the run
+                    actually did, and only a run with no diagnosis of its own
+                    falls through to the generic copy. */}
                 <strong>
-                  {activeRun && !activeRunTerminal
-                    ? `${lane === "mqtt" ? "Capture" : "Scan"} in progress...`
-                    : lane === "mqtt"
-                      ? "No captured topics yet"
-                      : "No results yet"}
+                  {emptyState
+                    ? emptyState.title
+                    : activeRun && !activeRunTerminal
+                      ? `${lane === "mqtt" ? "Capture" : "Scan"} in progress...`
+                      : lane === "mqtt"
+                        ? "No captured topics yet"
+                        : "No results yet"}
                 </strong>
                 <span>
-                  {activeRun && !activeRunTerminal
-                    ? `Rows appear when the ${laneRunNoun} finishes and its evidence is confirmed.`
-                    : lane === "mqtt"
-                      ? "Record a capture to persist the topics and payloads as run evidence. Empty live results stay empty — no sample payloads are shown."
+                  {emptyState
+                    ? emptyState.detail
+                    : activeRun && !activeRunTerminal
+                      ? `Rows appear when the ${laneRunNoun} finishes and its evidence is confirmed.`
+                      : lane === "mqtt"
+                        ? "Record a capture to persist the topics and payloads as run evidence. Empty live results stay empty — no sample payloads are shown."
                       : "Start a scan to populate this table."}
                 </span>
               </div>
@@ -923,12 +1004,16 @@ export function ScannerScreen({
                     blockedReason: scanAuthorized
                       ? null
                       : "Confirm scan authorization in Scan setup before reading live objects.",
-                    pending: run.objectBrowseMutation.isPending,
-                    error: run.objectBrowseMutation.isError
-                      ? run.objectBrowseMutation.error instanceof Error
-                        ? run.objectBrowseMutation.error.message
-                        : "The device object list could not be read."
-                      : null,
+                    // Scoped to the device actually being browsed: a read
+                    // started on one row must not spin (or report a failure) on
+                    // the next row the operator clicks.
+                    pending: run.objectBrowseMutation.isPending && browsingSelectedDevice,
+                    error:
+                      run.objectBrowseMutation.isError && browsingSelectedDevice
+                        ? run.objectBrowseMutation.error instanceof Error
+                          ? run.objectBrowseMutation.error.message
+                          : "The device object list could not be read."
+                        : null,
                     result: run.objectBrowseResult,
                     onLoad: run.browseObjects,
                   }

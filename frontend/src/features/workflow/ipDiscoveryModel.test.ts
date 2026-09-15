@@ -261,7 +261,54 @@ describe("IP sidecar summary cards (GAP-C2)", () => {
   it("returns null when no total is present (dry-run / older / failed run: no strip)", () => {
     expect(formatIpSidecarSummaryCards({})).toBeNull();
     expect(formatIpSidecarSummaryCards(undefined)).toBeNull();
+    // Not the value the engine stamps (ENGINE_NAME is "ip_scanner"), so this
+    // carries no sidecar signal at all.
     expect(formatIpSidecarSummaryCards({ scanner: "ip_scanner_sidecar" })).toBeNull();
+  });
+
+  it("returns null for a legacy summary carrying only the generic hosts_scanned", () => {
+    // The built-in ip_scan lane stamps hosts_scanned too, and a sidecar dry run
+    // stamps hosts_scanned: 0. Zero is a number, so keying the strip off the
+    // generic counters rendered "Reachable 0" plus five dashes for a run that
+    // never compared a register.
+    expect(formatIpSidecarSummaryCards({ hosts_scanned: 0 })).toBeNull();
+    expect(formatIpSidecarSummaryCards({ hosts_scanned: 12, hosts_responsive: 9 })).toBeNull();
+    expect(
+      formatIpSidecarSummaryCards({ dry_run_plan: { engine: "ip_scanner" }, hosts_scanned: 0 }),
+    ).toBeNull();
+  });
+
+  it("renders a genuine sidecar run whose counters are all zero", () => {
+    expect(
+      formatIpSidecarSummaryCards({
+        scanner: "ip_scanner",
+        register_expected: 0,
+        hosts_scanned: 0,
+        register_matches: 0,
+        register_partial: 0,
+        register_missing: 0,
+        register_rogue: 0,
+      }),
+    ).toEqual([
+      { heading: "Expected", value: "0" },
+      { heading: "Reachable", value: "0" },
+      { heading: "Match", value: "0" },
+      { heading: "Partial", value: "0" },
+      { heading: "Missing", value: "0" },
+      { heading: "Rogue", value: "0" },
+    ]);
+  });
+
+  it("accepts the engine's own scanner stamp as the sidecar signal", () => {
+    // ip_scanner_sidecar.py stamps "scanner": ENGINE_NAME, and no other engine
+    // writes that key, so it identifies the lane even with every counter null.
+    const cards = formatIpSidecarSummaryCards({
+      scanner: "ip_scanner",
+      register_expected: null,
+      hosts_scanned: null,
+    });
+    expect(cards).not.toBeNull();
+    expect(cards?.every((card) => card.value === "\u2014")).toBe(true);
   });
 });
 
@@ -311,7 +358,48 @@ describe("BACnet sidecar summary cards (GAP-C2)", () => {
   it("returns null when no total is present (dry-run / older / failed run: no strip)", () => {
     expect(formatBacnetSidecarSummaryCards({})).toBeNull();
     expect(formatBacnetSidecarSummaryCards(undefined)).toBeNull();
-    expect(formatBacnetSidecarSummaryCards({ scanner: "bacnet_scanner" })).toBeNull();
+  });
+
+  it("returns null for a summary carrying only the generic devices_discovered", () => {
+    // A bacnet_scanner dry run stamps {dry_run_plan, devices_discovered: 0} and
+    // nothing else; zero is a number, so the generic key alone used to render a
+    // strip of dashes for a run that scanned nothing.
+    expect(formatBacnetSidecarSummaryCards({ devices_discovered: 0 })).toBeNull();
+    expect(
+      formatBacnetSidecarSummaryCards({
+        dry_run_plan: { engine: "bacnet_scanner" },
+        devices_discovered: 0,
+      }),
+    ).toBeNull();
+  });
+
+  it("renders a genuine sidecar run whose counters are all zero", () => {
+    expect(
+      formatBacnetSidecarSummaryCards({
+        scanner: "bacnet_scanner",
+        register_expected: 0,
+        devices_discovered: 0,
+        register_matches: 0,
+        register_partial: 0,
+        register_missing: 0,
+        register_rogue: 0,
+      }),
+    ).toEqual([
+      { heading: "Expected", value: "0" },
+      { heading: "Reachable", value: "0" },
+      { heading: "Match", value: "0" },
+      { heading: "Partial", value: "0" },
+      { heading: "Missing", value: "0" },
+      { heading: "Rogue", value: "0" },
+    ]);
+  });
+
+  it("accepts the engine's own scanner stamp as the sidecar signal", () => {
+    // Contract change: "scanner" is now a POSITIVE lane signal (the engine
+    // stamps ENGINE_NAME and nothing else writes the key), so a real scanner run
+    // keeps its strip even when every counter is null, while a legacy summary
+    // with only generic keys no longer fakes one.
+    expect(formatBacnetSidecarSummaryCards({ scanner: "bacnet_scanner" })).not.toBeNull();
   });
 
   it("keeps the strip for a cancelled scan whose only number is points_exported", () => {

@@ -160,7 +160,9 @@ class RegisterRowVisibilityTest(unittest.TestCase):
         self.assertEqual(missing["expected_hostname"], "expected-host")
 
     def test_silent_rows_are_stamped_on_the_run_summary(self) -> None:
-        extra = _map_result(self.ROWS, {}, {}).result_summary_extra
+        extra = _map_result(
+            self.ROWS, {}, {"start_ip": "10.0.0.1", "end_ip": "10.0.0.50"}
+        ).result_summary_extra
         self.assertEqual(
             extra["expected_not_responding"],
             [
@@ -169,8 +171,49 @@ class RegisterRowVisibilityTest(unittest.TestCase):
                     "asset_name": "expected-host",
                     "address": "10.0.0.3",
                     "expected_ports": [443],
+                    # Inside the swept range, so the sweep really pinged it.
+                    "directed_probe_sent": True,
                 }
             ],
+        )
+
+    def test_probe_claim_is_computed_from_the_swept_range(self) -> None:
+        # The vendored sweep pings every address between start and end
+        # (scanner.js "Pass 1: ping sweep"), so a register host outside that
+        # range was never probed and the report must not claim it was.
+        rows = [
+            {"ip": "10.0.0.3", "register": "missing", "rag": "red",
+             "status": "unreachable", "openPorts": []},
+            {"ip": "198.51.100.7", "register": "missing", "rag": "red",
+             "status": "unreachable", "openPorts": []},
+            # A register row with no usable address: unknowable, never guessed.
+            {"ip": "\u2014", "register": "missing", "rag": "red",
+             "status": "unreachable", "openPorts": []},
+        ]
+        extra = _map_result(
+            rows, {}, {"start_ip": "10.0.0.1", "end_ip": "10.0.0.50"}
+        ).result_summary_extra
+        self.assertEqual(
+            [entry["directed_probe_sent"] for entry in extra["expected_not_responding"]],
+            [True, False, None],
+        )
+
+    def test_probe_claim_is_none_without_a_recorded_range(self) -> None:
+        extra = _map_result(self.ROWS, {}, {}).result_summary_extra
+        self.assertIsNone(extra["expected_not_responding"][0]["directed_probe_sent"])
+
+    def test_single_address_scan_counts_only_that_address_as_probed(self) -> None:
+        # No end bound: the sidecar sweeps the start address alone.
+        rows = [
+            {"ip": "10.0.0.1", "register": "missing", "rag": "red",
+             "status": "unreachable", "openPorts": []},
+            {"ip": "10.0.0.2", "register": "missing", "rag": "red",
+             "status": "unreachable", "openPorts": []},
+        ]
+        extra = _map_result(rows, {}, {"start_ip": "10.0.0.1"}).result_summary_extra
+        self.assertEqual(
+            [entry["directed_probe_sent"] for entry in extra["expected_not_responding"]],
+            [True, False],
         )
 
     def test_expected_not_responding_is_always_stamped(self) -> None:

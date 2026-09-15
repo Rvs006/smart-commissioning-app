@@ -540,7 +540,7 @@ export function serviceLines(services: unknown): ServiceLine[] {
     const head = [proto && port ? `${proto}/${port}` : proto || port, name, record.tls ? "🔒" : ""]
       .filter(Boolean)
       .join(" ");
-    // The vendored tool's svcDescr(), verbatim in order: product+version, quoted title,
+    // The vendored svcDescr(), verbatim in order: product+version, quoted title,
     // certificate CN, then the raw info string only when nothing else is known.
     const parts: string[] = [];
     if (record.product) {
