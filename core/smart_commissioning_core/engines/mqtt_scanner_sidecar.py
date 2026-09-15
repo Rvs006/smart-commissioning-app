@@ -261,6 +261,7 @@ async def _run_mqtt_scanner(
         except Exception:  # noqa: BLE001 (evidence attach is advisory, never fatal)
             raw_evidence_artifact_id = None
 
+    retained_by_topic = payload.get("retained")
     return _map_manifest(
         manifest,
         payloads,
@@ -268,6 +269,7 @@ async def _run_mqtt_scanner(
         ctx.parameters,
         cancelled=ctx.is_cancelled(),
         raw_evidence_artifact_id=raw_evidence_artifact_id,
+        retained_by_topic=retained_by_topic if isinstance(retained_by_topic, Mapping) else None,
     )
 
 
@@ -284,8 +286,14 @@ def _map_manifest(
     *,
     cancelled: bool = False,
     raw_evidence_artifact_id: str | None = None,
+    retained_by_topic: Mapping[str, bool] | None = None,
 ) -> EngineResult:
-    """Project the sidecar's export archive into the shared record shapes."""
+    """Project the sidecar's export archive into the shared record shapes.
+
+    ``retained_by_topic`` comes from the tree snapshot, not the archive: the
+    export manifest carries no retained flag at all.
+    """
+    retained: Mapping[str, bool] = retained_by_topic or {}
     now = datetime.now(UTC)
     now_iso = now.isoformat()
 
@@ -295,18 +303,6 @@ def _map_manifest(
     for asset in manifest_assets:
         for topic in asset.get("topics") or []:
             topic_to_asset[str(topic)] = asset
-
-    # topic -> the manifest's per-topic detail entry. The vendored tool records
-    # the retained flag of the LAST message it saw on each topic
-    # (scanners/vendor/mqtt-discovery/server.js: ``t.retained = m.retain``,
-    # exported as ``topicsDetail[].retained``). Without this the Ret column read
-    # "-" on every captured topic, because the frontend looks for
-    # ``attributes.last_retained`` and only the built-in engine stamped it.
-    topic_to_detail: dict[str, Mapping[str, Any]] = {}
-    for asset in manifest_assets:
-        for detail in asset.get("topicsDetail") or []:
-            if isinstance(detail, Mapping) and detail.get("topic") is not None:
-                topic_to_detail[str(detail["topic"])] = detail
 
     discovered_assets: list[dict[str, Any]] = []
     for asset in manifest_assets:
@@ -338,15 +334,18 @@ def _map_manifest(
             "position": position,
         }
         # A JSON boolean, matching mqtt_discovery's contract exactly: the reader
-        # distinguishes True / False / ABSENT, so a topic the export carries no
-        # detail entry for must leave the key off rather than claim "not
-        # retained". Deliberately NOT stamping last_qos: the vendored tool records
-        # no per-message QoS anywhere in its export, so the delivery QoS is
-        # genuinely unknown and the panel's honest "Not recorded" is correct. The
-        # run's subscription QoS cap is a separate, run-level value.
-        detail = topic_to_detail.get(str(topic))
-        if detail is not None and "retained" in detail:
-            attributes["last_retained"] = bool(detail["retained"])
+        # distinguishes True / False / ABSENT. The export archive does NOT carry
+        # the retained flag (its manifest assets are asset/matched/schema/site/
+        # room/gatewayId/topics/points and nothing else), so it comes from the
+        # tree snapshot taken just before the export; a topic missing from that
+        # snapshot -- the tree is capped at TREE_NODE_CAP nodes -- leaves the key
+        # off rather than claiming "not retained".
+        # Deliberately NOT stamping last_qos: the vendored tool records no
+        # per-message QoS anywhere, so the delivery QoS is genuinely unknown and
+        # the panel's honest "Not recorded" is correct. The run's subscription QoS
+        # cap is a separate, run-level value.
+        if str(topic) in retained:
+            attributes["last_retained"] = bool(retained[str(topic)])
         structured_records.append(
             json_safe_value(
                 {
@@ -670,6 +669,9 @@ def _default_sidecar_client(
             raise SidecarTransportError("The MQTT broker connection was refused during the capture.")
         connected = True
         _capture_window(base, capture_seconds, is_cancelled, progress)
+        # BEFORE the export and while the session is still connected: the export
+        # archive carries no retained flag, and the tree is dropped on disconnect.
+        retained = _retained_by_topic(base)
         manifest, payloads, export_zip = _export_archive(base)
     except urllib.error.HTTPError as error:
         # A non-2xx from connect (502) or register — reached the sidecar, but the
@@ -686,7 +688,12 @@ def _default_sidecar_client(
             _post_disconnect(base)  # always release the broker session, even on error
     # export_zip carries the raw archive bytes for GAP-M6 evidence (b"" when the
     # capture was empty). The projection is still driven off manifest/payloads.
-    return {"manifest": manifest, "payloads": payloads, "export_zip": export_zip}
+    return {
+        "manifest": manifest,
+        "payloads": payloads,
+        "export_zip": export_zip,
+        "retained": retained,
+    }
 
 
 def _capture_window(
@@ -709,6 +716,59 @@ def _capture_window(
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(1.0, remaining))
+
+
+def _retained_by_topic(base: str) -> dict[str, bool]:
+    """``topic -> was the last message on it retained``, from the tree snapshot.
+
+    The retained flag is per topic in the sidecar's live state
+    (``t.retained = m.retain``) and reaches the wire in exactly two places: the
+    focused-asset payload, which covers one asset at a time, and every leaf of
+    the tree snapshot, where ``ret: 1`` marks retained and the key is simply
+    absent otherwise (server.js: ``if (k.retained) o.ret = 1``). The export
+    archive carries it nowhere, so the snapshot is the only source that covers
+    the whole capture.
+
+    Best-effort by design: this is one column, and the payloads are the evidence,
+    so a snapshot that fails or times out yields an empty map (every topic reads
+    "unknown") instead of failing a completed capture. The tree is capped at
+    TREE_NODE_CAP nodes, so a very wide capture returns a partial map; topics
+    that never appear are left out and must stay unknown rather than be recorded
+    as not-retained.
+    """
+    try:
+        # Posting an empty query also CLEARS any server-side search/matched-only
+        # filter, so the tree covers every topic and not just a filtered view.
+        # Safe here: the session is disconnected moments later.
+        snapshot = _post_json(base, "/api/search", {"q": "", "matchedOnly": False})
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError, ValueError):
+        return {}
+    if not isinstance(snapshot, Mapping):
+        return {}
+    return _retained_from_snapshot_tree(snapshot.get("tree"))
+
+
+def _retained_from_snapshot_tree(tree: Any) -> dict[str, bool]:
+    """Walk the serialized tree to ``leaf topic path -> retained``.
+
+    Pure, so the projection can be exercised against the real snapshot shape
+    without an HTTP round trip. Leaves carry the full topic in ``p`` and set
+    ``ret`` only when retained; children hang off ``ch``.
+    """
+    retained: dict[str, bool] = {}
+
+    def walk(nodes: Any) -> None:
+        if not isinstance(nodes, list):
+            return
+        for node in nodes:
+            if not isinstance(node, Mapping):
+                continue
+            if node.get("leaf") and node.get("p") is not None:
+                retained[str(node["p"])] = bool(node.get("ret"))
+            walk(node.get("ch"))
+
+    walk(tree)
+    return retained
 
 
 def _export_archive(base: str) -> tuple[dict[str, Any], dict[str, dict[str, Any]], bytes]:

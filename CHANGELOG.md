@@ -89,12 +89,18 @@ database migration in this release.
 
 ### Changed
 
-- The captured-topics Ret column reports what the broker actually delivered. The
-  vendored capture records the retained flag per topic and its export carries it,
-  but the scanner lane never read it, so every row showed "-" whether the payload
-  was retained or not. Delivery QoS stays "Not recorded" for this lane, honestly:
-  the vendored tool records no per-message QoS anywhere, and the run's
-  subscription QoS is a different number that must not be passed off as it.
+- The captured-topics Ret column reports what the broker actually delivered.
+  Every row used to show "-" whether the payload was retained or not, because
+  nothing carried the flag through: the capture's export archive does not record
+  it at all. The capture now reads the sidecar's topic-tree snapshot just before
+  it exports, while the broker session is still open, and stamps the retained
+  flag per topic from it. A topic the snapshot does not list still reads "-":
+  the tree is capped, and an unlisted topic is unknown, not "not retained". If
+  the snapshot cannot be taken the capture still completes and every row reads
+  "-" rather than failing a finished capture over one column. Delivery QoS stays
+  "Not recorded" for this lane, honestly: the vendored tool records no
+  per-message QoS anywhere, and the run's subscription QoS is a different number
+  that must not be passed off as it.
 - "Write config" on a live MQTT asset now opens at QoS 1 with retain ticked, the
   same defaults the vendored config editor uses, so a config written by following
   that tool goes out the same way. A plain "Publish message..." still opens at
