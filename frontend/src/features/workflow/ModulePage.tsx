@@ -11,7 +11,6 @@ import {
 import { flushSync } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router";
-import { hostRangeFromCidr } from "./ipRange";
 import {
   ApiError,
   approveDetectedNmap,
@@ -21,7 +20,6 @@ import {
   createScanAuthorization,
   deleteReports,
   deleteUdmiSchemaSet,
-  getConfiguration,
   getDiscoveryResults,
   getDiscoveryComparison,
   getDiscoveryObservations,
@@ -37,13 +35,6 @@ import {
   getValidationJsonExportPath,
   getValidationRun,
   getReportDownloadPath,
-  getBacnetExportAssetsPath,
-  getRawEvidenceDownloadPath,
-  getScanRegisterCsvPath,
-  scanRegisterRunIdFromFileName,
-  saveMqttLiveAsRegister,
-  type ScanRegisterRoute,
-  getSystemInterfaces,
   REPORTS_EXPORT_PATH,
   getUdmiSchemaTemplatePath,
   ImportBatchSummary,
@@ -56,10 +47,6 @@ import {
   startMqttConfigPublishRun,
   startAuthorizedDiscoveryRun,
   startBacnetPropertyRun,
-  browseBacnetScannerObjects,
-  saveIpScanRunAsRegister,
-  saveBacnetScanRunAsRegister,
-  saveMqttScanRunAsRegister,
   startDiscoveryPreview,
   startDiscoveryRun,
   startValidationRun,
@@ -83,22 +70,15 @@ import {
   ValidationIssueRecord,
   type NmapProfileName,
   type BacnetPropertyName,
-  type BacnetObjectBrowseResponse,
   type ScanAuthorizationV1,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
 import {
   buildDiscoveryParameters,
-  resolveBacnetInstanceRange,
   scanPortSpecification,
   type IPDiscoveryProvider,
   type ScanPort,
 } from "./buildDiscoveryParameters";
-import { MqttFocusedDetail } from "./MqttFocusedDetail";
-import { MqttLiveTopicTree } from "./MqttLiveTopicTree";
-import { MqttPublishModal } from "./MqttPublishModal";
-import { SourceInterfaceDetails } from "./SourceInterfaceDetails";
-import { useMqttLiveSession } from "./useMqttLiveSession";
 import {
   assetMatchesFacetFilter,
   buildAssetFacts,
@@ -114,7 +94,6 @@ import {
 } from "./operatorData";
 import {
   bacnetBackendLabel,
-  bacnetDeviceDetailItems,
   captureRowsToCsv,
   discoveryEmptyStateFor,
   discoveryMetrics,
@@ -123,7 +102,6 @@ import {
   expectedPortsOk,
   forbiddenOpenPorts,
   groupUdmiRowsByAsset,
-  ipDeviceDetailItems,
   matchesTopicFilter,
   missingExpectedPorts,
   mqttRegisterCompareNote,
@@ -157,13 +135,6 @@ import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext"
 import type { RunRef } from "../../app/sessionScope";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { isPlainObject } from "../../utils/isPlainObject";
-
-// The parameter builder moved to its own module so the scanner pages can start a
-// run without importing this 11k-line component. Re-exported here so
-// buildDiscoveryParameters.test.ts (and any other existing import of the symbol
-// from ModulePage) keeps resolving.
-// eslint-disable-next-line react-refresh/only-export-components -- pure param builder re-export; it renders nothing.
-export { buildDiscoveryParameters };
 
 const BACNET_PROPERTY_OPTIONS: readonly BacnetPropertyName[] = [
   "object_name",
@@ -207,16 +178,10 @@ import {
 } from "./runIsolation";
 import {
   formatIpHeadlineMetrics,
-  formatIpSidecarSummaryCards,
   formatBacnetHeadlineMetrics,
-  formatBacnetRouters,
-  formatBacnetSidecarSummaryCards,
-  formatMqttSidecarSummaryCards,
   type IpTargetRow,
   type IpHeadlineMetricDisplay,
-  type IpSidecarSummaryCard,
   type BacnetHeadlineMetricDisplay,
-  type BacnetRouterDisplay,
 } from "./ipDiscoveryModel";
 
 function newIpSubmissionKey(): string {
@@ -294,23 +259,14 @@ type FrozenUdmiReportScope = {
   unexpectedDevices: number;
 };
 
-// Each protocol has two discovery lanes: the vendored sidecar (plain path) and
-// the relocated built-in engine ("-sct"). "ip-scanner"/"bacnet-scanner"/
-// "mqtt-scanner" are the operator-facing sidecars; "ip-scanner-sct"/
-// "bacnet-discovery-sct"/"mqtt-discovery-sct" are the built-in engines.
+// The built-in discovery engines this page serves. The three vendored sidecar
+// lanes ("ip-scanner" / "bacnet-scanner" / "mqtt-scanner") have their own
+// dedicated pages under features/scanners/ and never render here.
 const DISCOVERY_ROUTES = new Set([
-  "ip-scanner",
   "ip-scanner-sct",
-  "bacnet-scanner",
   "bacnet-discovery-sct",
-  "mqtt-scanner",
   "mqtt-discovery-sct",
 ]);
-
-// The three vendored standalone scanner lanes. They carry their own operator
-// inputs (e.g. IP range) and deliberately drop the sealed lanes' dry-run preview
-// step — true for all three whether they render native or embedded.
-const SIDECAR_DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-scanner", "mqtt-scanner"]);
 
 // Which evidence the settled phase requires, per run kind.
 const DISCOVERY_EVIDENCE_REQUIREMENTS = ["run", "results"] as const;
@@ -621,15 +577,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const isDiscoveryModule = DISCOVERY_ROUTES.has(module.route);
   const isSealedNetworkDiscoveryModule =
     module.route === "ip-scanner-sct" || module.route === "bacnet-discovery-sct";
-  // The vendored standalone scanner lanes brought into SCT. They carry their own
-  // operator inputs (e.g. IP range) and deliberately drop the dry-run preview
-  // step the sealed lanes use — true whether the lane renders native or embedded.
-  const isSidecarDiscoveryModule = SIDECAR_DISCOVERY_ROUTES.has(module.route);
-  // The three lanes whose finished run can be saved as, and downloaded as, a register.
-  const scanRegisterRoute: ScanRegisterRoute | null =
-    module.route === "ip-scanner" || module.route === "bacnet-scanner" || module.route === "mqtt-scanner"
-      ? module.route
-      : null;
   const requestedRunId = searchParams.get("run")?.trim() || null;
   const comparisonRunId = searchParams.get("compare")?.trim() || null;
   const setScopedRunUrl = useCallback(
@@ -690,35 +637,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const scanAuthorized = authorizationEnforced ? scanAuthorizedChecked : true;
   const [scanDryRun, setScanDryRun] = useState(false);
   const [scanTarget, setScanTarget] = useState("");
-  // IP sidecar lane operator inputs (the vendored Network IP Scanner exposes a
-  // start/end target range on its own card). Fed into the run parameters as
-  // start_ip / end_ip; blank leaves the adapter to fail honestly ("no scan range").
-  const [ipScanRangeStart, setIpScanRangeStart] = useState("");
-  const [ipScanRangeEnd, setIpScanRangeEnd] = useState("");
-  // GAP-IP1: per-probe timeout (ms) the vendored tool exposed. Defaults to 1000;
-  // forwarded as parameters.timeout (the sidecar adapter's _scan_query passes it
-  // through). Blank or non-positive omits the key so the engine's own default
-  // applies rather than a bogus value.
-  const [ipProbeTimeout, setIpProbeTimeout] = useState("1000");
-  // GAP-C1: "Ignore register for this run" — the vendored clear-register / run
-  // without RAG. Forwarded as parameters.ignore_register; the route's register
-  // binder then skips freezing a register into this run.
-  const [ipIgnoreRegister, setIpIgnoreRegister] = useState(false);
-  // GAP-B1: BACnet sidecar per-run inputs the vendored tool exposed. Device
-  // instance range (low/high) narrows the Who-Is; blank = a global Who-Is (the
-  // sidecar default). Discovery window (discoverMs) bounds how long the scan
-  // listens for I-Am replies. All forwarded as run parameters (low/high/discoverMs);
-  // the adapter's _scan_query omits any blank key so the engine default applies.
-  const [bacnetInstanceLow, setBacnetInstanceLow] = useState("");
-  const [bacnetInstanceHigh, setBacnetInstanceHigh] = useState("");
-  const [bacnetDiscoverMs, setBacnetDiscoverMs] = useState("");
-  // GAP-C1 parity for the BACnet lane: opt this run out of register RAG
-  // comparison, exactly like the IP lane's ipIgnoreRegister. Forwarded as
-  // parameters.ignore_register; the shared register binder then skips freezing.
-  const [bacnetIgnoreRegister, setBacnetIgnoreRegister] = useState(false);
-  // Validate the range as the operator types so Run can gate on a half-filled or
-  // out-of-range pair instead of silently degrading to a global Who-Is.
-  const bacnetInstanceRange = resolveBacnetInstanceRange(bacnetInstanceLow, bacnetInstanceHigh);
   const [scanTargetRows, setScanTargetRows] = useState<IpTargetRow[]>([]);
   const [scanExclusionRows, setScanExclusionRows] = useState<IpTargetRow[]>([]);
   const [scanPreviewRunId, setScanPreviewRunId] = useState<string | null>(null);
@@ -794,31 +712,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Workbench uses the persistent Inspector instead, so this state is never set
   // for UDMI rows.
   const [detailRow, setDetailRow] = useState<Record<string, string> | null>(null);
-  // bacnet-scanner live object browse (ephemeral read, scoped to the open detail
-  // dialog). Cleared whenever the viewed device changes so one device's objects
-  // never render under another.
-  const [objectBrowseResult, setObjectBrowseResult] = useState<BacnetObjectBrowseResponse | null>(
-    null,
-  );
-  // ip-scanner "save scan as register" outcome, cleared when a new run starts.
-  // The run id travels WITH the summary: the register CSV download is rebuilt
-  // from the run that was saved, and reading it off the mutable `activeRun`
-  // would hand run B's id to a download labelled with run A's file name.
-  const [savedRegister, setSavedRegister] = useState<{
-    runId: string;
-    summary: ImportBatchSummary;
-  } | null>(null);
-  // mqtt-scanner live topic tree: the live search box (filters server-side).
-  const [mqttLiveSearch, setMqttLiveSearch] = useState("");
-  // GAP-M4: matched-only toggle applied to the same server-side search endpoint.
-  const [mqttLiveMatchedOnly, setMqttLiveMatchedOnly] = useState(false);
-  // mqtt-scanner: the sealed "publish a message" modal (M5). GAP-M7 opens it with
-  // a prefill (config topic + last-seen config payload, retain on) from a focused
-  // asset; null prefill = a blank publish from the toolbar.
-  const [mqttPublishOpen, setMqttPublishOpen] = useState(false);
-  const [mqttPublishPrefill, setMqttPublishPrefill] = useState<{ topic: string; payload: string } | null>(
-    null,
-  );
   const [propertyExpansionNotice, setPropertyExpansionNotice] = useState<string | null>(null);
   const [propertyOwner, setPropertyOwner] = useState<RunEpochOwner | null>(null);
   const [propertyRunId, setPropertyRunId] = useState<string | null>(null);
@@ -907,15 +800,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const captureExportDownload = useFileDownload(apiClient);
   const generatedAllBundleDownload = useFileDownload(apiClient);
   const validationJsonDownload = useFileDownload(apiClient);
-  // GAP-B3: the BACnet per-asset export ZIP download (rebuilt server-side from the
-  // run's persisted devices+points; no live I/O).
-  const bacnetAssetsDownload = useFileDownload(apiClient);
-  // GAP-M6: the MQTT capture's raw export-archive ZIP, attached to the run as raw
-  // evidence during the capture and served by the shared raw-evidence route.
-  const mqttArchiveDownload = useFileDownload(apiClient);
-  // "Save scan as register" imports the register but writes no file; this serves
-  // the same bytes back as a CSV the operator can keep.
-  const registerCsvDownload = useFileDownload(apiClient);
   const schemaTemplateDownload = useFileDownload(apiClient);
   const activeRunMatchesReservedLiveSubmission = Boolean(
     activeRun &&
@@ -1015,51 +899,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryKey: nmapCapabilityQueryKey,
     staleTime: 15_000,
   });
-
-  // Auto-subnet: prefill the IP scan range from the configured Source Interface's
-  // subnet (stored as a cidr, e.g. "10.0.10.5/24") the first time it loads, only
-  // when the operator has not already typed a range. Editable afterwards; an
-  // "Auto" / blank source interface (no cidr) leaves the fields untouched.
-  const configurationQuery = useQuery({
-    enabled: ["ip-scanner", "bacnet-scanner", "mqtt-scanner"].includes(module.route),
-    queryFn: ({ signal }) => getConfiguration({ client: apiClient, signal }),
-    queryKey: [...queryKeys.workspace(sessionScopeId, workspaceRef), "configuration", "panel-config"],
-    staleTime: 30_000,
-  });
-  // The configured Source Interface cidr (e.g. "10.0.10.5/24"), shared by
-  // auto-subnet (prefill the range) and config-in (push the NIC into the panel).
-  const sourceInterfaceCidr = useMemo(() => {
-    const config = configurationQuery.data;
-    if (!config) return undefined;
-    for (const section of Object.values(config)) {
-      if (section.values["Source Interface"]) return section.values["Source Interface"];
-    }
-    return undefined;
-  }, [configurationQuery.data]);
-  // No-function-loss: the vendored IP and BACnet tools showed the selected NIC
-  // (IPv4, mask, gateway, DNS) on their own scan page. The native lanes read the
-  // adapter from Configuration (single source of truth), so surface it read-only
-  // on the module too, so the operator still SEES which NIC scans send from
-  // (BACnet fails hard on a NIC mismatch, so seeing it matters). IP + BACnet
-  // sidecar modules only — gated so the query never fires on unrelated pages.
-  const systemInterfacesQuery = useQuery({
-    enabled: module.route === "ip-scanner" || module.route === "bacnet-scanner",
-    queryFn: ({ signal }) => getSystemInterfaces({ client: apiClient, signal }),
-    queryKey: queryKeys.interfaces(sessionScopeId, workspaceRef),
-  });
-  const autoSubnetApplied = useRef(false);
-  useEffect(() => {
-    if (module.route !== "ip-scanner" || autoSubnetApplied.current) return;
-    const config = configurationQuery.data;
-    if (!config) return;
-    autoSubnetApplied.current = true;
-    if (ipScanRangeStart || ipScanRangeEnd) return;
-    const range = sourceInterfaceCidr ? hostRangeFromCidr(sourceInterfaceCidr) : null;
-    if (range) {
-      setIpScanRangeStart(range.start);
-      setIpScanRangeEnd(range.end);
-    }
-  }, [module.route, configurationQuery.data, sourceInterfaceCidr, ipScanRangeStart, ipScanRangeEnd]);
 
   const approveNmapMutation = useMutation({
     mutationKey: mutationKeys.action(sessionScopeId, "nmap.approve_detected"),
@@ -1644,7 +1483,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const bacnetPointsQuery = useQuery({
     enabled:
       !runAccessClosed &&
-      (module.route === "bacnet-scanner" || module.route === "bacnet-discovery-sct") &&
+      module.route === "bacnet-discovery-sct" &&
       Boolean(activeRun) &&
       activeRun?.kind === "discovery" &&
       activeRunAuthoritativelyTerminal,
@@ -1786,7 +1625,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       !runAccessClosed &&
       !activeRunMatchesReservedLiveSubmission &&
       !activeRunMatchesDefinitiveLiveRejection &&
-      (module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct") &&
+      module.route === "mqtt-discovery-sct" &&
       Boolean(activeRun) &&
       activeRun?.kind === "discovery",
     queryFn: ({ signal }) =>
@@ -1854,14 +1693,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       ),
     queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef, selectedImportType),
   });
-  // A register on file that came from "Save scan as register" names the run that
-  // produced it, so the same CSV can be downloaded again; an uploaded register
-  // (or one saved from a live session) has no run to rebuild it from.
-  const latestRegisterCsvFileName = latestImportQuery.data?.file_name ?? "";
-  const latestRegisterCsvRunId = scanRegisterRoute
-    ? scanRegisterRunIdFromFileName(scanRegisterRoute, latestRegisterCsvFileName)
-    : null;
-
   // Run retention: the page state is wiped on every navigation, so arriving at a
   // head used to look like nothing had ever run there. Ask the run store for
   // this head's own runs and re-attach one, so the monitor and results survive
@@ -2249,14 +2080,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // prefers-reduced-motion needs no handling. jsdom has no scrollIntoView; the
   // test setup installs a no-op.
   useEffect(() => {
-    // The native single-page scanner lanes show results inline below setup, so
-    // snapping to the hero (top of the setup page) on success would scroll the
-    // operator AWAY from the results they just waited for. Only the stepped
-    // lanes, where Results is a separate view, snap to the top.
-    if (step === "results" && !isSidecarDiscoveryModule) {
+    if (step === "results") {
       heroRef.current?.scrollIntoView({ behavior: "auto", block: "start" });
     }
-  }, [step, isSidecarDiscoveryModule]);
+  }, [step]);
 
   const importMutation = useMutation({
     mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.import`),
@@ -2372,14 +2199,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               provider: scanProvider,
               nmapProfile,
               target: scanTarget,
-              scanRangeStart: ipScanRangeStart,
-              scanRangeEnd: ipScanRangeEnd,
-              probeTimeout: ipProbeTimeout,
-              ignoreRegister:
-                action.runKind === "bacnet_sidecar" ? bacnetIgnoreRegister : ipIgnoreRegister,
-              bacnetInstanceLow,
-              bacnetInstanceHigh,
-              bacnetDiscoverMs,
             }),
             runKind: action.runKind,
             workspace: workspaceRef,
@@ -2396,8 +2215,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           provider: scanProvider,
           nmapProfile,
           target: scanTarget,
-          scanRangeStart: ipScanRangeStart,
-          scanRangeEnd: ipScanRangeEnd,
         });
         // The same header survives a transport retry of this submission. A new
         // button press creates a deliberate new IP run.
@@ -2659,74 +2476,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       setPropertyExpansionNotice(
         error instanceof Error ? error.message : "Property preview failed.",
       );
-    },
-  });
-
-  // bacnet-scanner live object browse: an ephemeral read of one device's live
-  // object list. Unlike the built-in property expansion, it starts no child run
-  // and persists nothing — the sealed scan results are unchanged.
-  const objectBrowseMutation = useMutation({
-    mutationKey: mutationKeys.action(sessionScopeId, "bacnet-scanner.object-browse"),
-    mutationFn: ({ runId, deviceInstance }: { runId: string; deviceInstance: number }) =>
-      browseBacnetScannerObjects({
-        context: { client: apiClient },
-        runId,
-        deviceInstance,
-        authorized: scanAuthorized,
-      }),
-    onSuccess: (result) => setObjectBrowseResult(result),
-  });
-
-  useEffect(() => {
-    setObjectBrowseResult(null);
-  }, [detailRow]);
-
-  // ip-scanner / bacnet-scanner: turn this scan into a reusable register import.
-  // The created import is byte-identical to an upload, so the next scan of that
-  // protocol for this project/site binds and RAG-compares against it. GAP-B4
-  // routes the BACnet lane to its own save-as-register endpoint; the two return
-  // the same ImportBatchSummary, so one mutation + one set of panels serve both.
-  const saveRegisterMutation = useMutation({
-    mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.save-register`),
-    mutationFn: (runId: string) =>
-      module.route === "bacnet-scanner"
-        ? saveBacnetScanRunAsRegister({ context: { client: apiClient }, runId })
-        : module.route === "mqtt-scanner"
-          ? saveMqttScanRunAsRegister({ context: { client: apiClient }, runId })
-          : saveIpScanRunAsRegister({ context: { client: apiClient }, runId }),
-    onSuccess: (summary, runId) => {
-      // A save that resolves after the operator switched runs must not repopulate
-      // the panel the run-change effect just cleared: the note would describe run
-      // A while the page shows run B.
-      if (runId === activeRunRef.current) {
-        setSavedRegister({ runId, summary });
-      }
-      // Mirror importMutation.onSuccess: refresh the "register on file" note.
-      void queryClient.invalidateQueries({
-        queryKey: queryKeys.latestImportRoot(sessionScopeId, workspaceRef),
-      });
-    },
-  });
-
-  useEffect(() => {
-    setSavedRegister(null);
-  }, [activeRun?.runId, activeRun?.epoch]);
-
-  // Read by saveRegisterMutation.onSuccess so a late save is compared against the
-  // run on screen NOW, not the one that was active when the mutation was issued.
-  const activeRunRef = useRef(activeRun?.runId);
-  activeRunRef.current = activeRun?.runId;
-
-  // The live explorer's own save-as-register. A sibling of saveRegisterMutation
-  // rather than a reuse: this one is scoped to the held session, not to a run,
-  // so its result must not claim a run's register CSV is downloadable.
-  const saveLiveRegisterMutation = useMutation({
-    mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.save-live-register`),
-    mutationFn: (sessionId: string) => saveMqttLiveAsRegister({ context: { client: apiClient }, sessionId }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: queryKeys.latestImportRoot(sessionScopeId, workspaceRef),
-      });
     },
   });
 
@@ -3068,11 +2817,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     captureSeconds.trim() === "" || !Number.isFinite(Number(captureSeconds))
       ? captureSeconds
       : String(Number(captureSeconds) * captureUnitSeconds);
-  // The sidecar lane's window is adapter-capped at 900s (MAX_CAPTURE_SECONDS);
-  // the built-in lane keeps its 48-hour ceiling. A page is one route, so this
-  // single value is unambiguous.
-  const mqttCaptureCapSeconds = module.route === "mqtt-scanner" ? 900 : 172_800;
-  const mqttCaptureOverCap = Number(captureSecondsEffective) > mqttCaptureCapSeconds;
+  const mqttCaptureOverCap = Number(captureSecondsEffective) > 172_800;
 
   // Run actions the Run Controls card list renders. Used ONLY to decide which
   // branch the list shows — the map below still walks the full module.runActions
@@ -3509,7 +3254,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   const ipHeadlineMetrics = useMemo<IpHeadlineMetricDisplay[] | null>(() => {
     if (
-      (module.route !== "ip-scanner" && module.route !== "ip-scanner-sct") ||
+      module.route !== "ip-scanner-sct" ||
       !discoveryResultsQuery.data ||
       !finalEvidenceReady
     ) {
@@ -3526,19 +3271,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
 
-  // GAP-C2: the native IP sidecar lane's four-card summary strip. The sidecar
-  // engine records its totals directly on result_summary (not the sealed
-  // ip_headline_metrics_v1 snapshot), so ipHeadlineMetrics above is null here;
-  // read them straight. Gated to a terminal run by finalEvidenceReady.
-  const ipSidecarSummaryCards = useMemo<IpSidecarSummaryCard[] | null>(() => {
-    if (module.route !== "ip-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
-      return null;
-    }
-    return formatIpSidecarSummaryCards(discoveryResultsQuery.data.result_summary);
-  }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
-
   const bacnetHeadlineMetrics = useMemo<BacnetHeadlineMetricDisplay[] | null>(() => {
-    if ((module.route !== "bacnet-scanner" && module.route !== "bacnet-discovery-sct") || !discoveryResultsQuery.data || !finalEvidenceReady) {
+    if (module.route !== "bacnet-discovery-sct" || !discoveryResultsQuery.data || !finalEvidenceReady) {
       return null;
     }
     try {
@@ -3550,77 +3284,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
 
-  // GAP-C2 (BACnet): the native BACnet sidecar lane's six-card summary strip
-  // (register_expected / devices_discovered / register_matches / register_partial
-  // / register_missing / register_rogue). The sidecar engine records its totals
-  // directly on result_summary, not the sealed bacnet_headline_metrics_v1
-  // snapshot, so bacnetHeadlineMetrics above is null here; read them straight.
-  // Gated to a terminal bacnet-scanner run.
-  const bacnetSidecarSummaryCards = useMemo<IpSidecarSummaryCard[] | null>(() => {
-    if (module.route !== "bacnet-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
-      return null;
-    }
-    return formatBacnetSidecarSummaryCards(discoveryResultsQuery.data.result_summary);
-  }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
-
-  // GAP-C2 (MQTT): the native MQTT sidecar lane's four-card summary strip
-  // (Topics / Assets / Matches / Rogue), read straight from the mqtt_scanner
-  // engine's result_summary totals. Gated to a terminal mqtt-scanner capture run.
-  const mqttSidecarSummaryCards = useMemo<IpSidecarSummaryCard[] | null>(() => {
-    if (module.route !== "mqtt-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
-      return null;
-    }
-    return formatMqttSidecarSummaryCards(discoveryResultsQuery.data.result_summary);
-  }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
-
-  // Sidecar-only router/BBMD visibility: bacnet_scanner stamps result_summary.routers
-  // (the built-in engine never does). null = no router section at all (absent key);
-  // [] = the scan heard no router (render the "none responded" note).
-  const bacnetRouters = useMemo<BacnetRouterDisplay[] | null>(() => {
-    if (module.route !== "bacnet-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
-      return null;
-    }
-    return formatBacnetRouters(discoveryResultsQuery.data.result_summary.routers);
-  }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
-
-  // ip-scanner / bacnet-scanner save-as-register (and BACnet export-assets) are
-  // offered only once a scan has succeeded and recorded devices (a failed/empty/
-  // dry-run scan has nothing to save or export). MQTT save-as-register (GAP-M5)
-  // reads the same gate off the run's persisted topics instead of devices.
-  const saveableDeviceCount =
-    (module.route === "ip-scanner" || module.route === "bacnet-scanner") &&
-    activeRunStatus === "succeeded"
-      ? (discoveryResultsQuery.data?.devices?.length ?? 0)
-      : 0;
-  const saveableMqttTopicCount =
-    module.route === "mqtt-scanner" && activeRunStatus === "succeeded"
-      ? (discoveryResultsQuery.data?.topics?.length ?? 0)
-      : 0;
-
-  // MQTT live topic tree (M4a): a held broker session streamed to the browser.
-  // Read-only; nothing persists. Shares the capture panel's topic filter + the
-  // page's scan-authorization consent.
-  const mqttLive = useMqttLiveSession(
-    module.route === "mqtt-scanner",
-    { workspace: workspaceRef, authorized: scanAuthorized, rootFilter: captureTopicFilter.trim() || undefined },
-    apiClient,
-  );
-
-  // saveLiveRegisterMutation's panel reports what THIS session saved. A new
-  // session (or a stop) makes that claim stale, so clear it with the session
-  // identity rather than letting a previous session's "Saved as register" note
-  // sit over a fresh tree.
-  const liveSessionId = mqttLive.session?.session_id ?? null;
-  const resetLiveRegisterSave = saveLiveRegisterMutation.reset;
-  useEffect(() => {
-    resetLiveRegisterSave();
-  }, [liveSessionId, resetLiveRegisterSave]);
-
   // BACnet-only provenance: read result_summary.backend so simulated sample
   // devices are never mistaken for a real on-wire scan. Null for other routes
   // and until a terminal run's results arrive.
   const bacnetBackend = useMemo(() => {
-    if ((module.route !== "bacnet-scanner" && module.route !== "bacnet-discovery-sct") || !discoveryResultsQuery.data) {
+    if (module.route !== "bacnet-discovery-sct" || !discoveryResultsQuery.data) {
       return null;
     }
     return bacnetBackendLabel(discoveryResultsQuery.data);
@@ -3925,7 +3593,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Non-compliant (amber) with Pass-with-notes and paints Offline red. Discovery
   // (ip/bacnet) keeps the RAG pass/fail/warn tones, where tone == verdict.
   const resultsToneOptions =
-    module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct"
+    module.route === "mqtt-discovery-sct"
       ? [
           { label: "All verdicts", value: "all" },
           { label: "In register", value: "pass" },
@@ -3941,18 +3609,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             { label: "Not observed this run", value: "offline" },
             { label: "No verdict", value: "none" },
           ]
-        : // The native IP/BACnet scanners tone their rows from the register
-          // verdict, so the filter names the verdict rather than the tone.
-          // Missing and Rogue share the red tone and so share one option.
-          module.route === "ip-scanner" || module.route === "bacnet-scanner"
-          ? [
-              { label: "All verdicts", value: "all" },
-              { label: "Match", value: "pass" },
-              { label: "Partial", value: "warn" },
-              { label: "Missing / Rogue", value: "fail" },
-              { label: "No verdict", value: "none" },
-            ]
-          : [
+        : [
               { label: "All verdicts", value: "all" },
               { label: "Pass", value: "pass" },
               { label: "Fail", value: "fail" },
@@ -3983,7 +3640,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // the row's stringified "Raw Payload" cell. Null off the mqtt-discovery route,
   // before results land, or when nothing is selected.
   const selectedMqttTopic = useMemo<DiscoveryRowRecord | null>(() => {
-    if ((module.route !== "mqtt-scanner" && module.route !== "mqtt-discovery-sct") || !discoveryResultsQuery.data || !selectedResult) {
+    if (module.route !== "mqtt-discovery-sct" || !discoveryResultsQuery.data || !selectedResult) {
       return null;
     }
     const topic = selectedResult.Topic;
@@ -4374,9 +4031,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     generatedAllBundleDownload.reset();
     const reportType: ReportType =
       activeRun.kind === "discovery"
-        ? ((module.route === "ip-scanner" || module.route === "ip-scanner-sct"
+        ? ((module.route === "ip-scanner-sct"
             ? "ip_discovery"
-            : module.route === "bacnet-scanner" || module.route === "bacnet-discovery-sct"
+            : module.route === "bacnet-discovery-sct"
               ? "bacnet_discovery"
               : "mqtt_discovery") as ReportType)
         : validationRunQuery.data?.job_type === "udmi_validation"
@@ -4552,7 +4209,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       activeRunMatchesReservedLiveSubmission ||
       activeRunMatchesDefinitiveLiveRejection ||
       activeRun?.kind !== "discovery" ||
-      (module.route !== "mqtt-scanner" && module.route !== "mqtt-discovery-sct")
+      module.route !== "mqtt-discovery-sct"
     ) {
       return;
     }
@@ -4591,11 +4248,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       // Frictionless deployments need no sealed preview/authorization ids.
       (!scanAuthorized || (authorizationEnforced && (!scanPreviewRunId || !scanAuthorizationId)))) ||
     (module.route === "mqtt-discovery-sct" && !scanDryRun && !scanAuthorized) ||
-    // Native IP/BACnet/MQTT scanner runs post authorized=scanAuthorized and are
-    // rejected server-side; gate Run on the same flag so the disabled state is
-    // honest instead of a click that fails at the backend. Dry-run is hidden for
-    // these lanes (scanDryRun stays false), so no dry-run escape hatch is needed.
-    (isSidecarDiscoveryModule && !scanAuthorized) ||
     nmapSelectionBlocked;
 
   const jumpToPayloadComparison = useCallback((payloadKey: string) => {
@@ -4787,36 +4439,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             ))}
           </section>
         )}
-        {ipSidecarSummaryCards && (
-          <section className="ip-headline-metrics" aria-label="IP scan summary">
-            {ipSidecarSummaryCards.map((card) => (
-              <article key={card.heading}>
-                <strong>{card.value}</strong>
-                <span>{card.heading}</span>
-              </article>
-            ))}
-          </section>
-        )}
-        {bacnetSidecarSummaryCards && (
-          <section className="ip-headline-metrics" aria-label="BACnet scan summary">
-            {bacnetSidecarSummaryCards.map((card) => (
-              <article key={card.heading}>
-                <strong>{card.value}</strong>
-                <span>{card.heading}</span>
-              </article>
-            ))}
-          </section>
-        )}
-        {mqttSidecarSummaryCards && (
-          <section className="ip-headline-metrics" aria-label="MQTT capture summary">
-            {mqttSidecarSummaryCards.map((card) => (
-              <article key={card.heading}>
-                <strong>{card.value}</strong>
-                <span>{card.heading}</span>
-              </article>
-            ))}
-          </section>
-        )}
         {bacnetHeadlineMetrics && (
           <section className="ip-headline-metrics" aria-label="BACnet discovery headline metrics">
             {bacnetHeadlineMetrics.map((metric) => (
@@ -4882,10 +4504,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         </section>
       )}
 
-      {/* The native scanner lanes (IP / BACnet / MQTT sidecars) present as one
-          scrolling page, so they drop the Setup / Run / Results wizard. The
-          sealed built-in lanes and every other module keep it. */}
-      {!isSidecarDiscoveryModule && module.route !== "reports" && (
+      {module.route !== "reports" && (
         <StepNav
           step={step}
           onStep={setStep}
@@ -4895,9 +4514,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       )}
 
       <div
-        className={`module-steps${module.route === "reports" ? " reports-module-steps" : ""}${
-          isSidecarDiscoveryModule ? " single-page-module-steps" : ""
-        }`}
+        className={`module-steps${module.route === "reports" ? " reports-module-steps" : ""}`}
         data-step={step}
       >
         {module.route !== "reports" && (
@@ -4937,14 +4554,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       setImportOutcome(null);
                     }}
                     onUpload={handleImport}
-                    registerCsv={{
-                      download: registerCsvDownload,
-                      fallbackFilename: latestRegisterCsvFileName,
-                      path:
-                        scanRegisterRoute && latestRegisterCsvRunId
-                          ? getScanRegisterCsvPath(scanRegisterRoute, latestRegisterCsvRunId)
-                          : null,
-                    }}
                     selectedFile={selectedFile}
                     selectedProfile={selectedProfile}
                     templateDownload={templateDownload}
@@ -4963,137 +4572,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             <article className="surface">
               <div className="surface-heading">
                 <div>
-                  <h3>{isSidecarDiscoveryModule ? "Scan setup" : "Run Controls"}</h3>
+                  <h3>Run Controls</h3>
                 </div>
               </div>
 
               {isDiscoveryModule && (
                 <div className="form-stack scan-authorization">
-                  {module.route === "ip-scanner" && (
-                    <div className="form-stack">
-                      <div>
-                        <strong className="eyebrow">Source Interface</strong>
-                        <SourceInterfaceDetails
-                          enumerationFailed={systemInterfacesQuery.isError}
-                          enumerationPending={systemInterfacesQuery.isLoading}
-                          interfaces={
-                            Array.isArray(systemInterfacesQuery.data)
-                              ? systemInterfacesQuery.data
-                              : []
-                          }
-                          value={sourceInterfaceCidr ?? ""}
-                        />
-                      </div>
-                      <label>
-                        Start IP
-                        <input
-                          inputMode="decimal"
-                          onChange={(event) => setIpScanRangeStart(event.target.value)}
-                          placeholder="10.0.10.1"
-                          value={ipScanRangeStart}
-                        />
-                      </label>
-                      <label>
-                        End IP
-                        <input
-                          inputMode="decimal"
-                          onChange={(event) => setIpScanRangeEnd(event.target.value)}
-                          placeholder="10.0.10.254"
-                          value={ipScanRangeEnd}
-                        />
-                        <small>
-                          A start address is required. Leave the end blank to scan a single host.
-                        </small>
-                      </label>
-                      <label>
-                        Per-probe timeout (ms)
-                        <input
-                          inputMode="numeric"
-                          onChange={(event) => setIpProbeTimeout(event.target.value)}
-                          placeholder="1000"
-                          value={ipProbeTimeout}
-                        />
-                        <small>How long to wait for each host to answer. Blank uses the default.</small>
-                      </label>
-                      <label className="confirm-row">
-                        <input
-                          checked={ipIgnoreRegister}
-                          onChange={(event) => setIpIgnoreRegister(event.target.checked)}
-                          type="checkbox"
-                        />
-                        Ignore register for this run (scan without RAG comparison)
-                      </label>
-                    </div>
-                  )}
-                  {module.route === "bacnet-scanner" && (
-                    <div className="form-stack">
-                      <div>
-                        <strong className="eyebrow">Source Interface</strong>
-                        <SourceInterfaceDetails
-                          enumerationFailed={systemInterfacesQuery.isError}
-                          enumerationPending={systemInterfacesQuery.isLoading}
-                          interfaces={
-                            Array.isArray(systemInterfacesQuery.data)
-                              ? systemInterfacesQuery.data
-                              : []
-                          }
-                          value={sourceInterfaceCidr ?? ""}
-                        />
-                      </div>
-                      <label>
-                        Device instance range — low
-                        <input
-                          inputMode="numeric"
-                          onChange={(event) => setBacnetInstanceLow(event.target.value)}
-                          placeholder="e.g. 1000"
-                          value={bacnetInstanceLow}
-                        />
-                      </label>
-                      <label>
-                        Device instance range — high
-                        <input
-                          inputMode="numeric"
-                          onChange={(event) => setBacnetInstanceHigh(event.target.value)}
-                          placeholder="e.g. 1999"
-                          value={bacnetInstanceHigh}
-                        />
-                        <small>Leave both blank for a global Who-Is across all device instances.</small>
-                      </label>
-                      {bacnetInstanceRange.error && (
-                        <p className="error-text" role="alert">
-                          {bacnetInstanceRange.error}
-                        </p>
-                      )}
-                      <label>
-                        Discovery window (ms)
-                        <input
-                          inputMode="numeric"
-                          onChange={(event) => setBacnetDiscoverMs(event.target.value)}
-                          placeholder="e.g. 5000"
-                          value={bacnetDiscoverMs}
-                        />
-                        <small>How long to listen for I-Am replies. Blank uses the default window.</small>
-                      </label>
-                      <label className="confirm-row">
-                        <input
-                          checked={bacnetIgnoreRegister}
-                          onChange={(event) => setBacnetIgnoreRegister(event.target.checked)}
-                          type="checkbox"
-                        />
-                        Ignore register for this run (scan without RAG comparison)
-                      </label>
-                    </div>
-                  )}
-                  {!isSidecarDiscoveryModule && (
-                    <label className="confirm-row">
-                      <input
-                        checked={scanDryRun}
-                        onChange={(event) => setScanDryRun(event.target.checked)}
-                        type="checkbox"
-                      />
-                      Dry run — preview the scan plan with no network I/O (no authorization needed).
-                    </label>
-                  )}
+                  <label className="confirm-row">
+                    <input
+                      checked={scanDryRun}
+                      onChange={(event) => setScanDryRun(event.target.checked)}
+                      type="checkbox"
+                    />
+                    Dry run — preview the scan plan with no network I/O (no authorization needed).
+                  </label>
                   {!scanDryRun && authorizationEnforced && (
                     <>
                       <label className="confirm-row">
@@ -5243,21 +4735,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     // One confirmed live run owns the monitor and Stop action. A
                     // restored run blocks another start exactly like one submitted
                     // in this session.
-                    // Honest feedback for a half-filled / out-of-range BACnet
-                    // instance range: gate Run instead of letting it degrade to a
-                    // global Who-Is (the builder omits the pair, so a submit here
-                    // would silently scan everything).
-                    const bacnetRangeBlocked =
-                      action.kind === "discovery" &&
-                      action.runKind === "bacnet_sidecar" &&
-                      bacnetInstanceRange.error !== null;
                     const blocked =
                       scanBlocked ||
                       !canEngineer ||
                       overCapBlocked ||
                       startedRunActive ||
-                      runAccessClosed ||
-                      bacnetRangeBlocked;
+                      runAccessClosed;
                     // Role gate takes priority in the tooltip; otherwise the existing
                     // scan-authorization hint is shown for a blocked real scan.
                     const blockedTooltip = !canEngineer
@@ -5271,18 +4754,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           : scanBlocked
                             ? isSealedNetworkDiscoveryModule
                               ? "Confirm scan authorization and select a sealed preview (or enable dry run) before starting a real scan."
-                              : isSidecarDiscoveryModule
-                                ? "Confirm scan authorization before starting this scan."
-                                : "Confirm broker-capture authorization (or enable dry run) before starting a real capture."
+                              : "Confirm broker-capture authorization (or enable dry run) before starting a real capture."
                             : mqttOverCapBlocked
-                              ? module.route === "mqtt-scanner"
-                                ? "Run time exceeds the 15-minute scanner capture limit."
-                                : "Run time exceeds the 48-hour capture limit."
+                              ? "Run time exceeds the 48-hour capture limit."
                               : overCapBlocked
                                 ? "Run time exceeds the 48-hour capture limit."
-                                : bacnetRangeBlocked
-                                  ? (bacnetInstanceRange.error ?? undefined)
-                                  : undefined;
+                                : undefined;
                     return (
                       <div className="run-card" key={action.id}>
                         <div>
@@ -5537,8 +5014,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       )}
                     {canEngineer &&
                       activeRunAuthoritativelyTerminal &&
-                      runController.phase !== "submitting" &&
-                      !isSidecarDiscoveryModule && (
+                      runController.phase !== "submitting" && (
                       <ReportFromRunControls
                         format={reportExportFormat}
                         isUdmiRun={
@@ -5867,7 +5343,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           </section>
         )}
 
-        {(module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct") && (
+        {module.route === "mqtt-discovery-sct" && (
           <section className="surface" data-stepgroup="run">
             <div className="surface-heading">
               <div>
@@ -5918,17 +5394,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </small>
               </label>
               <label>
-                {module.route === "mqtt-scanner"
-                  ? "Run time (blank = 60-second default window)"
-                  : "Run time (blank = run until all assets/topics seen or until the user stops the run)"}
+                Run time (blank = run until all assets/topics seen or until the user stops the run)
                 <input
                   inputMode="numeric"
                   onChange={(event) => setCaptureSeconds(event.target.value)}
-                  placeholder={
-                    module.route === "mqtt-scanner"
-                      ? "blank = 60-second default"
-                      : "blank = run until you stop the run"
-                  }
+                  placeholder="blank = run until you stop the run"
                   value={captureSeconds}
                 />
               </label>
@@ -5948,28 +5418,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             </div>
             {mqttCaptureOverCap && (
               <span className="error-text">
-                {module.route === "mqtt-scanner"
-                  ? "Run time exceeds the 15-minute scanner capture limit — shorten the window."
-                  : "Run time exceeds the 48-hour capture limit — shorten the window."}
+                Run time exceeds the 48-hour capture limit — shorten the window.
               </span>
             )}
-            {/* The live view and a capture run share the sidecar's single broker
-                connection, so they are mutually exclusive (the run route 409s
-                while a live session is held). Surface that here instead of
-                letting the capture fail mysteriously. */}
-            {module.route === "mqtt-scanner" &&
-              (mqttLive.phase === "live" ||
-                mqttLive.phase === "connecting" ||
-                mqttLive.phase === "reconnecting" ||
-                mqttLive.phase === "unavailable") && (
-                <div className="state-panel" role="status">
-                  <strong>Stop the live view before capturing</strong>
-                  <span>
-                    The live topic tree holds the broker connection. A capture run needs that same
-                    connection, so stop the live view below before you start a capture.
-                  </span>
-                </div>
-              )}
             <p className="section-copy">
               Subscribes through an MQTT discovery run and shows the latest payload seen per topic.
               The live broker capture is on-site-untested here; with no broker reachable the run
@@ -5978,14 +5429,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <strong>
                 {Number(captureSecondsEffective) > 0
                   ? `${captureSecondsEffective}s`
-                  : module.route === "mqtt-scanner"
-                    ? "blank (60-second default window)"
-                    : "blank (run until you press Stop run)"}
+                  : "blank (run until you press Stop run)"}
               </strong>
               .{" "}
-              {module.route === "mqtt-scanner"
-                ? "Blank captures for the 60-second default; the window is capped at 15 minutes. Stop run ends the capture early."
-                : "Blank runs until you press Stop run, the 500-distinct-topic cap, or the 48-hour safety limit. Closing the app ends the run, which is then marked interrupted at next start."}{" "}
+              Blank runs until you press Stop run, the 500-distinct-topic cap, or the 48-hour safety
+              limit. Closing the app ends the run, which is then marked interrupted at next start.{" "}
               Captured topics appear here when the run completes.
             </p>
             {activeRunTerminal &&
@@ -6050,244 +5498,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   ? captureTopicsQuery.error.message
                   : "request failed"}
               </span>
-            )}
-          </section>
-        )}
-
-        {module.route === "mqtt-scanner" && (
-          <section className="surface" data-stepgroup="run">
-            <div className="surface-heading">
-              <div>
-                <h3>Live Topic Tree</h3>
-                <p className="section-copy">
-                  Watch broker topics in real time. Nothing is persisted; run a capture above when you
-                  need saved evidence.
-                </p>
-              </div>
-              <div className="inline-actions">
-                {mqttLive.phase === "live" ||
-                mqttLive.phase === "connecting" ||
-                mqttLive.phase === "reconnecting" ||
-                mqttLive.phase === "unavailable" ? (
-                  <button
-                    className="secondary-button compact"
-                    disabled={!canEngineer}
-                    onClick={() => void mqttLive.stop()}
-                    title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
-                    type="button"
-                  >
-                    Stop live view
-                  </button>
-                ) : (
-                  <button
-                    className="secondary-button compact"
-                    disabled={!canEngineer || !scanAuthorized}
-                    onClick={() => void mqttLive.start()}
-                    title={
-                      !canEngineer
-                        ? ENGINEER_REQUIRED_TOOLTIP
-                        : !scanAuthorized
-                          ? "Tick the scan-authorization checkbox first."
-                          : undefined
-                    }
-                    type="button"
-                  >
-                    Start live view
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {mqttLive.error && (mqttLive.phase === "error" || mqttLive.phase === "unavailable") && (
-              <div className="state-panel error" role="alert">
-                <strong>Live session problem</strong>
-                <span>{mqttLive.error}</span>
-              </div>
-            )}
-
-            {mqttLive.phase === "occupied" && mqttLive.status?.session ? (
-              <div className="state-panel" role="status">
-                <strong>A live session is already open</strong>
-                <span>Held by {mqttLive.status.session.owner}. Take over to replace it.</span>
-                <div className="detail-actions">
-                  <button
-                    className="secondary-button compact"
-                    disabled={!canEngineer || !scanAuthorized}
-                    onClick={() => void mqttLive.start({ takeOver: true })}
-                    title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
-                    type="button"
-                  >
-                    Take over
-                  </button>
-                </div>
-              </div>
-            ) : mqttLive.phase === "live" && mqttLive.snapshot ? (
-              <>
-                <div className="publish-grid capture-controls">
-                  <form
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void mqttLive.search(mqttLiveSearch.trim(), mqttLiveMatchedOnly);
-                    }}
-                  >
-                    <label>
-                      Search live topics
-                      <input
-                        onChange={(event) => setMqttLiveSearch(event.target.value)}
-                        placeholder="Topic, asset, or payload text — press Enter to filter"
-                        value={mqttLiveSearch}
-                      />
-                    </label>
-                    {/* GAP-M4: matched-only rides the same server-side search;
-                        toggling it re-runs the filter immediately. */}
-                    <label className="confirm-row">
-                      <input
-                        checked={mqttLiveMatchedOnly}
-                        onChange={(event) => {
-                          const next = event.target.checked;
-                          setMqttLiveMatchedOnly(next);
-                          void mqttLive.search(mqttLiveSearch.trim(), next);
-                        }}
-                        type="checkbox"
-                      />
-                      Registered assets only
-                    </label>
-                  </form>
-                  <div className="inline-actions">
-                    <button
-                      className="secondary-button compact"
-                      disabled={!canEngineer}
-                      onClick={() => void mqttLive.subscribe(captureTopicFilter.trim() || "#")}
-                      title={
-                        canEngineer
-                          ? "Re-subscribe the live session to the topic filter set above."
-                          : ENGINEER_REQUIRED_TOOLTIP
-                      }
-                      type="button"
-                    >
-                      Apply subscription filter
-                    </button>
-                    <button
-                      className="secondary-button compact"
-                      disabled={!canEngineer || mqttPublishOpen}
-                      onClick={() => {
-                        setMqttPublishPrefill(null);
-                        setMqttPublishOpen(true);
-                      }}
-                      title={canEngineer ? "Publish one message to a topic (sealed preview + admin approval)." : ENGINEER_REQUIRED_TOOLTIP}
-                      type="button"
-                    >
-                      Publish message…
-                    </button>
-                    <button
-                      className="secondary-button compact"
-                      disabled={!canEngineer || !mqttLive.session || saveLiveRegisterMutation.isPending}
-                      onClick={() => {
-                        const sessionId = mqttLive.session?.session_id;
-                        if (sessionId) {
-                          saveLiveRegisterMutation.mutate(sessionId);
-                        }
-                      }}
-                      title={
-                        canEngineer
-                          ? "Turn the assets this live session has discovered into an expected-asset MQTT register. It is stored here, applied automatically to the next capture for this project and site, and pushed back so the tree below recolours now."
-                          : ENGINEER_REQUIRED_TOOLTIP
-                      }
-                      type="button"
-                    >
-                      {saveLiveRegisterMutation.isPending ? "Saving register..." : "Save as register"}
-                    </button>
-                  </div>
-                </div>
-                {saveLiveRegisterMutation.isSuccess && saveLiveRegisterMutation.data && (
-                  <div className="state-panel success" role="status">
-                    <strong>Saved as register</strong>
-                    <span>
-                      {saveLiveRegisterMutation.data.accepted_rows} of{" "}
-                      {saveLiveRegisterMutation.data.total_rows} rows accepted (
-                      {saveLiveRegisterMutation.data.import_id}).{" "}
-                      {saveLiveRegisterMutation.data.accepted_rows > 0
-                        ? "The live tree now compares against it, and so will the next MQTT capture for this project and site."
-                        : "No row was accepted, so nothing changed here and the next capture will not use this import."}
-                    </span>
-                  </div>
-                )}
-                {saveLiveRegisterMutation.isError && (
-                  <div className="state-panel error" role="alert">
-                    <strong>Save as register failed</strong>
-                    <span>
-                      {saveLiveRegisterMutation.error instanceof Error
-                        ? saveLiveRegisterMutation.error.message
-                        : "The register could not be created."}
-                    </span>
-                  </div>
-                )}
-                {mqttPublishOpen && (
-                  <MqttPublishModal
-                    apiClient={apiClient}
-                    authorizationEnforced={authorizationEnforced}
-                    defaultTopic={mqttPublishPrefill?.topic}
-                    defaultPayload={mqttPublishPrefill?.payload}
-                    defaultRetain={mqttPublishPrefill ? true : undefined}
-                    onClose={() => {
-                      setMqttPublishOpen(false);
-                      setMqttPublishPrefill(null);
-                    }}
-                    workspace={workspaceRef}
-                  />
-                )}
-                <div className="live-console-kpis" aria-live="polite">
-                  <div>
-                    <span className="live-console-pulse" aria-hidden="true" /> Broker
-                    <strong>{mqttLive.snapshot.status.status}</strong>
-                  </div>
-                  <div>
-                    <span>Topics</span>
-                    <strong>{mqttLive.snapshot.stats.topicsDiscovered}</strong>
-                  </div>
-                  <div>
-                    <span>Live assets</span>
-                    <strong>{mqttLive.snapshot.stats.liveAssets}</strong>
-                  </div>
-                  <div>
-                    <span>Messages</span>
-                    <strong>{mqttLive.snapshot.stats.totalMessages}</strong>
-                  </div>
-                  <div>
-                    <span>Issues</span>
-                    <strong>{mqttLive.snapshot.stats.issues}</strong>
-                  </div>
-                </div>
-                <MqttLiveTopicTree
-                  lastActivity={mqttLive.lastActivity}
-                  onFocus={(asset) => void mqttLive.focus(asset)}
-                  totalTopics={mqttLive.snapshot.totalTopics}
-                  tree={mqttLive.snapshot.tree}
-                  treeShown={mqttLive.snapshot.treeShown}
-                />
-                {mqttLive.snapshot.focused ? (
-                  <MqttFocusedDetail
-                    canEngineer={canEngineer}
-                    focused={mqttLive.snapshot.focused}
-                    onWriteConfig={(topic, payload) => {
-                      // GAP-M7: open the sealed publish lane prefilled with the
-                      // device's config topic + last-seen config payload, retain on.
-                      setMqttPublishPrefill({ topic, payload });
-                      setMqttPublishOpen(true);
-                    }}
-                  />
-                ) : null}
-              </>
-            ) : mqttLive.phase === "connecting" ? (
-              <div className="state-panel" role="status">
-                <strong>Opening live session…</strong>
-                <span>Connecting to the broker through the sidecar.</span>
-              </div>
-            ) : (
-              <div className="state-panel" role="status">
-                <strong>Live view not running</strong>
-                <span>Start a live view to watch broker topics as they arrive. Nothing is persisted.</span>
-              </div>
             )}
           </section>
         )}
@@ -7183,85 +6393,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <h3>{workspace?.tableTitle ?? "Workflow Results"}</h3>
                 </div>
                 <div className="inline-actions">
-                  {(module.route === "ip-scanner" ||
-                    module.route === "bacnet-scanner" ||
-                    module.route === "mqtt-scanner") && (
-                    <button
-                      className="secondary-button compact"
-                      disabled={
-                        !canEngineer ||
-                        !(saveableDeviceCount || saveableMqttTopicCount) ||
-                        saveRegisterMutation.isPending
-                      }
-                      onClick={() => activeRun && saveRegisterMutation.mutate(activeRun.runId)}
-                      title={
-                        canEngineer
-                          ? `${
-                              module.route === "bacnet-scanner"
-                                ? "Turn this scan's discovered devices into an expected-device register (their reported object counts become the expected objects)."
-                                : module.route === "mqtt-scanner"
-                                  ? "Turn this capture's discovered assets into an expected-asset MQTT register (one row per asset, with its topic, schema, site and location)."
-                                  : "Turn this scan's responding devices into an expected-device register (their open ports become the expected ports)."
-                            } It is stored here and applied automatically to the next scan for this project and site; no file is uploaded, and you can download it as a CSV afterwards.`
-                          : ENGINEER_REQUIRED_TOOLTIP
-                      }
-                      type="button"
-                    >
-                      {saveRegisterMutation.isPending ? "Saving register..." : "Save scan as register"}
-                    </button>
-                  )}
-                  {module.route === "mqtt-scanner" &&
-                    typeof discoveryResultsQuery.data?.result_summary?.raw_evidence_artifact_id ===
-                      "string" &&
-                    activeRun && (
-                      <button
-                        className="secondary-button compact"
-                        disabled={mqttArchiveDownload.pendingKey !== null}
-                        onClick={() => {
-                          const artifactId = String(
-                            discoveryResultsQuery.data?.result_summary?.raw_evidence_artifact_id,
-                          );
-                          void mqttArchiveDownload.download({
-                            fallbackFilename: `mqtt-capture-archive-${activeRun.runId}.zip`,
-                            key: "mqtt-archive",
-                            path: getRawEvidenceDownloadPath(activeRun.runId, artifactId),
-                          });
-                        }}
-                        title="Download this capture's raw export archive (per-topic payloads + history), attached to the run as evidence."
-                        type="button"
-                      >
-                        {mqttArchiveDownload.pendingKey === "mqtt-archive"
-                          ? "Downloading..."
-                          : "Download capture archive"}
-                      </button>
-                    )}
-                  {module.route === "bacnet-scanner" && (
-                    <button
-                      className="secondary-button compact"
-                      disabled={
-                        !canEngineer || !saveableDeviceCount || bacnetAssetsDownload.pendingKey !== null
-                      }
-                      onClick={() => {
-                        if (activeRun) {
-                          void bacnetAssetsDownload.download({
-                            fallbackFilename: `bacnet-assets-${activeRun.runId}.zip`,
-                            key: "bacnet-assets",
-                            path: getBacnetExportAssetsPath(activeRun.runId),
-                          });
-                        }
-                      }}
-                      title={
-                        canEngineer
-                          ? "Download every discovered device's object list as per-asset JSON + XLSX (one folder each) in a ZIP, rebuilt from this run's saved results."
-                          : ENGINEER_REQUIRED_TOOLTIP
-                      }
-                      type="button"
-                    >
-                      {bacnetAssetsDownload.pendingKey === "bacnet-assets"
-                        ? "Exporting assets..."
-                        : "Export assets"}
-                    </button>
-                  )}
                   <button
                     className="secondary-button compact"
                     disabled={
@@ -7284,82 +6415,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </div>
               </div>
 
-              {scanRegisterRoute && savedRegister && savedRegister.runId === activeRun?.runId && (
-                <div className="state-panel success" role="status">
-                  <strong>Saved as register</strong>
-                  <span>
-                    {savedRegister.summary.file_name}: {savedRegister.summary.accepted_rows} of{" "}
-                    {savedRegister.summary.total_rows} rows accepted (
-                    {savedRegister.summary.import_id}). It is stored
-                    here and applies automatically to the next{" "}
-                    {scanRegisterRoute === "bacnet-scanner"
-                      ? "BACnet"
-                      : scanRegisterRoute === "mqtt-scanner"
-                        ? "MQTT"
-                        : "IP"}{" "}
-                    {scanRegisterRoute === "mqtt-scanner" ? "capture" : "Discovery run"} for this
-                    project and site. There is nothing to upload. Keep a copy if you want one:
-                  </span>
-                  <button
-                    className="secondary-button compact"
-                    disabled={registerCsvDownload.pendingKey !== null}
-                    onClick={() => {
-                      void registerCsvDownload.download({
-                        fallbackFilename: savedRegister.summary.file_name,
-                        key: "register-csv",
-                        // The run that was SAVED, so the file and the URL always
-                        // describe the same run.
-                        path: getScanRegisterCsvPath(scanRegisterRoute, savedRegister.runId),
-                      });
-                    }}
-                    type="button"
-                  >
-                    {registerCsvDownload.pendingKey === "register-csv"
-                      ? "Downloading..."
-                      : "Download register CSV"}
-                  </button>
-                </div>
-              )}
-              {(module.route === "ip-scanner" ||
-                module.route === "bacnet-scanner" ||
-                module.route === "mqtt-scanner") &&
-                saveRegisterMutation.isError && (
-                  <div className="state-panel error" role="alert">
-                    <strong>Save as register failed</strong>
-                    <span>
-                      {saveRegisterMutation.error instanceof Error
-                        ? saveRegisterMutation.error.message
-                        : "The register could not be created."}
-                    </span>
-                  </div>
-                )}
-              {module.route === "bacnet-scanner" && bacnetAssetsDownload.error && (
-                <div className="state-panel error" role="alert">
-                  <strong>Export assets failed</strong>
-                  <span>{bacnetAssetsDownload.error}</span>
-                </div>
-              )}
-              {module.route === "mqtt-scanner" && mqttArchiveDownload.error && (
-                <div className="state-panel error" role="alert">
-                  <strong>Capture archive download failed</strong>
-                  <span>{mqttArchiveDownload.error}</span>
-                </div>
-              )}
-              {scanRegisterRoute && registerCsvDownload.error && (
-                <div className="state-panel error" role="alert">
-                  <strong>Register CSV download failed</strong>
-                  <span>{registerCsvDownload.error}</span>
-                </div>
-              )}
-
               {usingLiveResults && (
                 <div className="sample-banner" role="note">
                   {isDiscoveryModule ? (
-                    module.route === "ip-scanner" ? (
-                      'Live discovery observations. With a register uploaded, the Result column reports this scan’s register verdict — a red "Missing" row is a host the register expects that did not answer, and a red "Rogue" row answered but is not in the register. Silence is inconclusive: a TCP-connect miss is not proof a host is absent.'
-                    ) : module.route === "ip-scanner-sct" ? (
+                    module.route === "ip-scanner-sct" ? (
                       'Live discovery observations. The Result column reports this scan’s response and register-port verdicts; "no response on scanned ports" is inconclusive — a TCP-connect miss is not proof a host is absent.'
-                    ) : (module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct") &&
+                    ) : module.route === "mqtt-discovery-sct" &&
                       discoveryResultsQuery.data?.register_comparison ? (
                       discoveryResultsQuery.data.register_comparison.register_available ? (
                         <>
@@ -7375,8 +6436,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       ) : (
                         "No accepted MQTT register import for this project/site — upload one to compare observed topics against the template."
                       )
-                    ) : module.route === "bacnet-scanner" ? (
-                      'Live discovery observations. With a register uploaded, the Result column reports this scan’s register verdict — a red "Missing" row is a device the register expects that answered no Who-Is, and a red "Rogue" row answered but is not in the register.'
                     ) : (
                       // No register comparison available (the built-in discovery
                       // lanes, or an MQTT run that observed nothing / has no
@@ -7424,7 +6483,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     <input
                       onChange={(event) => setResultsTextFilter(event.target.value)}
                       placeholder={
-                        module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct"
+                        module.route === "mqtt-discovery-sct"
                           ? "Topic path, asset, payload text, status — or an MQTT wildcard (+/#)"
                           : resultsTopicColumn
                             ? "Topic path, asset, status — or an MQTT wildcard (+/#)"
@@ -7634,52 +6693,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
             </article>
 
-            {module.route === "bacnet-scanner" && !runAccessClosed && activeRunAuthoritativelyTerminal && bacnetRouters !== null && (
-              <section className="surface" aria-labelledby="bacnet-routers-heading">
-                <div className="surface-heading">
-                  <div>
-                    <h3 id="bacnet-routers-heading">Routers / BBMDs</h3>
-                    <p className="section-copy">
-                      BACnet/IP routers and BBMDs that answered Who-Is-Router during discovery, and the
-                      remote network numbers they advertise.
-                    </p>
-                  </div>
-                  <span className="results-filter-count">
-                    {`${bacnetRouters.length} router${bacnetRouters.length === 1 ? "" : "s"}`}
-                  </span>
-                </div>
-                {bacnetRouters.length === 0 ? (
-                  <div className="empty-workspace">
-                    <strong>No BACnet routers responded</strong>
-                    <span>
-                      No Who-Is-Router replies were heard during discovery — a recorded result, not an
-                      error.
-                    </span>
-                  </div>
-                ) : (
-                  <div className="data-table-wrap results-scroll">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th scope="col">Router Address</th>
-                          <th scope="col">Reachable Networks</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {bacnetRouters.map((router) => (
-                          <tr key={router.address}>
-                            <td>{router.address}</td>
-                            <td>{router.networks || "—"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </section>
-            )}
-
-            {(module.route === "bacnet-scanner" || module.route === "bacnet-discovery-sct") && !runAccessClosed && activeRunAuthoritativelyTerminal && (
+            {module.route === "bacnet-discovery-sct" && !runAccessClosed && activeRunAuthoritativelyTerminal && (
               <section className="surface" aria-labelledby="bacnet-points-heading">
                 <div className="surface-heading">
                   <div>
@@ -7827,171 +6841,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </div>
                   ))}
                 </div>
-                {module.route === "ip-scanner" &&
-                  (() => {
-                    // GAP-IP2: the persisted device record for this row. The flat
-                    // results projection above cannot hold the richer attributes
-                    // (rag, hostname check, latency, services, banner, port diffs,
-                    // project/location), so read them from the structured
-                    // devices[], matched by the row's Observed IP. Absent for a
-                    // row the engine kept out of devices (a "missing" expected
-                    // host), so the panel is omitted rather than shown empty.
-                    const ip = detailRow["Observed IP"];
-                    const device = discoveryResultsQuery.data?.devices?.find(
-                      (candidate) =>
-                        String((candidate as Record<string, unknown>).address ?? "") === ip,
-                    );
-                    const items = ipDeviceDetailItems(
-                      device?.attributes as Record<string, unknown> | undefined,
-                    );
-                    if (items.length === 0) {
-                      return null;
-                    }
-                    return (
-                      <div className="detail-actions">
-                        <div className="property-expansion-panel">
-                          <strong>Device attributes</strong>
-                          <div className="detail-list">
-                            {items.map((item) => (
-                              <div className="detail-row" key={item.label}>
-                                <span>{item.label}</span>
-                                <strong>{item.value}</strong>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })()}
-                {module.route === "bacnet-scanner" &&
-                  (() => {
-                    // GAP-B2: the persisted device record for this row, matched by
-                    // device instance (the row's Address may carry a :port, so the
-                    // instance is the stable key). The results table shows the
-                    // compact columns; the drawer renders the richer identity +
-                    // register-check attributes the engine now persists (Max APDU,
-                    // Segmentation, Protocol Rev, App SW, name check, objectDiff).
-                    // Absent for a row not in devices[], so the panel is omitted.
-                    const instance = detailRow.Instance;
-                    const device = discoveryResultsQuery.data?.devices?.find(
-                      (candidate) =>
-                        String(
-                          ((candidate as Record<string, unknown>).attributes as
-                            | Record<string, unknown>
-                            | undefined)?.device_instance ?? "",
-                        ) === instance,
-                    );
-                    const items = bacnetDeviceDetailItems(
-                      device?.attributes as Record<string, unknown> | undefined,
-                    );
-                    if (items.length === 0) {
-                      return null;
-                    }
-                    return (
-                      <div className="detail-actions">
-                        <div className="property-expansion-panel">
-                          <strong>Device attributes</strong>
-                          <div className="detail-list">
-                            {items.map((item) => (
-                              <div className="detail-row" key={item.label}>
-                                <span>{item.label}</span>
-                                <strong>{item.value}</strong>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })()}
-                {module.route === "bacnet-scanner" && activeRun && activeRunTerminal && (() => {
-                  const deviceInstance = Number(detailRow.Instance);
-                  const hasInstance = Number.isInteger(deviceInstance) && deviceInstance >= 0;
-                  const browsingThis =
-                    objectBrowseMutation.variables?.deviceInstance === deviceInstance;
-                  const pending = objectBrowseMutation.isPending && browsingThis;
-                  const errored = objectBrowseMutation.isError && browsingThis;
-                  const result =
-                    objectBrowseResult && objectBrowseResult.device_instance === deviceInstance
-                      ? objectBrowseResult
-                      : null;
-                  return (
-                    <div className="detail-actions" aria-live="polite">
-                      <div className="property-expansion-panel">
-                        <strong>Browse live objects</strong>
-                        <span>
-                          Reads this device&apos;s object list and present values directly from the
-                          network. Nothing is persisted; the scan results above are unchanged.
-                        </span>
-                        <button
-                          className="secondary-button compact"
-                          disabled={pending || !hasInstance || !scanAuthorized}
-                          onClick={() => {
-                            if (hasInstance && activeRun) {
-                              objectBrowseMutation.mutate({ runId: activeRun.runId, deviceInstance });
-                            }
-                          }}
-                          type="button"
-                        >
-                          {pending ? "Reading object list…" : "Browse live objects"}
-                        </button>
-                        {!scanAuthorized && (
-                          <span>Tick the scan-authorization checkbox on the Run step first.</span>
-                        )}
-                        {scanAuthorized && !hasInstance && (
-                          <span>This row has no device instance to read.</span>
-                        )}
-                      </div>
-                      {errored && (
-                        <div className="state-panel error" role="alert">
-                          <strong>Object browse failed</strong>
-                          <span>
-                            {objectBrowseMutation.error instanceof Error
-                              ? objectBrowseMutation.error.message
-                              : "The device object list could not be read."}
-                          </span>
-                        </div>
-                      )}
-                      {result && (
-                        <>
-                          <span className="results-filter-count">
-                            {`${result.count} object${result.count === 1 ? "" : "s"} on device · showing ${result.objects.length}`}
-                            {result.truncated ? " · list truncated at the read cap" : ""}
-                          </span>
-                          {result.error && (
-                            <div className="state-panel" role="status">
-                              <strong>Device did not return a full object list</strong>
-                              <span>{result.error}</span>
-                            </div>
-                          )}
-                          {result.objects.length > 0 && (
-                            <div className="data-table-wrap results-scroll">
-                              <table className="data-table">
-                                <thead>
-                                  <tr>
-                                    <th scope="col">Object</th>
-                                    <th scope="col">Name</th>
-                                    <th scope="col">Present Value</th>
-                                    <th scope="col">Units</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {result.objects.map((object) => (
-                                    <tr key={`${object.type_name}-${object.instance}`}>
-                                      <td>{`${object.type_name}-${object.instance}`}</td>
-                                      <td>{object.name || "—"}</td>
-                                      <td>{object.present_value || "—"}</td>
-                                      <td>{object.units || "—"}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  );
-                })()}
                 {module.route === "bacnet-discovery-sct" && activeRun && activeRunTerminal && (
                   <div className="detail-actions" aria-live="polite">
                     <div className="property-expansion-panel">
@@ -8338,7 +7187,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         );
                       })}
                   </div>
-                ) : (module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct") ? (
+                ) : module.route === "mqtt-discovery-sct" ? (
                   // Real captured payload for the selected topic, replacing the old
                   // fabricated sample issue-cards on this discovery route.
                   selectedMqttTopic ? (
@@ -8546,18 +7395,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
             </form>
           </dialog>
-        )}
-        {/* Single-page footer: the native scanner run is a real saved SCT job, so
-            point the operator at where its evidence lives. Only shown once a run
-            exists on this page (the row is in Run History from the moment it is
-            created). */}
-        {isSidecarDiscoveryModule && activeRun && (
-          <p className="native-run-footer">
-            Saved as <code>{activeRun.ref.jobType}</code> run{" "}
-            <code>#{activeRun.runId}</code>. It feeds{" "}
-            <Link to="/run-history">Run History</Link> and{" "}
-            <Link to="/reports">Reports</Link>.
-          </p>
         )}
       </div>
         </>
@@ -10360,7 +9197,7 @@ function buildResultDetailItems(
   // the detail can show the actual issue text instead of a bare count.
   assetGroups: MergedAssetGroup[] | null = null,
 ): DetailItem[] {
-  if (route === "ip-scanner" || route === "ip-scanner-sct") {
+  if (route === "ip-scanner-sct") {
     // The per-host detail surfaced by the results "View" button. MAC/Hostname are
     // best-effort enrichment: the engine emits "—" (blank) when no ARP entry or
     // PTR record exists, so a blank here is honest, never fabricated.
@@ -10395,7 +9232,7 @@ function buildResultDetailItems(
     return items;
   }
 
-  if (route === "bacnet-scanner" || route === "bacnet-discovery-sct") {
+  if (route === "bacnet-discovery-sct") {
     return [
       { label: "Device", value: row.Device ?? "Selected BACnet device" },
       { label: "Instance", value: row.Instance ?? "Unknown" },
@@ -10417,7 +9254,7 @@ function buildResultDetailItems(
     ];
   }
 
-  if (route === "mqtt-scanner" || route === "mqtt-discovery-sct") {
+  if (route === "mqtt-discovery-sct") {
     // Per-message metadata rides hidden row keys (see mqttRowsFromResults).
     // Honesty-rule wording is load-bearing: NEVER label a timestamp "Published"
     // (MQTT 3.1.1 has no publish time on the wire), and state that delivery QoS

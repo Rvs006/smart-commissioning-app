@@ -307,6 +307,24 @@ describe("BacnetScannerPage", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(/Enter both bounds or leave both blank/);
   });
 
+  // Moved from ModulePage.test.tsx (P2b) when the sidecar branches were deleted:
+  // this lane posts authorized=scanAuthorized and the server rejects an
+  // unauthorized run, so Start must stay disabled until the operator confirms
+  // rather than clicking through to a failure. Only an enforcing deployment
+  // shows the checkbox; the portable default authorizes implicitly.
+  it("holds Send Who-Is until scan authorization is confirmed where it is enforced", async () => {
+    stubFetch();
+    render(scannerProviders(<BacnetScannerPage />, { authorizationEnforced: true }));
+
+    const authorize = await screen.findByLabelText(/I am authorized to scan this network/i);
+    expect(authorize).not.toBeChecked();
+    const start = screen.getByRole("button", { name: "Send Who-Is" });
+    await waitFor(() => expect(start).toBeDisabled());
+
+    fireEvent.click(authorize);
+    await waitFor(() => expect(start).not.toBeDisabled());
+  });
+
   it("posts the parameters the sidecar adapter reads", async () => {
     stubFetch();
     render(scannerProviders(<BacnetScannerPage />));
