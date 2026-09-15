@@ -795,6 +795,41 @@ describe("MqttScannerPage", () => {
     expect(lines[1]).not.toContain("example/AHU-01");
   });
 
+  // The XLSX is the whole run. It used to send the setup card's LIVE topic
+  // filter, so typing the next capture's filter silently narrowed (or emptied)
+  // the workbook for the run still on screen, under a button that says it
+  // exports the run.
+  it("exports the whole run as XLSX regardless of the setup filter on screen", async () => {
+    stubFetch();
+    render(scannerProviders(<MqttScannerPage />));
+
+    const heading = await screen.findByRole("heading", { name: "Captured topics" });
+    const card = heading.closest("section") as HTMLElement;
+    await within(card).findByText("example/AHU-01/pointset");
+
+    // The operator lines up the NEXT capture while the finished one is on screen.
+    fireEvent.change(screen.getByLabelText(/Topic filter/), {
+      target: { value: "somewhere/else/#" },
+    });
+    fireEvent.click(within(card).getByRole("button", { name: "Export topics (XLSX)" }));
+
+    await waitFor(() =>
+      expect(
+        vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes("/topics.xlsx")),
+      ).toBe(true),
+    );
+    const requested = vi
+      .mocked(fetch)
+      .mock.calls.map(([input]) => String(input))
+      .filter((url) => url.includes("/topics.xlsx"));
+    expect(requested).toHaveLength(1);
+    expect(requested[0]).toContain(`/discovery/runs/${RUN_ID}/topics.xlsx`);
+    // No topic_filter at all: the capture already applied its own, so anything
+    // sent here could only remove rows the run really recorded.
+    expect(requested[0]).not.toContain("topic_filter");
+    expect(requested[0]).not.toContain("somewhere");
+  });
+
   it("saves the capture as a register and offers the register CSV", async () => {
     stubFetch();
     render(scannerProviders(<MqttScannerPage />));

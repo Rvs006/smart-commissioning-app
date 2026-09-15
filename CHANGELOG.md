@@ -168,6 +168,17 @@ database migration in this release.
   and suggests widening the range, and a run that did not record the answer says
   so instead of guessing. The register verdict stays red in all three cases,
   because the register still expects the host and it is still unaccounted for.
+- That "Not probed" wording now actually reaches the screen from a real scan.
+  The engine worked the answer out and recorded it only on the run summary the
+  signed report reads, not on the result row the table and the panel read, so
+  every silent host on screen fell back to "Probe sent: Not recorded for this
+  run" while the report beside it said otherwise. Both now carry the same value.
+- "Export topics (XLSX)" exports the whole run again. It was sending whatever
+  was currently typed in the setup card's topic filter, so lining up the next
+  capture while a finished one was still on screen silently narrowed, or
+  emptied, the workbook for the run being exported. The capture already applied
+  its own filter, so nothing on screen changes that download now; the CSV beside
+  it is the filtered view.
 - The scanner screens' detail panel now actually sticks as the results scroll
   past it. Every card clipped its content with `overflow: hidden`, which makes
   the card a scroll container, and a scroll-container ancestor disables

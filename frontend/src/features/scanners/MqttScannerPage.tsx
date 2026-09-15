@@ -645,10 +645,17 @@ export function MqttScannerPage() {
                 void topicsXlsxDownload.download({
                   fallbackFilename: `mqtt-capture-${run.activeRun?.runId}.xlsx`,
                   key: "capture-xlsx",
-                  path: getDiscoveryTopicsXlsxPath(run.activeRun?.runId ?? "", captureTopicFilter),
+                  // Deliberately NO topic_filter. It used to pass the setup
+                  // card's live input, so editing the filter to line up the next
+                  // capture silently narrowed (or emptied) the export of the run
+                  // still on screen. The capture already subscribed with its own
+                  // filter, so the run's persisted topics ARE the whole run;
+                  // re-filtering server-side can only ever remove rows the run
+                  // really recorded.
+                  path: getDiscoveryTopicsXlsxPath(run.activeRun?.runId ?? ""),
                 })
               }
-              title="Download the latest payload per captured topic as an Excel (XLSX) file, rebuilt server-side from this run."
+              title="Download every topic this run captured as an Excel (XLSX) file, rebuilt server-side. Filters on screen do not change it; 'Export to CSV' beside it is the filtered view."
               type="button"
             >
               {topicsXlsxDownload.pendingKey === "capture-xlsx"
