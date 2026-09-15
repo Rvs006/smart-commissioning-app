@@ -7,6 +7,216 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+The three scanner screens (IP Discovery, BACnet Discovery, MQTT Discovery) were
+rebuilt as their own pages. Nothing moved on the engines, the run path or the
+evidence store: a scan still persists as a real `ip_scanner` / `bacnet_scanner` /
+`mqtt_scanner` run, Run History and Reports fill in as before, and there is no
+database migration in this release.
+
+### Added
+
+- Each scanner is now its own page rather than a branch of the shared module
+  page. The layout is one scrolling screen: a Scan setup card showing the values
+  read from Configuration with a link back to edit them, the per-run inputs for
+  that protocol, Start and Stop, and a last-run line; then a results card whose
+  heading carries the six counters as pills (Expected, Reachable, Match,
+  Partial, Missing, Rogue), a row of RAG filter chips beside the text filter, and
+  the dense table; then the register import card; then the footer line naming the
+  saved run and linking Run History and Reports.
+- Clicking any row opens a sticky detail panel to the right of the table instead
+  of a dialog at the bottom of the page. It is resizable between 320px and 640px
+  and remembers the width; below 1100px it stacks under the table. The panel
+  shows what the vendored tools showed for that device: for IP, the overview,
+  live health with latency and found-via, the hostname check, the expected /
+  extra port diff and one line per observed service with its product, version and
+  certificate; for BACnet, the device identity, the BACnet and network details,
+  the name check, the object diff and a "Load objects" read that renders the live
+  object list inline; for MQTT, the topic, its message metadata, the register
+  verdict and the last payload with Copy and an "Explore JSON tree" walker.
+- The native IP and BACnet scanner results tables now show a row for every
+  device the uploaded register expects, including the ones that never answered.
+  An expected-but-silent device used to appear only in the issues list, so an
+  operator reading the table could not tell it had gone quiet. It now renders as
+  a red "Missing (expected, no response)" row carrying the address and name the
+  register expects, with no ports, no object count, and no last-seen time,
+  because nothing was observed. These rows are result observations only: the
+  devices table stays observed-only, so nothing that failed to answer is
+  recorded as a discovered device.
+- The BACnet results table has a Result column (the register verdict) plus Model
+  and Firmware columns, and the IP table has a Register column showing the raw
+  verdict behind its Result label. The built-in discovery lanes are unchanged:
+  they run no register compare, so they keep the columns they had.
+- "Save scan as register" now offers the register back as a CSV file. A new
+  `register.csv` download on each scanner lane rebuilds the file from the same
+  run evidence the save used, so the copy you keep is byte-for-byte what the
+  save handed to the importer. Note that is the whole file, not the applied
+  register: a row the import rejects is in the CSV and is not compared against,
+  which is what makes the file useful for working out why a device is not being
+  matched. The link sits next to the "Saved as register" note and next to
+  "Register already imported" when that register came from a scan. The save
+  button and its note now also say plainly that the register is stored here and
+  applied automatically to the next scan for that project and site, with nothing
+  to upload.
+- The MQTT Discovery screen opens live. When Configuration has a broker and
+  nobody else holds the session, the page connects on arrival and shows the live
+  topic tree in a mono rail with its counts, message rates, activity flash, copy
+  and sort controls, with the focused asset in the sticky side panel beside it
+  (Overview, Live payload, Points and Metadata tabs unchanged). The header
+  carries the Topics, Live assets, Messages and Issues counters, the live search
+  and "Registered assets only" toggle, "Apply subscription filter", "Save as
+  register" from the live session, and "Publish message...". Recording a capture
+  is a secondary action on the Broker and capture card above, and its results
+  stay the persisted-evidence view: a Captured topics card with the four capture
+  counters, a Topic, Ret, QoS, Bytes, Last value and Register Match table, the
+  matched / not-in-register chips, the capture archive and register CSV
+  downloads, and the run footer. A run that recorded no per-message metadata
+  reads "Not recorded" rather than a zero, and a non-JSON payload says the engine
+  kept a presence marker instead of the bytes.
+- The MQTT live explorer can save what it has discovered as a register without
+  waiting for a capture run to finish. "Save as register" turns the live assets
+  into an MQTT register, stores it for the next capture, and pushes it straight
+  back into the live view so matched assets recolour without reconnecting. It
+  refuses, and says so, when the session has not seen any assets yet; if the
+  register is stored but the live view cannot be refreshed, the message names
+  the import and tells you to reconnect rather than save a second copy. A
+  register saved this way has no CSV download, because there is no scan run
+  behind it to rebuild the file from; download one from a capture run instead.
+- The captured-topics table has an "Export to CSV" button beside "Export topics
+  (XLSX)". It writes the rows the table is currently showing (topic, asset, last
+  seen, message count, latest payload), so narrowing the RAG chips or the text
+  filter narrows the file to match what is on screen, and it needs no round trip.
+  "Export topics (XLSX)" beside it stays the whole run, rebuilt server-side.
+
+### Changed
+
+- The captured-topics Ret column reports what the broker actually delivered.
+  Every row used to show "-" whether the payload was retained or not, because
+  nothing carried the flag through: the capture's export archive does not record
+  it at all. The capture now reads the sidecar's topic-tree snapshot just before
+  it exports, while the broker session is still open, and stamps the retained
+  flag per topic from it. A topic the snapshot does not list still reads "-":
+  the tree is capped, and an unlisted topic is unknown, not "not retained". If
+  the snapshot cannot be taken the capture still completes and every row reads
+  "-" rather than failing a finished capture over one column. Delivery QoS stays
+  "Not recorded" for this lane, honestly: the vendored tool records no
+  per-message QoS anywhere, and the run's subscription QoS is a different number
+  that must not be passed off as it.
+- "Write config" on a live MQTT asset now opens at QoS 1 with retain ticked, the
+  same defaults the vendored config editor uses, so a config written by following
+  that tool goes out the same way. A plain "Publish message..." still opens at
+  QoS 0, unretained.
+- The live run console shows only what a scan produces while an IP or BACnet scan
+  is running: status, elapsed, progress and open issues. The registered-asset
+  chart and the topic-observation breakdown are gone from those screens; they
+  belong to UDMI validation and could only ever read "Waiting for evidence" on a
+  scanner run. The UDMI workbench console is unchanged.
+- The MQTT capture table's payload-size column is named "JSON size" and measures
+  the stored JSON exactly as the "Last value" cell renders it. The engine records
+  no wire message length, so the column says what it is rather than implying it
+  is the size of the message on the broker.
+- Row colour on the native IP and BACnet results tables now comes from the
+  register verdict the scan actually reached, instead of being guessed from the
+  status text. A device that answered but is not in the register reads "Rogue
+  (not in register)" in red rather than a neutral "Responsive"; a partial match
+  is amber; a clean match is green. With no register uploaded the tables behave
+  exactly as before.
+- Both scanner summary strips now carry the same six counters as the scan
+  itself: Expected, Reachable, Match, Partial, Missing and Rogue. Partial and
+  Missing were being recorded on every run but never displayed. The BACnet strip
+  drops its exported-points count to make room; the point total remains on the
+  run's stored summary and in the exported assets. The MQTT strip keeps its four
+  counters; its "Matches" card is renamed "Match" so the same number is named the
+  same way on all three scanner screens.
+- Filtering the results by verdict is a row of chips (All, Match, Partial,
+  Missing / Rogue) above the table rather than a dropdown, and it sits beside the
+  existing text filter rather than replacing it.
+- A BACnet or IP scan now records the register rows that answered nothing on the
+  run summary, so the signed inventory report lists the same expected-but-silent
+  devices the results screen shows. Before this, that report section only ever
+  appeared for the built-in BACnet discovery engine. The IP report gains its own
+  "Expected IP hosts not responding" section, which says per host whether the
+  scan actually probed it: the sweep pings every address in the scanned range,
+  so a register host outside that range is marked "not sent" rather than being
+  reported as silent when it was never contacted at all.
+- Sending a config message to live equipment now asks for confirmation first.
+  On builds that do not enforce the preview-and-approval path, "Send to live
+  equipment" opens a confirm step showing the exact topic, QoS, retain flag and
+  payload, with Cancel and "Send to device". Nothing is published until "Send to
+  device" is pressed. Builds that enforce approval are unchanged.
+
+### Removed
+
+- The shared module page no longer carries the IP / BACnet / MQTT scanner
+  branches. They were dead the moment the routes moved to the dedicated pages,
+  and keeping them meant two implementations of the same screen. The built-in
+  discovery lanes (`ip-scanner-sct`, `bacnet-discovery-sct`,
+  `mqtt-discovery-sct`), UDMI validation, data validation and reports are
+  untouched, including their Setup / Run / Results wizard, the sealed dry-run
+  preview and the MQTT capture panel.
+- The MQTT results filter's "No verdict" option is gone. Within one capture a
+  register is either bound, so every topic carries a verdict, or it is not, so
+  none do; the option could never select a subset.
+
+### Fixed
+
+- An IP register host whose address falls outside the scanned Start/End range is
+  no longer reported as unreachable. The sweep pings every address between start
+  and end, so a register row outside that window was never contacted, and the
+  row used to read "Unreachable" with a panel saying it "did not answer this
+  scan" — turning "we did not look" into negative evidence about a device. The
+  row now reads "Not probed", the panel says the scan never reached the address
+  and suggests widening the range, and a run that did not record the answer says
+  so instead of guessing. The register verdict stays red in all three cases,
+  because the register still expects the host and it is still unaccounted for.
+- That "Not probed" wording now actually reaches the screen from a real scan.
+  The engine worked the answer out and recorded it only on the run summary the
+  signed report reads, not on the result row the table and the panel read, so
+  every silent host on screen fell back to "Probe sent: Not recorded for this
+  run" while the report beside it said otherwise. Both now carry the same value.
+- "Export topics (XLSX)" exports the whole run again. It was sending whatever
+  was currently typed in the setup card's topic filter, so lining up the next
+  capture while a finished one was still on screen silently narrowed, or
+  emptied, the workbook for the run being exported. The capture already applied
+  its own filter, so nothing on screen changes that download now; the CSV beside
+  it is the filtered view.
+- The scanner screens' detail panel now actually sticks as the results scroll
+  past it. Every card clipped its content with `overflow: hidden`, which makes
+  the card a scroll container, and a scroll-container ancestor disables
+  `position: sticky` on everything inside it, so the panel had been scrolling
+  away on all three screens. The cards clip with `overflow: clip` instead, which
+  trims to the same rounded corner without creating a scrollport.
+- The "Register already imported" note now refreshes after an upload or a
+  save-as-register instead of showing the previous register until the page is
+  reloaded. The refresh was asking for a query key with an empty import-type
+  slot, which matched nothing, so it had been doing nothing at all.
+- Status and register chips render as chips again. A table rule was making every
+  one of them a full-width block bar with a gap above it.
+- An empty results table no longer reads "No results yet / Start a scan to
+  populate this table" after a run that failed or was stopped. A failure now
+  echoes the engine's own diagnosis, a cancelled run says it was stopped, and a
+  dry run says it sent no packets.
+- The register CSV link is bound to the run that was saved. A save that resolved
+  after the operator switched runs used to show one run's file name beside
+  another run's download URL, and a register that had been saved from a scan
+  offered no CSV at all after a reload.
+- On a build that enforces scan authorization, moving to another project or site
+  now clears the authorization tick. It used to stay ticked, so the next request
+  carried `authorized: true` for a different network with no fresh consent.
+- A BACnet object-browse response that lands after another run has started is
+  discarded instead of filling the panel with the previous run's present values,
+  and a read started on one row no longer spins or reports failure on whatever
+  row is selected next.
+- A report confirmation no longer follows the operator across a run change, so
+  the card cannot show the previous run's report id under the current run.
+- Stop is no longer enabled for a just-restored run whose record has not loaded
+  yet, and "Generate All" checks the run owner before each format so a run
+  started partway through cannot be credited with the remaining reports.
+- Arriving at MQTT Discovery while a capture is still running no longer tries to
+  auto-connect the live view and then show a bare "Live view not running" with no
+  reason. The page waits until it knows whether a run is already in flight, and
+  when the broker session is refused it says why instead of leaving the operator
+  to guess.
+
 ## [0.1.58] - 2026-09-14
 
 ### Changed

@@ -1201,11 +1201,7 @@ describe("ModulePage discovery wiring", () => {
     );
   }
 
-  // Embed-only sidecar modules (ip/bacnet/mqtt-scanner): the vendored scanner is
-  // the whole module, so there is no native Setup/Run/Results form to drive. A
-  // permissive stub keeps the panel's session POST and any incidental polling from
-  // throwing; the tests assert what renders, not a native run submission.
-  function stubSidecarModuleFetch() {
+  it("keeps the Setup/Run/Results wizard on the sealed built-in discovery lanes", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -1217,126 +1213,12 @@ describe("ModulePage discovery wiring", () => {
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
     );
-  }
-
-  it("renders the native IP sidecar body (flipped off the embed) with the run form", async () => {
-    stubSidecarModuleFetch();
-    renderModule("ip-scanner");
-
-    // IP has flipped to native: the run form is present and the vendored iframe is gone.
-    expect(await screen.findByLabelText(/Start IP/i)).toBeInTheDocument();
-    expect(screen.queryByTitle(/IP advanced scanner/i)).toBeNull();
-    // GAP-IP1 + GAP-C1 controls ship on the native config strip.
-    expect(screen.getByLabelText(/Per-probe timeout/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Ignore register for this run/i)).toBeInTheDocument();
-  });
-
-  it("renders the native BACnet sidecar body (flipped off the embed) with the run form", async () => {
-    stubSidecarModuleFetch();
-    renderModule("bacnet-scanner");
-
-    // BACnet has flipped to native (PR-3): the GAP-B1 config strip is present and
-    // the vendored iframe is gone.
-    expect(await screen.findByLabelText(/Device instance range — low/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Device instance range — high/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Discovery window/i)).toBeInTheDocument();
-    expect(screen.queryByTitle(/BACnet advanced scanner/i)).toBeNull();
-  });
-
-  it("gates Run on a half-filled or inverted BACnet instance range (F1)", async () => {
-    stubSidecarModuleFetch();
-    renderModule("bacnet-scanner");
-
-    const low = await screen.findByLabelText(/Device instance range — low/i);
-    const high = screen.getByLabelText(/Device instance range — high/i);
-    const rangeMessage = /Enter both bounds or leave both blank/i;
-
-    // P2b: the native sidecar Run is also gated on scan authorization, which this
-    // deployment enforces (mePayload omits authorization_enforced). Confirm it once
-    // so the rest of this test isolates the instance-range gate; the auth gate
-    // itself is covered in the test below.
-    fireEvent.click(await screen.findByLabelText(/I am authorized to scan this network/i));
-
-    // Both blank -> a global Who-Is is allowed: once the engineer role loads Run
-    // is enabled and no range message shows.
-    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled());
-    expect(screen.queryByText(rangeMessage)).toBeNull();
-
-    // Only the low bound filled -> half a range: gate Run with an inline message.
-    fireEvent.change(low, { target: { value: "1000" } });
-    expect(await screen.findByText(rangeMessage)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
-
-    // Completing the pair clears the gate.
-    fireEvent.change(high, { target: { value: "1999" } });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled());
-    expect(screen.queryByText(rangeMessage)).toBeNull();
-
-    // An inverted range (low > high) is gated too.
-    fireEvent.change(high, { target: { value: "999" } });
-    expect(await screen.findByText(rangeMessage)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
-  });
-
-  it("gates the native sidecar Run on scan authorization until confirmed (P2b)", async () => {
-    // mePayload omits authorization_enforced, so this deployment enforces it. The
-    // native IP/BACnet/MQTT scanner runs post authorized=scanAuthorized and the
-    // server rejects an unauthorized run, so Run must stay disabled until the
-    // operator confirms authorization rather than clicking through to a failure.
-    stubSidecarModuleFetch();
-    renderModule("bacnet-scanner");
-
-    const authorize = await screen.findByLabelText(/I am authorized to scan this network/i);
-    expect(authorize).not.toBeChecked();
-    // Blank range is valid, so only the auth gate holds Run down here.
-    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeDisabled());
-
-    fireEvent.click(authorize);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled());
-  });
-
-  it("renders the native MQTT sidecar body (flipped off the embed) with the live tree", async () => {
-    stubSidecarModuleFetch();
-    renderModule("mqtt-scanner");
-
-    // MQTT has flipped to native (PR-4): the live topic tree section and the
-    // capture topic-filter input are present, and the vendored iframe is gone.
-    expect(await screen.findByRole("heading", { name: /Live Topic Tree/i })).toBeInTheDocument();
-    expect(screen.getByLabelText(/Topic filter/i)).toBeInTheDocument();
-    expect(screen.queryByTitle(/MQTT advanced scanner/i)).toBeNull();
-  });
-
-  it("presents the native sidecar as one page — no Setup/Run/Results wizard, config and results together", async () => {
-    stubSidecarModuleFetch();
-    renderModule("ip-scanner");
-
-    // The scan setup config renders on arrival.
-    expect(await screen.findByLabelText(/Start IP/i)).toBeInTheDocument();
-
-    // The Setup / Run / Results step wizard is gone for the native lanes.
-    expect(screen.queryByRole("navigation", { name: /Module steps/i })).toBeNull();
-    expect(document.querySelector(".step-nav")).toBeNull();
-    // The container is flagged single-page so its grouped sections all show at
-    // once (jsdom applies no theme CSS, so pin the class that drives it, not
-    // computed visibility — see the step-gating note below).
-    expect(document.querySelector(".module-steps")).toHaveClass("single-page-module-steps");
-
-    // Setup (renamed to "Scan setup") and the results table are present together,
-    // with no step click required.
-    expect(screen.getByRole("heading", { name: "Scan setup" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Network Scan Results" })).toBeInTheDocument();
-  });
-
-  it("keeps the Setup/Run/Results wizard on the sealed built-in discovery lanes", async () => {
-    stubSidecarModuleFetch();
     renderModule("ip-scanner-sct");
 
-    // The built-in engine lane is unchanged: the stepped wizard still renders and
-    // the single-page flag is absent.
+    // The built-in engine lane is unchanged: the stepped wizard still renders.
     expect(
       await screen.findByRole("navigation", { name: /Module steps/i }),
     ).toBeInTheDocument();
-    expect(document.querySelector(".module-steps")).not.toHaveClass("single-page-module-steps");
     expect(screen.getByRole("heading", { name: "Run Controls" })).toBeInTheDocument();
   });
 

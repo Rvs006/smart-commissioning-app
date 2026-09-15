@@ -70,40 +70,59 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-09-14. The latest public release is
-  v0.1.58, a small capacity release: the built-in MQTT discovery engine now
+- **Current handoff**: status as of 2026-09-15. The latest public release is
+  still v0.1.58, a small capacity release: the built-in MQTT discovery engine
   retains up to 30,000 distinct topics per capture instead of 10,000 (#216), so
   a registerless sweep of a 5,000-asset site publishing three UDMI topics per
   asset is captured whole, and the release secret scan fails closed on a missing
   or empty bundle path (#212, backported to the older wrappers in #213); field
-  acceptance for it stays open until recorded privately. v0.1.57 was a
-  presentation-only change that put the three native scanner screens on one
-  configure-and-scan page instead of the Setup / Run / Results step wizard
-  (#210); no engine, route, API call, run parameter, or discovery logic moved.
-  The native-scanner engines and their SCT wiring landed in v0.1.56: all three
-  standalone scanners (IP, BACnet, MQTT) render as native SCT module bodies
-  (PRs #201, #203, #204), each one configure-and-scan surface, with the built-in
-  discovery modules unchanged. A completed scan still persists as a real `ip_scanner` /
-  `bacnet_scanner` / `mqtt_scanner` run, so the Results tab, run history, and
-  reports fill in; IP and BACnet re-compare, save-as-register, per-row object
-  browse, and the BACnet export-assets rebuild are all native, and the full MQTT
-  live lane (`scanners_mqtt_live`) is intact. PR #205 deleted the old embed stack:
-  the Advanced-panel reverse proxy, the `/scanners/{proto}/raw` routes, the
-  panel-session and write-token services, the injected `sct-bridge.js` /
-  `sct-theme.css`, and the iframe UI are gone. Kept so no evidence is lost: the
-  three sidecar engines and their run path, register binding, the source-interface
-  freeze, and the historical `scanner_raw_action` / `scanner_raw_write` job types
-  (still registered in jobs.py, client.ts, and runFormat.ts so old Run History
-  rows render). Scanner evidence is hardened: BACnet discovered points now persist
-  to the points table (#206), and #207 covers IP `observed_ports` readback, the
-  BACnet instance-range pair-or-neither gate, MQTT live register scoping, BACnet
-  export completeness, atomic MQTT live connect, and truncated-export flagging.
-  Live IP and BACnet scans now emit progressive observations to the durable store
-  as they run (#202), the persistence foundation for live-updating result rows.
-  This adds no database migration; the Alembic head is unchanged from v0.1.57
-  (a6b7c8d9e0f1). Built-in TCP connect remains the default; Nmap stays optional,
-  locally installed, and unbundled. Keep source, raw evidence, report bytes, EXE
-  identity, Docker labels, and release SHA bound to the same run or commit.
+  acceptance for it stays open until recorded privately. In flight on
+  `feat/native-scanners-v2-cleanup`, unreleased and unmerged: the three scanner
+  screens are rebuilt as dedicated pages under `frontend/src/features/scanners/`
+  (`ScannerScreen` shell plus `IpScannerPage` / `BacnetScannerPage` /
+  `MqttScannerPage`), which `routes.tsx` serves for `ip-scanner`,
+  `bacnet-scanner` and `mqtt-scanner`. Each is one configure-and-scan page: a
+  Scan setup card, a results card whose heading carries the six register
+  counters as pills and RAG filter chips beside the text filter, register-verdict
+  row tone with a row for every expected-but-silent device, a sticky resizable
+  side detail panel in place of the bottom dialog (IP services and port diff,
+  BACnet identity plus an inline live object list, MQTT payload with a JSON
+  tree), the register import card with a `register.csv` download for a register
+  that came from a scan, and a footer naming the saved run. MQTT opens live:
+  auto-connect, the topic rail beside the focused panel, save-as-register from
+  the live session, and a confirm step before a direct config send. The
+  `ModulePage` sidecar branches are deleted (`SIDECAR_DISCOVERY_ROUTES`, the
+  save-as-register and register-CSV panels, the MQTT live wiring, the sidecar
+  setup inputs, summary cards, routers table and object browse); it keeps every
+  built-in lane (`ip-scanner-sct`, `bacnet-discovery-sct`, `mqtt-discovery-sct`),
+  UDMI validation, data validation and reports, wizard and sealed preview
+  unchanged. Run ownership, the terminal evidence barrier, the authenticated
+  download hook and the register import card body are now shared modules under
+  `features/workflow/` (`runOwnership.ts`, `fileDownload.ts`,
+  `RegisterImportFields.tsx`) that both surfaces import, so the two screens
+  cannot drift on run-epoch ownership. A completed scan still persists as a real
+  `ip_scanner` / `bacnet_scanner` / `mqtt_scanner` run, so the Results tab, run
+  history and reports fill in; no engine, backend route, API call, run parameter
+  or discovery logic moved, and there is no database migration; the Alembic head
+  is unchanged from v0.1.57 (a6b7c8d9e0f1). Earlier context still holds: the
+  native-scanner engines and their SCT wiring landed in v0.1.56 (PRs #201, #203,
+  #204), v0.1.57 put those screens on one configure-and-scan page (#210), and
+  PR #205 deleted the old embed stack (the Advanced-panel reverse proxy, the
+  `/scanners/{proto}/raw` routes, the panel-session and write-token services, the
+  injected `sct-bridge.js` / `sct-theme.css`, and the iframe UI). Kept so no
+  evidence is lost: the three sidecar engines and their run path, register
+  binding, the source-interface freeze, and the historical
+  `scanner_raw_action` / `scanner_raw_write` job types (still registered in
+  jobs.py, client.ts, and runFormat.ts so old Run History rows render). Scanner
+  evidence is hardened: BACnet discovered points persist to the points table
+  (#206), and #207 covers IP `observed_ports` readback, the BACnet instance-range
+  pair-or-neither gate, MQTT live register scoping, BACnet export completeness,
+  atomic MQTT live connect, and truncated-export flagging. Live IP and BACnet
+  scans emit progressive observations to the durable store as they run (#202),
+  the persistence foundation for live-updating result rows. Built-in TCP connect
+  remains the default; Nmap stays optional, locally installed, and unbundled.
+  Keep source, raw evidence, report bytes, EXE identity, Docker labels, and
+  release SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
   release is published, update this handoff in both `AGENTS.md` and `CLAUDE.md`
   in the same commit. Keep the two files byte-for-byte identical, and record the

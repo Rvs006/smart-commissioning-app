@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   createScanAuthorization,
   getValidationRun,
@@ -14,8 +14,10 @@ import type { WorkspaceRef } from "../../app/sessionScope";
 // Sealed one-message publish (M5 PR-A). Compose -> Preview (no send) -> Approve
 // (admin) -> Send (replays the frozen bytes) -> Result. Built from SCT's existing
 // dialog / state-panel / data-table vocabulary. In a frictionless deployment
-// (authorizationEnforced=false) it collapses to Compose -> Send: the backend
-// seals the exact bytes server-side and records the sender.
+// (authorizationEnforced=false) it collapses to Compose -> Confirm -> Send: the
+// backend seals the exact bytes server-side and records the sender, and the
+// confirm step is the operator's last look at the topic, QoS/retain and payload
+// before they reach live equipment (there is no approver to catch a typo here).
 
 type Props = {
   workspace: WorkspaceRef;
@@ -26,12 +28,29 @@ type Props = {
   // config topic + last-seen config payload, with retain defaulting on.
   defaultPayload?: string;
   defaultRetain?: boolean;
+  /**
+   * QoS the dialog opens on. The vendored tool's config editor ships QoS 1 and
+   * retain ticked (scanners/vendor/mqtt-discovery/public/index.html:215-216),
+   * so "Write config" must open the same way or an operator following that tool
+   * silently sends a config at QoS 0. A plain "Publish message..." keeps 0.
+   */
+  defaultQos?: 0 | 1 | 2;
   onClose: () => void;
 };
 
-type Stage = "compose" | "preview" | "result";
+type Stage = "compose" | "confirm" | "preview" | "result";
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+
+// Distinguishable from a rejected request: the publish was ACCEPTED and may well
+// have reached the broker, we just stopped watching it. Offering "send again"
+// after this would risk a duplicate write to live equipment.
+class RunPollTimeout extends Error {
+  constructor(readonly runId: string) {
+    super("The run did not finish in time.");
+    this.name = "RunPollTimeout";
+  }
+}
 
 async function pollRun(runId: string, apiClient?: SessionBoundApiClient): Promise<RunRecord> {
   const context = apiClient ? { client: apiClient } : undefined;
@@ -42,7 +61,7 @@ async function pollRun(runId: string, apiClient?: SessionBoundApiClient): Promis
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  throw new Error("The run did not finish in time.");
+  throw new RunPollTimeout(runId);
 }
 
 function planField(run: RunRecord | null, key: string): unknown {
@@ -57,13 +76,14 @@ export function MqttPublishModal({
   defaultTopic,
   defaultPayload,
   defaultRetain,
+  defaultQos,
   onClose,
 }: Props) {
   const context = apiClient ? { client: apiClient } : undefined;
   const [stage, setStage] = useState<Stage>("compose");
   const [topic, setTopic] = useState(defaultTopic ?? "");
   const [payload, setPayload] = useState(defaultPayload ?? "");
-  const [qos, setQos] = useState(0);
+  const [qos, setQos] = useState<number>(defaultQos ?? 0);
   const [retain, setRetain] = useState(defaultRetain ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,88 +93,117 @@ export function MqttPublishModal({
   const [purpose, setPurpose] = useState("");
   const [authorization, setAuthorization] = useState<ScanAuthorizationV1 | null>(null);
   const [sendRun, setSendRun] = useState<RunRecord | null>(null);
+  // The confirm step is the last gate before a live write. Focus lands on Cancel
+  // (not Send) so a stray Enter or Space cannot be the keystroke that publishes,
+  // and so the dialog's own text is what a screen reader announces on arrival.
+  const confirmCancelRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (stage === "confirm") {
+      confirmCancelRef.current?.focus();
+    }
+  }, [stage]);
 
   const fail = (err: unknown) => setError(err instanceof Error ? err.message : "The request failed.");
 
-  const doPreview = async () => {
+  // `busy` is React state, so it is not applied until React commits. Two clicks
+  // delivered in the same tick both sail past `disabled={busy}` and both fire the
+  // request, and the backend creates one run per accepted request: a fast
+  // double-click published TWICE while the dialog showed a single "Sent". A ref
+  // flips synchronously, so the second click returns before it can reach the
+  // network. `busy` stays as the visual disabled state.
+  const sendingRef = useRef(false);
+  const singleFlight = async (operation: () => Promise<void>): Promise<void> => {
+    if (sendingRef.current) {
+      return;
+    }
+    sendingRef.current = true;
     setBusy(true);
     setError(null);
     try {
-      const accepted = await startMqttPublishPreview({ workspace, topic, payload, qos, retain, context });
-      const run = await pollRun(accepted.run_id, apiClient);
-      if (run.status !== "succeeded") {
-        setError((run.error_message as string) || "The preview failed.");
-      } else {
-        setPreviewRun(run);
-        setStage("preview");
+      await operation();
+    } finally {
+      // Cleared on every outcome (success, error, poll timeout) so the dialog is
+      // never wedged shut after a failure the operator can retry.
+      sendingRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  const doPreview = () =>
+    singleFlight(async () => {
+      try {
+        const accepted = await startMqttPublishPreview({ workspace, topic, payload, qos, retain, context });
+        const run = await pollRun(accepted.run_id, apiClient);
+        if (run.status !== "succeeded") {
+          setError((run.error_message as string) || "The preview failed.");
+        } else {
+          setPreviewRun(run);
+          setStage("preview");
+        }
+      } catch (err) {
+        fail(err);
       }
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(false);
-    }
-  };
+    });
 
-  const doDirectSend = async () => {
+  const doDirectSend = () =>
     // Frictionless: no preview/approval. The backend seals the bytes server-side.
-    setBusy(true);
-    setError(null);
-    try {
-      const accepted = await startDirectMqttPublish({ workspace, topic, payload, qos, retain, context });
-      setSendRun(await pollRun(accepted.run_id, apiClient));
-      setStage("result");
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(false);
-    }
-  };
+    singleFlight(async () => {
+      try {
+        const accepted = await startDirectMqttPublish({ workspace, topic, payload, qos, retain, context });
+        setSendRun(await pollRun(accepted.run_id, apiClient));
+        setStage("result");
+      } catch (err) {
+        if (err instanceof RunPollTimeout) {
+          // The send was accepted; only our watch gave up. Move OFF the confirm
+          // step, so its live "Send to device" button cannot publish a second copy
+          // of a message that may already be on the wire, and name the run instead.
+          setSendRun({ run_id: err.runId, status: "running" } as RunRecord);
+          setStage("result");
+        } else {
+          fail(err);
+        }
+      }
+    });
 
-  const doApprove = async () => {
-    if (!previewRun) {
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const now = new Date();
-      const auth = await createScanAuthorization({
-        previewRunId: previewRun.run_id,
-        ticket,
-        purpose,
-        notBefore: new Date(now.getTime() - 60_000).toISOString(),
-        notAfter: new Date(now.getTime() + 60 * 60_000).toISOString(),
-        context,
-      });
-      setAuthorization(auth);
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const doApprove = () =>
+    singleFlight(async () => {
+      if (!previewRun) {
+        return;
+      }
+      try {
+        const now = new Date();
+        const auth = await createScanAuthorization({
+          previewRunId: previewRun.run_id,
+          ticket,
+          purpose,
+          notBefore: new Date(now.getTime() - 60_000).toISOString(),
+          notAfter: new Date(now.getTime() + 60 * 60_000).toISOString(),
+          context,
+        });
+        setAuthorization(auth);
+      } catch (err) {
+        fail(err);
+      }
+    });
 
-  const doSend = async () => {
-    if (!previewRun || !authorization) {
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const accepted = await startAuthorizedMqttPublish({
-        workspace,
-        previewRunId: previewRun.run_id,
-        scanAuthorizationId: authorization.authorization_id,
-        context,
-      });
-      setSendRun(await pollRun(accepted.run_id, apiClient));
-      setStage("result");
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const doSend = () =>
+    singleFlight(async () => {
+      if (!previewRun || !authorization) {
+        return;
+      }
+      try {
+        const accepted = await startAuthorizedMqttPublish({
+          workspace,
+          previewRunId: previewRun.run_id,
+          scanAuthorizationId: authorization.authorization_id,
+          context,
+        });
+        setSendRun(await pollRun(accepted.run_id, apiClient));
+        setStage("result");
+      } catch (err) {
+        fail(err);
+      }
+    });
 
   const publishEvidence = (sendRun?.result_summary as { publish?: Record<string, unknown> } | undefined)?.publish;
 
@@ -216,12 +265,71 @@ export function MqttPublishModal({
             <button
               className="primary-button compact"
               disabled={busy || topic.trim().length === 0}
+              onClick={() => setStage("confirm")}
+              type="button"
+            >
+              Send to live equipment
+            </button>
+          )}
+        </div>
+      )}
+
+      {stage === "confirm" && (
+        <div
+          aria-labelledby="mqtt-publish-confirm-heading"
+          className="form-stack"
+          role="alertdialog"
+        >
+          <div className="state-panel warning">
+            <strong id="mqtt-publish-confirm-heading">Confirm the write</strong>
+            <span>
+              This publishes to a live device and can change how the equipment operates. Nothing has
+              been sent yet.
+            </span>
+          </div>
+          <div className="data-table-wrap">
+            <table className="data-table">
+              <tbody>
+                <tr>
+                  <td>Topic</td>
+                  <td>{topic}</td>
+                </tr>
+                <tr>
+                  <td>QoS / retain</td>
+                  <td>
+                    {qos} / {retain ? "retained" : "not retained"}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <span className="section-copy">Payload</span>
+          <pre className="mqtt-payload-view">{payload}</pre>
+          <div className="inline-actions">
+            <button
+              className="secondary-button compact"
+              disabled={busy}
+              ref={confirmCancelRef}
+              onClick={() => {
+                // Drop a previous send's error too: the operator is going back to
+                // edit, and a stale Problem banner over a new draft reads as if
+                // the new one already failed.
+                setError(null);
+                setStage("compose");
+              }}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="primary-button compact"
+              disabled={busy}
               onClick={() => void doDirectSend()}
               type="button"
             >
-              {busy ? "Sending…" : "Send to live equipment"}
+              {busy ? "Sending…" : "Send to device"}
             </button>
-          )}
+          </div>
         </div>
       )}
 
@@ -311,10 +419,21 @@ export function MqttPublishModal({
                 {String(publishEvidence.topic)}, authorized by {String(publishEvidence.authorized_by)}.
               </span>
             </div>
-          ) : (
+          ) : TERMINAL.has(sendRun.status) ? (
             <div className="state-panel error" role="alert">
               <strong>Not sent</strong>
               <span>{(sendRun.error_message as string) || "The publish failed."} A new preview and approval are required to retry.</span>
+            </div>
+          ) : (
+            // Accepted, still not terminal when we stopped polling. Claiming
+            // either outcome would be a guess, and "retry" could double-publish.
+            <div className="state-panel warning" role="status">
+              <strong>Still running</strong>
+              <span>
+                The publish was accepted as run {sendRun.run_id} and had not finished when this
+                dialog stopped watching it. Check that run in Run History before sending again; it
+                may already have reached the broker.
+              </span>
             </div>
           )}
           <button className="secondary-button compact" onClick={onClose} type="button">

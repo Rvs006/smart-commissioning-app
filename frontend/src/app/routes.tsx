@@ -29,6 +29,23 @@ function loadModulePage(moduleRoute: string) {
   };
 }
 
+// Native scanner v2: dedicated pages for the three vendored sidecar lanes.
+// Rollback is these three entries reverting to loadModulePage(...).
+async function loadIpScannerPage() {
+  const { IpScannerPage } = await import("../features/scanners/IpScannerPage");
+  return { Component: IpScannerPage };
+}
+
+async function loadBacnetScannerPage() {
+  const { BacnetScannerPage } = await import("../features/scanners/BacnetScannerPage");
+  return { Component: BacnetScannerPage };
+}
+
+async function loadMqttScannerPage() {
+  const { MqttScannerPage } = await import("../features/scanners/MqttScannerPage");
+  return { Component: MqttScannerPage };
+}
+
 async function loadHubPage() {
   const { HubPage } = await import("../features/workflow/HubPage");
   return { Component: HubPage };
@@ -65,15 +82,15 @@ export const router = createHashRouter([
     children: [
       { index: true, lazy: loadDashboardPage },
       { path: "configuration", lazy: loadConfigurationPage },
-      { path: "ip-scanner", lazy: loadModulePage("ip-scanner") },
+      { path: "ip-scanner", lazy: loadIpScannerPage },
       // Built-in TCP/Nmap engine, off the primary nav but reachable by direct
       // URL. The sidecar module owns /ip-scanner (see moduleData.ts).
       { path: "ip-scanner-sct", lazy: loadModulePage("ip-scanner-sct") },
-      { path: "bacnet-scanner", lazy: loadModulePage("bacnet-scanner") },
+      { path: "bacnet-scanner", lazy: loadBacnetScannerPage },
       // Built-in BACnet engine, off the primary nav but reachable by direct
       // URL. The sidecar module owns /bacnet-scanner (see moduleData.ts).
       { path: "bacnet-discovery-sct", lazy: loadModulePage("bacnet-discovery-sct") },
-      { path: "mqtt-scanner", lazy: loadModulePage("mqtt-scanner") },
+      { path: "mqtt-scanner", lazy: loadMqttScannerPage },
       // Built-in MQTT engine, off the primary nav but reachable by direct URL.
       // The sidecar module owns /mqtt-scanner (see moduleData.ts).
       { path: "mqtt-discovery-sct", lazy: loadModulePage("mqtt-discovery-sct") },

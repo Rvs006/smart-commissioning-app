@@ -199,19 +199,23 @@ describe("BACnet router presentation", () => {
 });
 
 describe("IP sidecar summary cards (GAP-C2)", () => {
-  it("reads the four totals the sidecar engine stamps on result_summary", () => {
+  it("reads all six register totals the sidecar engine stamps on result_summary", () => {
     expect(
       formatIpSidecarSummaryCards({
         register_expected: 12,
         hosts_scanned: 9,
         register_matches: 7,
+        register_partial: 2,
+        register_missing: 3,
         register_rogue: 2,
         scanner: "ip_scanner_sidecar",
       }),
     ).toEqual([
       { heading: "Expected", value: "12" },
-      { heading: "Reachable / Discovered", value: "9" },
-      { heading: "Matches", value: "7" },
+      { heading: "Reachable", value: "9" },
+      { heading: "Match", value: "7" },
+      { heading: "Partial", value: "2" },
+      { heading: "Missing", value: "3" },
       { heading: "Rogue", value: "2" },
     ]);
   });
@@ -222,12 +226,34 @@ describe("IP sidecar summary cards (GAP-C2)", () => {
         register_expected: null,
         hosts_scanned: 5,
         register_matches: null,
+        register_partial: null,
+        register_missing: null,
         register_rogue: 0,
       }),
     ).toEqual([
       { heading: "Expected", value: "—" },
-      { heading: "Reachable / Discovered", value: "5" },
-      { heading: "Matches", value: "—" },
+      { heading: "Reachable", value: "5" },
+      { heading: "Match", value: "—" },
+      { heading: "Partial", value: "—" },
+      { heading: "Missing", value: "—" },
+      { heading: "Rogue", value: "0" },
+    ]);
+  });
+
+  it("still renders the strip for an older run that stamped no partial/missing", () => {
+    expect(
+      formatIpSidecarSummaryCards({
+        register_expected: 4,
+        hosts_scanned: 4,
+        register_matches: 4,
+        register_rogue: 0,
+      }),
+    ).toEqual([
+      { heading: "Expected", value: "4" },
+      { heading: "Reachable", value: "4" },
+      { heading: "Match", value: "4" },
+      { heading: "Partial", value: "—" },
+      { heading: "Missing", value: "—" },
       { heading: "Rogue", value: "0" },
     ]);
   });
@@ -235,24 +261,76 @@ describe("IP sidecar summary cards (GAP-C2)", () => {
   it("returns null when no total is present (dry-run / older / failed run: no strip)", () => {
     expect(formatIpSidecarSummaryCards({})).toBeNull();
     expect(formatIpSidecarSummaryCards(undefined)).toBeNull();
+    // Not the value the engine stamps (ENGINE_NAME is "ip_scanner"), so this
+    // carries no sidecar signal at all.
     expect(formatIpSidecarSummaryCards({ scanner: "ip_scanner_sidecar" })).toBeNull();
+  });
+
+  it("returns null for a legacy summary carrying only the generic hosts_scanned", () => {
+    // The built-in ip_scan lane stamps hosts_scanned too, and a sidecar dry run
+    // stamps hosts_scanned: 0. Zero is a number, so keying the strip off the
+    // generic counters rendered "Reachable 0" plus five dashes for a run that
+    // never compared a register.
+    expect(formatIpSidecarSummaryCards({ hosts_scanned: 0 })).toBeNull();
+    expect(formatIpSidecarSummaryCards({ hosts_scanned: 12, hosts_responsive: 9 })).toBeNull();
+    expect(
+      formatIpSidecarSummaryCards({ dry_run_plan: { engine: "ip_scanner" }, hosts_scanned: 0 }),
+    ).toBeNull();
+  });
+
+  it("renders a genuine sidecar run whose counters are all zero", () => {
+    expect(
+      formatIpSidecarSummaryCards({
+        scanner: "ip_scanner",
+        register_expected: 0,
+        hosts_scanned: 0,
+        register_matches: 0,
+        register_partial: 0,
+        register_missing: 0,
+        register_rogue: 0,
+      }),
+    ).toEqual([
+      { heading: "Expected", value: "0" },
+      { heading: "Reachable", value: "0" },
+      { heading: "Match", value: "0" },
+      { heading: "Partial", value: "0" },
+      { heading: "Missing", value: "0" },
+      { heading: "Rogue", value: "0" },
+    ]);
+  });
+
+  it("accepts the engine's own scanner stamp as the sidecar signal", () => {
+    // ip_scanner_sidecar.py stamps "scanner": ENGINE_NAME, and no other engine
+    // writes that key, so it identifies the lane even with every counter null.
+    const cards = formatIpSidecarSummaryCards({
+      scanner: "ip_scanner",
+      register_expected: null,
+      hosts_scanned: null,
+    });
+    expect(cards).not.toBeNull();
+    expect(cards?.every((card) => card.value === "\u2014")).toBe(true);
   });
 });
 
 describe("BACnet sidecar summary cards (GAP-C2)", () => {
-  it("reads the four totals the bacnet_scanner engine stamps on result_summary", () => {
+  it("reads the same six register totals as the IP strip", () => {
     expect(
       formatBacnetSidecarSummaryCards({
+        register_expected: 10,
         devices_discovered: 8,
         points_exported: 214,
         register_matches: 6,
+        register_partial: 1,
+        register_missing: 3,
         register_rogue: 1,
         scanner: "bacnet_scanner",
       }),
     ).toEqual([
-      { heading: "Discovered", value: "8" },
-      { heading: "Points", value: "214" },
-      { heading: "Matches", value: "6" },
+      { heading: "Expected", value: "10" },
+      { heading: "Reachable", value: "8" },
+      { heading: "Match", value: "6" },
+      { heading: "Partial", value: "1" },
+      { heading: "Missing", value: "3" },
       { heading: "Rogue", value: "1" },
     ]);
   });
@@ -260,15 +338,19 @@ describe("BACnet sidecar summary cards (GAP-C2)", () => {
   it("renders a present-but-null field as a dash, never a fabricated count", () => {
     expect(
       formatBacnetSidecarSummaryCards({
+        register_expected: null,
         devices_discovered: 3,
-        points_exported: null,
         register_matches: null,
+        register_partial: null,
+        register_missing: null,
         register_rogue: 0,
       }),
     ).toEqual([
-      { heading: "Discovered", value: "3" },
-      { heading: "Points", value: "—" },
-      { heading: "Matches", value: "—" },
+      { heading: "Expected", value: "—" },
+      { heading: "Reachable", value: "3" },
+      { heading: "Match", value: "—" },
+      { heading: "Partial", value: "—" },
+      { heading: "Missing", value: "—" },
       { heading: "Rogue", value: "0" },
     ]);
   });
@@ -276,7 +358,64 @@ describe("BACnet sidecar summary cards (GAP-C2)", () => {
   it("returns null when no total is present (dry-run / older / failed run: no strip)", () => {
     expect(formatBacnetSidecarSummaryCards({})).toBeNull();
     expect(formatBacnetSidecarSummaryCards(undefined)).toBeNull();
-    expect(formatBacnetSidecarSummaryCards({ scanner: "bacnet_scanner" })).toBeNull();
+  });
+
+  it("returns null for a summary carrying only the generic devices_discovered", () => {
+    // A bacnet_scanner dry run stamps {dry_run_plan, devices_discovered: 0} and
+    // nothing else; zero is a number, so the generic key alone used to render a
+    // strip of dashes for a run that scanned nothing.
+    expect(formatBacnetSidecarSummaryCards({ devices_discovered: 0 })).toBeNull();
+    expect(
+      formatBacnetSidecarSummaryCards({
+        dry_run_plan: { engine: "bacnet_scanner" },
+        devices_discovered: 0,
+      }),
+    ).toBeNull();
+  });
+
+  it("renders a genuine sidecar run whose counters are all zero", () => {
+    expect(
+      formatBacnetSidecarSummaryCards({
+        scanner: "bacnet_scanner",
+        register_expected: 0,
+        devices_discovered: 0,
+        register_matches: 0,
+        register_partial: 0,
+        register_missing: 0,
+        register_rogue: 0,
+      }),
+    ).toEqual([
+      { heading: "Expected", value: "0" },
+      { heading: "Reachable", value: "0" },
+      { heading: "Match", value: "0" },
+      { heading: "Partial", value: "0" },
+      { heading: "Missing", value: "0" },
+      { heading: "Rogue", value: "0" },
+    ]);
+  });
+
+  it("accepts the engine's own scanner stamp as the sidecar signal", () => {
+    // Contract change: "scanner" is now a POSITIVE lane signal (the engine
+    // stamps ENGINE_NAME and nothing else writes the key), so a real scanner run
+    // keeps its strip even when every counter is null, while a legacy summary
+    // with only generic keys no longer fakes one.
+    expect(formatBacnetSidecarSummaryCards({ scanner: "bacnet_scanner" })).not.toBeNull();
+  });
+
+  it("keeps the strip for a cancelled scan whose only number is points_exported", () => {
+    // The engine always computes points_exported as a sum, so it is a number on
+    // every real run. It is checked but never displayed; dropping it from the
+    // cards must not hide the strip from a run with no register counters.
+    expect(
+      formatBacnetSidecarSummaryCards({ points_exported: 0, scanner: "bacnet_scanner" }),
+    ).toEqual([
+      { heading: "Expected", value: "—" },
+      { heading: "Reachable", value: "—" },
+      { heading: "Match", value: "—" },
+      { heading: "Partial", value: "—" },
+      { heading: "Missing", value: "—" },
+      { heading: "Rogue", value: "—" },
+    ]);
   });
 });
 
@@ -293,7 +432,7 @@ describe("MQTT sidecar summary cards (GAP-C2)", () => {
     ).toEqual([
       { heading: "Topics", value: "42" },
       { heading: "Assets", value: "9" },
-      { heading: "Matches", value: "6" },
+      { heading: "Match", value: "6" },
       { heading: "Rogue", value: "3" },
     ]);
   });
@@ -309,7 +448,7 @@ describe("MQTT sidecar summary cards (GAP-C2)", () => {
     ).toEqual([
       { heading: "Topics", value: "5" },
       { heading: "Assets", value: "—" },
-      { heading: "Matches", value: "—" },
+      { heading: "Match", value: "—" },
       { heading: "Rogue", value: "0" },
     ]);
   });

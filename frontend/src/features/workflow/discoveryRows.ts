@@ -20,15 +20,23 @@ export const ipResultColumns = [
   "Match Basis",
   "Last Seen",
   "Detailed Status",
+  // The raw register verdict behind the Result column, so an operator can read
+  // the state (match / partial / missing / rogue) without decoding the label.
+  // "—" on a run with no register bound, and on the built-in ip_scan lane,
+  // which stamps no register state at all.
+  "Register",
 ];
 
 export const bacnetResultColumns = [
   "Device",
+  "Result",
   "Instance",
   "Address",
   "IP Address",
   "Network Number",
   "Vendor",
+  "Model",
+  "Firmware",
   "Objects",
   "Discovered",
   "Detailed Status",
@@ -112,20 +120,64 @@ const MARKER_EXPECTED_BY_REGISTER = "EXPECTED BY REGISTER";
 export const expectedByRegisterSilent = (statusDetail: string | undefined | null): boolean =>
   (statusDetail ?? "").includes(MARKER_EXPECTED_BY_REGISTER);
 
-// The "Result" column label and row tone for one IP discovery row, derived from
-// the same status_detail markers the chips already read — no new engine field.
+// The four register states the IP and BACnet sidecars' compare() emit, mapped
+// once to the Result label and the row tone. Shared by both protocols because
+// both sidecars produce the identical vocabulary (match / partial / missing /
+// rogue, with rag green / amber / red / red); "none" and an absent state mean
+// no register was bound, so neither appears here and both fall through.
+const REGISTER_VERDICTS: Record<string, { label: string; tone: "pass" | "warn" | "fail" }> = {
+  match: { label: "Match", tone: "pass" },
+  partial: { label: "Partial", tone: "warn" },
+  missing: { label: "Missing (expected, no response)", tone: "fail" },
+  rogue: { label: "Rogue (not in register)", tone: "fail" },
+};
+
+function registerVerdict(state: string): { label: string; tone: "pass" | "warn" | "fail" } | null {
+  return REGISTER_VERDICTS[state] ?? null;
+}
+
+// The register state stamped on one asset observation. The IP sidecar engine
+// names the key `register`, the BACnet one `register_state`; both are extra
+// fields on DiscoveryAssetObservation. Returns "" when no register was bound:
+// the sidecars spell that "none", and a built-in discovery run or a dry run
+// stamps nothing at all. Both must read as "no verdict", not as a state.
+export function registerStateOf(source: Record<string, unknown>): string {
+  const value = source.register ?? source.register_state;
+  return typeof value === "string" && value !== "none" ? value : "";
+}
+
+// The "Result" column label and row tone for one IP discovery row.
 //
-// Precedence is LOAD-BEARING (honesty rule): a silent host is checked FIRST so
-// it can never fall through to the red "Missing expected ports" verdict — a host
-// we never heard from must never be coloured as a hard failure. Amber is
-// reserved for register-expected silence (mirrors the BACnet expected-but-silent
-// semantics); an unregistered silent host stays neutral so a wide CIDR sweep
-// does not drown the table in amber. A responsive host with a demonstrably
-// closed expected port IS a real finding (fail), unlike full silence.
+// Precedence is LOAD-BEARING (honesty rule), and the two lanes differ on purpose:
+//
+// 1. A REGISTER VERDICT wins outright. On the sidecar lane the scan compared a
+//    named register row against a host it actually probed, in range, so its
+//    verdict is evidence and not an inference: "missing" is RED (the vendored
+//    compare() semantics — the register says this host must exist and it
+//    answered nothing), and "rogue" is red too. Re-deriving a verdict from the
+//    status-detail text here would paint a rogue device neutral "Responsive".
+// 2. With NO register bound, the status_detail markers decide, and there a
+//    silent host is checked FIRST so it can never fall through to the red
+//    "Missing expected ports" verdict. That rule is unchanged: on a wide CIDR
+//    sweep, silence from an address nobody claimed is inconclusive, so it stays
+//    neutral, and register-expected silence on the built-in lane stays amber.
+//
+// So "silence is never red" holds exactly where it was meant to — the broad
+// sweep — while a register-expected host on the sidecar lane, which is a bounded
+// list of hosts the operator asserted are there, reads red.
+// A responsive host with a demonstrably closed expected port IS a real finding
+// (fail), unlike full silence.
 export function ipRowVerdict(asset: DiscoveryAssetObservation): {
   label: string;
   tone: "pass" | "fail" | "warn" | null;
 } {
+  // A bound register outranks every port marker: the sidecar's compare() has
+  // already reached a verdict for this host, and re-deriving one from the
+  // status-detail text would render a rogue device as a neutral "Responsive".
+  const registered = registerVerdict(registerStateOf(asset));
+  if (registered) {
+    return registered;
+  }
   const detail = asset.status_detail ?? "";
   if (detail.startsWith(NO_RESPONSE_DETAIL)) {
     return {
@@ -168,6 +220,7 @@ export function ipRowsFromResults(results: DiscoveryResultsResponse): Record<str
       "Match Basis": str(asset.match_basis ?? "none"),
       "Last Seen": asset.last_seen_at ? formatRelativeTime(asset.last_seen_at) : "—",
       "Detailed Status": str(asset.status_detail),
+      Register: str(registerStateOf(asset) || null),
       __tone: verdict.tone ?? "",
     };
   });
@@ -290,44 +343,110 @@ export function bacnetDeviceDetailItems(
   return items;
 }
 
+// The "Result" column label and row tone for one BACnet row. The register
+// verdict is the whole verdict here (unlike IP, which also has port markers to
+// fall back on), so a run with no register bound reports plain discovery.
+export function bacnetRowVerdict(source: Record<string, unknown>): {
+  label: string;
+  tone: "pass" | "fail" | "warn" | null;
+} {
+  return registerVerdict(registerStateOf(source)) ?? { label: "Discovered", tone: null };
+}
+
 // BACnet device rows come from the structured devices[] (with per-engine
-// attributes carrying device_instance / point_count / vendor_id).
+// attributes carrying device_instance / point_count / vendor_id), plus the
+// expected-but-silent devices, which exist ONLY as observations: a device that
+// never answered is not in devices[] (the devices table is observed-only), so
+// its row is appended from discovered_assets.
 export function bacnetRowsFromResults(
   results: DiscoveryResultsResponse,
 ): Record<string, string>[] {
   // point_count per device is summarised from discovered_assets, which the
-  // engine stamps with device_instance + point_count.
+  // engine stamps with device_instance + point_count. The same pass indexes the
+  // whole observation so the register verdict can be merged onto the device row
+  // and the unmatched (missing) observations appended afterwards.
   const pointCountByInstance = new Map<string, number>();
+  const assetByInstance = new Map<string, DiscoveryAssetObservation>();
   for (const asset of results.discovered_assets) {
     const instance = asset.device_instance;
-    const count = asset.point_count;
-    if (instance !== undefined && instance !== null && typeof count === "number") {
-      pointCountByInstance.set(String(instance), count);
+    if (instance === undefined || instance === null) {
+      continue;
+    }
+    const key = String(instance);
+    assetByInstance.set(key, asset);
+    if (typeof asset.point_count === "number") {
+      pointCountByInstance.set(key, asset.point_count);
     }
   }
 
-  return results.devices.map((device: DiscoveryRowRecord) => {
+  const renderedInstances = new Set<string>();
+  const rows = results.devices.map((device: DiscoveryRowRecord) => {
     const attributes = (device.attributes as Record<string, unknown> | undefined) ?? {};
     const instance = attributes.device_instance ?? "";
-    const pointCount = pointCountByInstance.get(String(instance));
+    const key = String(instance);
+    renderedInstances.add(key);
+    const pointCount = pointCountByInstance.get(key);
     // IP address and BACnet network number are optional per device. They may be
     // stamped on the engine attributes (ip_address / network_number) or, for
     // routed BMS networks, surfaced top-level; read both and show blank when the
     // engine did not report them (e.g. a local MS/TP segment with no IP).
     const ipAddress = attributes.ip_address ?? device.ip_address;
     const networkNumber = attributes.network_number ?? device.network_number;
+    // The engine stamps the register state on the device attributes and on the
+    // observation; prefer the device's own, fall back to the observation so a
+    // run that carries it in only one place still colours the row.
+    const asset = assetByInstance.get(key);
+    const verdict = bacnetRowVerdict({
+      register_state: attributes.register_state ?? asset?.register_state,
+    });
     return {
       Device: str(device.name),
+      Result: verdict.label,
       Instance: str(instance),
       Address: str(device.address),
       "IP Address": str(ipAddress),
       "Network Number": str(networkNumber),
       Vendor: str(device.vendor),
+      Model: str(device.model),
+      Firmware: str(attributes.firmware),
       Objects: pointCount === undefined ? "—" : String(pointCount),
       Discovered: device.created_at ? formatRelativeTime(String(device.created_at)) : "—",
       "Detailed Status": str(device.device_type),
+      __tone: verdict.tone ?? "",
     };
   });
+
+  // Iterate the observations THEMSELVES, not assetByInstance: that map is keyed
+  // on device_instance, and the vendored compare() emits "—" for every register
+  // row whose Device Instance was blank or unparseable, so two such silent rows
+  // share one key and the map would collapse them into a single table row.
+  for (const asset of results.discovered_assets) {
+    const instance = asset.device_instance;
+    if (instance === undefined || instance === null) {
+      continue;
+    }
+    if (renderedInstances.has(String(instance))) {
+      continue;
+    }
+    const verdict = bacnetRowVerdict(asset);
+    rows.push({
+      Device: str(asset.name),
+      Result: verdict.label,
+      Instance: str(asset.device_instance),
+      Address: str(asset.address),
+      "IP Address": "—",
+      "Network Number": "—",
+      Vendor: "—",
+      Model: "—",
+      Firmware: "—",
+      Objects: "—",
+      // Never seen, so there is no discovery time and no observed device type.
+      Discovered: "—",
+      "Detailed Status": "—",
+      __tone: verdict.tone ?? "",
+    });
+  }
+  return rows;
 }
 
 // MQTT topic rows come from the structured topics[]. Per-message metadata
@@ -549,15 +668,56 @@ export type DiscoveryView = {
   rows: Record<string, string>[];
 };
 
+// Columns only the native sidecar lanes can fill, because only their engines
+// run the register compare(). The built-in ip_scan / bacnet_discovery engines
+// stamp no register state (their verdicts come from validation), so their
+// tables keep the column set they already had instead of growing a column of
+// "—". IP's "Result" is NOT in this set: the built-in lane fills it from the
+// port markers, which is what it has always done.
+const IP_SIDECAR_ONLY_COLUMNS = new Set(["Register"]);
+const BACNET_SIDECAR_ONLY_COLUMNS = new Set(["Result", "Model", "Firmware"]);
+
+// Drop the sidecar-only columns AND the matching row keys on a built-in lane.
+// Both halves matter: hiding only the header would leave the values in the row
+// objects, where the text filter's "every VISIBLE cell" contract (see
+// ResultsFilter) would still match them and an operator would watch rows vanish
+// on a word they cannot see anywhere in the table.
+function sidecarView(
+  columns: string[],
+  rows: Record<string, string>[],
+  sidecarOnly: Set<string>,
+  isSidecar: boolean,
+): DiscoveryView {
+  if (isSidecar) {
+    return { columns, rows };
+  }
+  return {
+    columns: columns.filter((column) => !sidecarOnly.has(column)),
+    rows: rows.map((row) =>
+      Object.fromEntries(Object.entries(row).filter(([key]) => !sidecarOnly.has(key))),
+    ),
+  };
+}
+
 export function discoveryViewFor(
   route: string,
   results: DiscoveryResultsResponse,
 ): DiscoveryView | null {
   if (route === "ip-scanner" || route === "ip-scanner-sct") {
-    return { columns: ipResultColumns, rows: ipRowsFromResults(results) };
+    return sidecarView(
+      ipResultColumns,
+      ipRowsFromResults(results),
+      IP_SIDECAR_ONLY_COLUMNS,
+      route === "ip-scanner",
+    );
   }
   if (route === "bacnet-scanner" || route === "bacnet-discovery-sct") {
-    return { columns: bacnetResultColumns, rows: bacnetRowsFromResults(results) };
+    return sidecarView(
+      bacnetResultColumns,
+      bacnetRowsFromResults(results),
+      BACNET_SIDECAR_ONLY_COLUMNS,
+      route === "bacnet-scanner",
+    );
   }
   if (route === "mqtt-scanner" || route === "mqtt-discovery-sct") {
     return { columns: mqttResultColumns, rows: mqttRowsFromResults(results) };
@@ -943,4 +1103,37 @@ export function discoveryEmptyStateFor(
   }
 
   return null;
+}
+
+// One latest-payload-per-topic row for the MQTT capture panel, and its CSV.
+//
+// The SHAPE and the header are shared, not the bytes, and the difference is
+// deliberate rather than an oversight. The two callers read different evidence:
+// the module page's built-in lane projects the live capture-topics query
+// (DiscoveryRowRecord), so an absent asset is "—", Last Seen is the record's
+// created_at, and the payload is the stored wrapper as JSON. The scanner page
+// projects the run's persisted ScannerRows, so an absent asset is an empty cell,
+// Last Seen is the engine's own last_payload_seen, and the payload is unwrapped
+// to match the "Last value" the table shows. Folding those together would mean
+// changing what the built-in lane exports, for a lane that reads a different
+// source and is out of scope here; a reader comparing the two files should
+// expect the same columns, not identical cells.
+export type CaptureRow = {
+  topic: string;
+  asset: string;
+  lastSeen: string;
+  messageCount: string;
+  payload: string;
+};
+
+export function captureRowsToCsv(rows: CaptureRow[]): string {
+  const header = ["Topic", "Asset", "Last Seen", "Message Count", "Latest Payload"];
+  const escape = (value: string): string => `"${value.replace(/"/g, '""')}"`;
+  const lines = [header.map(escape).join(",")];
+  for (const row of rows) {
+    lines.push(
+      [row.topic, row.asset, row.lastSeen, row.messageCount, row.payload].map(escape).join(","),
+    );
+  }
+  return lines.join("\r\n");
 }
