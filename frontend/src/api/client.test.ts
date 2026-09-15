@@ -141,6 +141,26 @@ describe("session-bound client", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(requestSignal?.aborted).toBe(true);
   });
+
+  it("issues requests made after abort() with a fresh, un-aborted signal", async () => {
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestSignal = init?.signal ?? undefined;
+        return jsonResponse(healthPayload);
+      }),
+    );
+    const client = createSessionBoundApiClient(createSessionScopeId(), DEFAULT_WORKSPACE, null);
+
+    // React.StrictMode (dev only) aborts the memoized client once on its
+    // simulated unmount and then keeps using it after the remount.
+    client.abort();
+
+    await expect(client.request<HealthStatus>("/health")).resolves.toEqual(healthPayload);
+    expect(requestSignal?.aborted).toBe(false);
+    expect(client.signal.aborted).toBe(false);
+  });
 });
 
 const healthPayload = { status: "ok", version: "0.1.39", timestamp: "2026-06-11T00:00:00Z" };
