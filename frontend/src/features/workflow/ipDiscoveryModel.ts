@@ -254,16 +254,39 @@ const IP_SIDECAR_SUMMARY_FIELDS = [
   ["Rogue", "register_rogue"],
 ] as const;
 
+// The sidecar engines stamp result_summary.scanner = ENGINE_NAME
+// (ip_scanner_sidecar.py / bacnet_scanner_sidecar.py), and no other engine
+// writes that key. It is the only field that identifies the lane on its own.
+const IP_SIDECAR_SCANNER = "ip_scanner";
+const BACNET_SIDECAR_SCANNER = "bacnet_scanner";
+
+// A summary belongs to this sidecar lane when it says so, or when it carries a
+// register counter only the sidecar compare() produces. The plain generic keys
+// must NOT qualify: the built-in ip_scan lane stamps hosts_scanned too (and a
+// dry run stamps hosts_scanned: 0), so keying off those rendered the six-card
+// strip as "Reachable 0" with five dashes for a run that never compared a
+// register — the exact opposite of this formatter's null-when-no-signal
+// contract. A genuine sidecar run whose counters are all zero still renders.
+function isSidecarSummary(
+  summary: Record<string, unknown>,
+  scanner: string,
+  registerFields: readonly (readonly [string, string])[],
+): boolean {
+  if (summary.scanner === scanner) {
+    return true;
+  }
+  return registerFields.some(
+    ([, key]) => key.startsWith("register_") && typeof summary[key] === "number",
+  );
+}
+
 export function formatIpSidecarSummaryCards(
   summary: Record<string, unknown> | null | undefined,
 ): IpSidecarSummaryCard[] | null {
   if (!summary || typeof summary !== "object") {
     return null;
   }
-  const anyPresent = IP_SIDECAR_SUMMARY_FIELDS.some(
-    ([, key]) => typeof summary[key] === "number",
-  );
-  if (!anyPresent) {
+  if (!isSidecarSummary(summary, IP_SIDECAR_SCANNER, IP_SIDECAR_SUMMARY_FIELDS)) {
     return null;
   }
   return IP_SIDECAR_SUMMARY_FIELDS.map(([heading, key]) => {
@@ -299,10 +322,11 @@ export function formatBacnetSidecarSummaryCards(
   // register counter is null (a cancelled or empty scan); dropping it from the
   // strip must not also drop it from the "is this a scanner run at all?" test,
   // or such a run would lose its summary entirely instead of showing dashes.
-  const anyPresent =
+  // Unlike the generic hosts_scanned, no other engine writes it.
+  const isSidecar =
     typeof summary.points_exported === "number" ||
-    BACNET_SIDECAR_SUMMARY_FIELDS.some(([, key]) => typeof summary[key] === "number");
-  if (!anyPresent) {
+    isSidecarSummary(summary, BACNET_SIDECAR_SCANNER, BACNET_SIDECAR_SUMMARY_FIELDS);
+  if (!isSidecar) {
     return null;
   }
   return BACNET_SIDECAR_SUMMARY_FIELDS.map(([heading, key]) => {

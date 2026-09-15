@@ -41,7 +41,11 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 - A BACnet or IP scan now records the register rows that answered nothing on the
   run summary, so the signed inventory report lists the same expected-but-silent
   devices the results screen shows. Before this, that report section only ever
-  appeared for the built-in BACnet discovery engine.
+  appeared for the built-in BACnet discovery engine. The IP report gains its own
+  "Expected IP hosts not responding" section, which says per host whether the
+  scan actually probed it: the sweep pings every address in the scanned range,
+  so a register host outside that range is marked "not sent" rather than being
+  reported as silent when it was never contacted at all.
 - The Verdict filter on the two native scanner screens is worded for what it
   filters: Match, Partial, and Missing / Rogue.
 
