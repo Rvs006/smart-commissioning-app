@@ -158,6 +158,85 @@ class ScannerReportInventoryTest(unittest.TestCase):
         self.assertEqual(addresses, {"10.0.0.9", "10.0.0.10"}, "the typed 'server' host must not be dropped")
         _assert_no_leak(self, sections)
 
+    def test_ip_scanner_renders_expected_not_responding_section(self) -> None:
+        # The devices table is observed-only, so a register host that answered
+        # nothing appears nowhere in it. Without this section the signed report
+        # omitted the silent hosts the results screen now shows.
+        run = _run(
+            "ip_scanner",
+            "ip-run",
+            {"devices": []},
+            {
+                "hosts_scanned": 4,
+                "expected_not_responding": [
+                    {
+                        "asset_id": None,
+                        "asset_name": "plant-controller",
+                        "address": "10.0.0.3",
+                        "expected_ports": [443, 502],
+                        "directed_probe_sent": True,
+                    },
+                    {
+                        "asset_id": None,
+                        "asset_name": None,
+                        "address": "198.51.100.7",
+                        "expected_ports": [],
+                        "directed_probe_sent": False,
+                    },
+                ],
+            },
+        )
+        sections = self.reports._discovery_inventory(run)
+        section = _section(sections, self.reports._IP_SILENT_COLUMNS)
+        self.assertEqual(len(section["rows"]), 2)
+        first = section["rows"][0]
+        self.assertEqual(first["Register Host"], "plant-controller")
+        self.assertEqual(first["Address"], "10.0.0.3")
+        self.assertEqual(first["Expected Ports"], "443, 502")
+        self.assertEqual(first["Direct Probe"], "sent")
+        second = section["rows"][1]
+        # Outside the swept range: the scan says nothing about this host, and a
+        # blank register hostname renders the sentinel, never an invented name.
+        self.assertEqual(second["Direct Probe"], "not sent")
+        self.assertEqual(second["Register Host"], "\u2014")
+        self.assertEqual(second["Expected Ports"], "\u2014")
+        self.assertEqual(section["note"], self.reports._IP_SILENT_NOTE)
+        _assert_no_leak(self, sections)
+
+    def test_ip_scanner_unknown_probe_state_renders_the_blank_sentinel(self) -> None:
+        run = _run(
+            "ip_scanner",
+            "ip-run",
+            {"devices": []},
+            {
+                "hosts_scanned": 1,
+                "expected_not_responding": [
+                    {"asset_name": "h", "address": "10.0.0.3", "expected_ports": []},
+                ],
+            },
+        )
+        sections = self.reports._discovery_inventory(run)
+        section = _section(sections, self.reports._IP_SILENT_COLUMNS)
+        # Absent means the engine could not tell; never "sent" and never
+        # "not sent", both of which would be a claim it cannot support.
+        self.assertEqual(section["rows"][0]["Direct Probe"], "\u2014")
+
+    def test_ip_scanner_empty_silent_list_still_renders_the_section(self) -> None:
+        run = _run("ip_scanner", "ip-run", {"devices": []},
+                   {"hosts_scanned": 4, "expected_not_responding": []})
+        sections = self.reports._discovery_inventory(run)
+        self.assertEqual(_section(sections, self.reports._IP_SILENT_COLUMNS)["rows"], [])
+
+    def test_ip_run_without_silent_key_has_no_silent_section(self) -> None:
+        # The built-in ip_discovery engine and pre-upgrade sidecar runs never
+        # stamp the key; absence must render no section at all.
+        run = _run("ip_discovery", "ip-run", {"devices": []}, {"hosts_scanned": 4})
+        sections = self.reports._discovery_inventory(run)
+        self.assertFalse(
+            any(s["columns"] == self.reports._IP_SILENT_COLUMNS for s in sections),
+            "a run with no expected_not_responding key must not produce the section",
+        )
+
     def test_bacnet_scanner_renders_device_and_point_columns(self) -> None:
         run = _run(
             "bacnet_scanner",

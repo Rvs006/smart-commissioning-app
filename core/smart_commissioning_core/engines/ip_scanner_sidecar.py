@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import csv
 import io
+import ipaddress
 import json
 import urllib.error
 import urllib.parse
@@ -205,6 +206,9 @@ def _map_result(
     project_id = parameters.get("project_id")
     site_id = parameters.get("site_id")
     now = datetime.now(UTC).isoformat()
+    # The range this run actually swept, so a silent host's report row can say
+    # whether it was genuinely probed instead of assuming it was.
+    scan_query = _scan_query(parameters)
 
     discovered_assets: list[dict[str, Any]] = []
     structured_records: list[dict[str, Any]] = []
@@ -330,6 +334,9 @@ def _map_result(
                     "asset_name": expected_hostname,
                     "address": ip,
                     "expected_ports": list(row.get("expectedPorts") or []),
+                    # True only when this address really sat inside the swept
+                    # range; None when it cannot be told. Never a blanket claim.
+                    "directed_probe_sent": _probed_directly(ip, scan_query),
                 }
             )
 
@@ -358,6 +365,40 @@ def _map_result(
         issues=issues,
         result_summary_extra=result_summary_extra,
     )
+
+
+def _probed_directly(ip: Any, scan_query: Mapping[str, str]) -> bool | None:
+    """Did this scan actually send a probe at ``ip``?
+
+    The vendored sweep ICMP-pings EVERY address between start and end and then
+    reads the ARP cache (scanners/vendor/network-ip-scanner/scanner.js, "Pass 1:
+    ping sweep"), so an address inside the scanned range was genuinely probed
+    and its silence is a real observation. A register row whose address falls
+    OUTSIDE that range was never touched, and reporting it as probed would be a
+    fabrication — the whole point of the honesty rule.
+
+    Returns None when the question cannot be answered (a register row with no
+    usable address, or a run with no recorded range), so the report can say
+    "not recorded" rather than guess either way.
+    """
+    start_raw = scan_query.get("start")
+    if not start_raw:
+        return None
+    try:
+        address = ipaddress.IPv4Address(str(ip).strip())
+        start = ipaddress.IPv4Address(str(start_raw).strip())
+    except ValueError:
+        return None
+    end_raw = scan_query.get("end")
+    if end_raw:
+        try:
+            end = ipaddress.IPv4Address(str(end_raw).strip())
+        except ValueError:
+            return None
+    else:
+        # No end bound: the sidecar sweeps the single start address only.
+        end = start
+    return start <= address <= end
 
 
 def _status_detail(row: Mapping[str, Any]) -> str | None:
@@ -684,7 +725,13 @@ def _demo() -> None:
     ]
     summary = {"expected": 3, "reachable": 3, "expectedReachable": 2,
                "matches": 1, "partial": 1, "missing": 1, "rogue": 1}
-    result = _map_result(rows, summary, {"project_id": "p", "site_id": "s"})
+    # A real scan range, so the silent host's "was it actually probed?" answer
+    # is computed from evidence rather than assumed.
+    result = _map_result(
+        rows,
+        summary,
+        {"project_id": "p", "site_id": "s", "start_ip": "192.0.2.1", "end_ip": "192.0.2.99"},
+    )
 
     # Every compare() row becomes an observation, including the expected-but-
     # silent one, so the results table can show it. Only the 3 that answered
@@ -706,6 +753,25 @@ def _demo() -> None:
     }, result.discovered_assets
     silent = result.result_summary_extra["expected_not_responding"]
     assert [entry["address"] for entry in silent] == ["192.0.2.12"], silent
+    # 192.0.2.12 sits inside the swept range, so it really was pinged.
+    assert silent[0]["directed_probe_sent"] is True, silent
+    # A register host OUTSIDE the swept range was never touched; claiming it was
+    # probed would be a fabrication, so the engine says so.
+    out_of_range = _map_result(
+        [{"ip": "198.51.100.7", "register": "missing", "rag": "red",
+          "status": "unreachable", "openPorts": []}],
+        {},
+        {"start_ip": "192.0.2.1", "end_ip": "192.0.2.99"},
+    ).result_summary_extra["expected_not_responding"]
+    assert out_of_range[0]["directed_probe_sent"] is False, out_of_range
+    # No recorded range -> unknowable, never a guess in either direction.
+    unknown = _map_result(
+        [{"ip": "192.0.2.12", "register": "missing", "rag": "red",
+          "status": "unreachable", "openPorts": []}],
+        {},
+        {},
+    ).result_summary_extra["expected_not_responding"]
+    assert unknown[0]["directed_probe_sent"] is None, unknown
     # observed_ports must be {port, protocol} objects (readback schema shape),
     # never raw ints - the exact gap that shipped once. udp is tagged from openUdp.
     for asset in result.discovered_assets:
