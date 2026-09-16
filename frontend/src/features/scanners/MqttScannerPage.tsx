@@ -227,6 +227,40 @@ export function MqttScannerPage() {
         }
       : null;
 
+  // A session is HELD from the moment connect returns, whether or not a frame
+  // has arrived. The page must never tell the operator the live view is not
+  // running while the sidecar is holding the broker on their behalf.
+  const sessionHeld = mqttLive.session !== null;
+  // The tree survives a drop: the last snapshot is still the last thing the
+  // broker actually said, so keep showing it and say it is stale instead of
+  // blanking the screen.
+  const treeStale = Boolean(mqttLive.snapshot) && mqttLive.phase !== "live";
+  const attempt = mqttLive.reconnectAttempts;
+  const settling =
+    mqttLive.phase === "connecting" ||
+    mqttLive.phase === "reconnecting" ||
+    mqttLive.phase === "unavailable";
+  const settlingNote = !settling
+    ? null
+    : mqttLive.phase === "connecting"
+      ? {
+          title: "Opening the live session…",
+          detail: "Connecting to the broker through the sidecar.",
+        }
+      : mqttLive.snapshot
+        ? {
+            title: `Live stream dropped, reconnecting${attempt > 0 ? ` (attempt ${attempt})` : ""}…`,
+            detail:
+              "The topics below are the last snapshot the broker sent, so they may be out of date. The session is still held; press Stop live view to release it.",
+          }
+        : {
+            title: `Connected to the broker, waiting for the first topic snapshot${
+              attempt > 0 ? ` (attempt ${attempt})` : ""
+            }…`,
+            detail:
+              "The sidecar accepted the session but has not sent a topic frame yet. Nothing has been received, so there is nothing to show. Press Stop live view to release the session.",
+          };
+
   return (
     <ScannerScreen
       actionRowExtra={
@@ -240,7 +274,9 @@ export function MqttScannerPage() {
             : mqttLive.phase === "connecting"
               ? "Live · connecting"
               : mqttLive.phase === "reconnecting" || mqttLive.phase === "unavailable"
-                ? "Live · reconnecting"
+                ? treeStale
+                  ? `Live · reconnecting · showing the last snapshot${attempt > 0 ? ` (attempt ${attempt})` : ""}`
+                  : `Live · connected, no topic frame yet${attempt > 0 ? ` (attempt ${attempt})` : ""}`
                 : mqttLive.phase === "occupied"
                   ? "Live · held by another session"
                   : "Live view not running"}
@@ -251,7 +287,7 @@ export function MqttScannerPage() {
           <div className="scanner-card-head">
             <div className="scanner-results-title">
               <h2 id="mqtt-live-heading">Live topics</h2>
-              {mqttLive.phase === "live" && mqttLive.snapshot && (
+              {mqttLive.snapshot && (
                 <div className="scanner-pills">
                   {/* Plan section 4.4's five KPIs. Broker leads, because a
                       connection that has dropped explains every other number. */}
@@ -277,7 +313,7 @@ export function MqttScannerPage() {
               )}
             </div>
             <div className="inline-actions">
-              {liveHolding ? (
+              {liveHolding || sessionHeld ? (
                 <button
                   className="secondary-button compact"
                   disabled={!canEngineer}
@@ -364,8 +400,16 @@ export function MqttScannerPage() {
                   </button>
                 </div>
               </div>
-            ) : mqttLive.phase === "live" && mqttLive.snapshot ? (
+            ) : mqttLive.snapshot ? (
               <>
+                {/* The snapshot stays on screen through a drop; the note above
+                    it says the tree is no longer live rather than blanking it. */}
+                {settlingNote && (
+                  <div className="state-panel" role="status">
+                    <strong>{settlingNote.title}</strong>
+                    <span>{settlingNote.detail}</span>
+                  </div>
+                )}
                 <div className="results-filter-bar scanner-filter-bar">
                   <form
                     className="results-filter-text"
@@ -526,13 +570,14 @@ export function MqttScannerPage() {
                   )}
                 </div>
               </>
-            ) : mqttLive.phase === "connecting" ? (
+            ) : settlingNote ? (
               <div className="state-panel" role="status">
-                <strong>Opening live session…</strong>
-                <span>Connecting to the broker through the sidecar.</span>
+                <strong>{settlingNote.title}</strong>
+                <span>{settlingNote.detail}</span>
               </div>
             ) : (
-              brokerConfigured && (
+              brokerConfigured &&
+              !sessionHeld && (
                 <div className="state-panel" role="status">
                   <strong>Live view not running</strong>
                   <span>
