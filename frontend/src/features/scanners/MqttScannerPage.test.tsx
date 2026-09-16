@@ -35,6 +35,7 @@ vi.mock("../workflow/useMqttLiveSession", () => ({
       error: null,
       lastActivity: null,
       phase: "no_session",
+      reconnectAttempts: 0,
       session: null,
       snapshot: null,
       status: null,
@@ -645,6 +646,69 @@ describe("MqttScannerPage", () => {
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByLabelText(/Topic/i)).toHaveValue("example/AHU-01/config");
     expect(within(dialog).getByLabelText(/Payload/i)).toHaveValue('{"version":"1.5.2"}');
+  });
+
+  it("says the session is held and waiting for a frame, never 'Live view not running'", async () => {
+    // QA #221: a sidecar that accepts the session but whose stream closes before
+    // any snapshot left the page showing "Live view not running" while the
+    // status line said "reconnecting" and the lease was still held.
+    liveState = {
+      phase: "reconnecting",
+      session: liveSession,
+      snapshot: null,
+      reconnectAttempts: 3,
+    };
+    stubFetch({ runs: [] });
+    render(scannerProviders(<MqttScannerPage />));
+
+    expect(
+      await screen.findByText(/Connected to the broker, waiting for the first topic snapshot/),
+    ).toBeInTheDocument();
+    // The count shows in both the action-row status line and the panel.
+    expect(screen.getAllByText(/attempt 3/)).toHaveLength(2);
+    expect(screen.queryByText("Live view not running")).not.toBeInTheDocument();
+    // Nothing was received, so nothing is shown as if it had been.
+    expect(screen.queryByText("Live topic tree")).not.toBeInTheDocument();
+    // And the operator can get out.
+    expect(screen.getByRole("button", { name: "Stop live view" })).toBeInTheDocument();
+  });
+
+  it("keeps the last tree on screen through a drop and marks it stale", async () => {
+    liveState = {
+      phase: "reconnecting",
+      session: liveSession,
+      snapshot: liveSnapshot,
+      reconnectAttempts: 2,
+    };
+    stubFetch({ runs: [] });
+    render(scannerProviders(<MqttScannerPage />));
+
+    // The last snapshot is still the last thing the broker actually said.
+    expect(await screen.findByText("Live topic tree")).toBeInTheDocument();
+    expect(screen.getByText("example")).toBeInTheDocument();
+    expect(screen.getByText(/Live stream dropped, reconnecting \(attempt 2\)/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/the last snapshot the broker sent, so they may be out of date/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Live view not running")).not.toBeInTheDocument();
+  });
+
+  it("surfaces the give-up error once the reconnect cap is reached", async () => {
+    liveState = {
+      phase: "unavailable",
+      session: liveSession,
+      snapshot: null,
+      reconnectAttempts: 5,
+      error:
+        "The sidecar reports session sess-1 as connected, but its event stream closed 5 times without sending a topic snapshot. Nothing is being received. Stop the live view and start it again, or check the sidecar.",
+    };
+    stubFetch({ runs: [] });
+    render(scannerProviders(<MqttScannerPage />));
+
+    expect(await screen.findByText(/its event stream closed 5 times/)).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Live session problem");
+    expect(screen.getByRole("button", { name: "Stop live view" })).toBeInTheDocument();
+    expect(screen.queryByText("Live view not running")).not.toBeInTheDocument();
   });
 
   it("offers a take-over instead of stealing an occupied session", async () => {

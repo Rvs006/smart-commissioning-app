@@ -159,6 +159,17 @@ database migration in this release.
 
 ### Fixed
 
+- The MQTT live view now says what is actually happening when the broker session
+  is held but no topics are arriving. A sidecar that accepts the session and then
+  drops its event stream before the first snapshot used to be retried forever:
+  the status line read "reconnecting" while the page underneath said "Live view
+  not running", with no tree and nothing to press. The page now reports the real
+  state, counting the attempts, keeps the last snapshot on screen through a drop
+  and marks it stale rather than blanking the tree, and never claims the live
+  view is off while the sidecar is holding the broker. After five consecutive
+  reopens with no frame the session is reported unavailable, naming the session
+  and saying nothing is being received, so Stop and Start are the way out
+  instead of an endless retry.
 - An IP register host whose address falls outside the scanned Start/End range is
   no longer reported as unreachable. The sweep pings every address between start
   and end, so a register row outside that window was never contacted, and the

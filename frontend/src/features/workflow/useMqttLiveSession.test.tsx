@@ -119,6 +119,103 @@ describe("useMqttLiveSession", () => {
     expect(focusMqttLiveAsset).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "s1", asset: "AHU-1" }));
   });
 
+  it("counts reconnects and gives up rather than retrying a stream that never delivers", async () => {
+    // The QA case: the sidecar accepts the session, then its event stream closes
+    // before any snapshot. Retrying that forever left the page saying
+    // "reconnecting" with nothing to show and no way out.
+    vi.useFakeTimers();
+    try {
+      vi.mocked(connectMqttLiveSession).mockResolvedValue({
+        ok: true,
+        session: sessionInfo("me"),
+        connection: connection(),
+      });
+      let callbacks: MqttLiveCallbacks | undefined;
+      vi.mocked(streamMqttLiveEvents).mockImplementation((_sessionId, cb) => {
+        callbacks = cb;
+        return () => {};
+      });
+      const { result } = renderHook(() => useMqttLiveSession(true, { workspace, authorized: true }));
+      await act(async () => {
+        await result.current.start();
+      });
+
+      // Five closes, each with its backoff: still reconnecting, and the count
+      // the page shows the operator goes up every time.
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        act(() => {
+          callbacks?.onClose?.();
+        });
+        expect(result.current.phase).toBe("reconnecting");
+        expect(result.current.reconnectAttempts).toBe(attempt);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(20_000);
+        });
+      }
+
+      // The sixth is past the cap: stop retrying and say what is actually known.
+      act(() => {
+        callbacks?.onClose?.();
+      });
+      expect(result.current.phase).toBe("unavailable");
+      expect(result.current.reconnectAttempts).toBe(5);
+      expect(result.current.error).toContain("s1");
+      expect(result.current.error).toContain("without sending a topic snapshot");
+
+      // And it stays given up: no further timer reopens the stream.
+      const opens = vi.mocked(streamMqttLiveEvents).mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(vi.mocked(streamMqttLiveEvents).mock.calls.length).toBe(opens);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a delivered frame clears the reconnect count", async () => {
+    vi.mocked(connectMqttLiveSession).mockResolvedValue({
+      ok: true,
+      session: sessionInfo("me"),
+      connection: connection(),
+    });
+    let callbacks: MqttLiveCallbacks | undefined;
+    vi.mocked(streamMqttLiveEvents).mockImplementation((_sessionId, cb) => {
+      callbacks = cb;
+      return () => {};
+    });
+    const { result } = renderHook(() => useMqttLiveSession(true, { workspace, authorized: true }));
+    await act(async () => {
+      await result.current.start();
+    });
+    act(() => {
+      callbacks?.onClose?.();
+    });
+    expect(result.current.reconnectAttempts).toBe(1);
+
+    act(() => {
+      callbacks?.onFrame({
+        type: "snapshot",
+        status: connection(),
+        stats: {
+          expectedAssets: 0,
+          subscribedAssets: 1,
+          liveAssets: 1,
+          topicsDiscovered: 3,
+          issues: 0,
+          totalMessages: 5,
+        },
+        tree: [],
+        treeShown: 0,
+        totalTopics: 3,
+        filtered: false,
+        focused: null,
+      });
+    });
+    expect(result.current.phase).toBe("live");
+    expect(result.current.reconnectAttempts).toBe(0);
+  });
+
   it("subscribe and search send for the current session", async () => {
     vi.mocked(connectMqttLiveSession).mockResolvedValue({ ok: true, session: sessionInfo("me"), connection: connection() });
     const { result } = renderHook(() => useMqttLiveSession(true, { workspace, authorized: true }));
