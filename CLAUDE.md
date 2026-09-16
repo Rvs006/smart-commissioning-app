@@ -70,9 +70,10 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-09-15. The latest public release is
-  still v0.1.58, a small capacity release: the built-in MQTT discovery engine
-  retains up to 30,000 distinct topics per capture instead of 10,000 (#216), so
+- **Current handoff**: status as of 2026-09-16. The latest public release is
+  v0.1.58, published 2026-09-14 and still the current one, a small capacity
+  release: the built-in MQTT discovery engine retains up to 30,000 distinct
+  topics per capture instead of 10,000 (#216), so
   a registerless sweep of a 5,000-asset site publishing three UDMI topics per
   asset is captured whole, and the release secret scan fails closed on a missing
   or empty bundle path (#212, backported to the older wrappers in #213); field
