@@ -6795,7 +6795,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   Blank runs until every expected asset/topic has reported or you press Stop run —
                   on the portable exe as well as the hosted worker. Every capture still ends at the
                   48-hour safety limit (real-world reporting intervals: metadata is often daily),
-                  and the completion-driven safety limit is 500 distinct concrete topics. Closing
+                  and the completion-driven safety limit is one slot per expected register topic
+                  (at least 500 distinct concrete topics). Closing
                   the app ends the run, which is then marked interrupted at next start.
                 </p>
                 {udmiUseRegister ? (

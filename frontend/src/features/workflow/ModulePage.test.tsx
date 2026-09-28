@@ -7220,7 +7220,7 @@ describe("ModulePage UDMI workbench live results", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        /48-hour safety limit.*500 distinct\s*concrete topics.*Closing the app ends the run/i,
+        /48-hour safety limit.*one slot per expected\s*register topic\s*\(at least 500 distinct\s*concrete topics\).*Closing the app ends the run/i,
       ),
     ).toBeInTheDocument();
   });
