@@ -1828,7 +1828,11 @@ def build_udmi_report_model(
     notes.append(f"Active Results filters: {_filter_summary(report_scope['filters'])}.")
     if not unexpected_devices_measured:
         notes.append(
-            "Unexpected devices were not measured for every selected source run."
+            "Unexpected-device measurement was incomplete for at least one selected "
+            f"source run; the Unexpected Devices count of {asset_metrics['unexpected']} "
+            "is a lower bound, and the true count may be higher."
+            if asset_metrics["unexpected"]
+            else "Unexpected devices were not measured for every selected source run."
         )
 
     scope_complete = bool(udmi_sources) and not incomplete_source_runs

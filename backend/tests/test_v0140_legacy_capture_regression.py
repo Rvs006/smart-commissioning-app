@@ -114,8 +114,14 @@ class V0140LegacyCaptureRegressionTests(ApiTestCase):
         self.assertEqual(validation["payload_metrics"]["received"], 25)
         self.assertEqual(validation["asset_metrics"]["observed"], 25)
         discovery = summary["asset_topic_discovery"]
-        self.assertFalse(discovery["capture_complete"])
+        # The ledger is fed before the secondary budget drops anything, so a
+        # completed window stays complete; the status still names the overflow.
+        self.assertTrue(discovery["capture_complete"])
         self.assertEqual(discovery["capture_status"], "secondary_topic_limit_reached")
+        self.assertEqual(discovery["status_counts"]["capture_incomplete"], 0)
+        self.assertEqual(
+            discovery["status_counts"]["no_matching_asset_id_topic_observed"], 755
+        )
 
 
 if __name__ == "__main__":
