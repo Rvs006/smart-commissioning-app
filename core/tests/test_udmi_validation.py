@@ -3585,6 +3585,12 @@ class SecondaryLaneOverflowTests(unittest.TestCase):
         retention = summary["capture_retention"]
         self.assertTrue(retention["secondary_count_truncated"])
         self.assertEqual(retention["secondary_retained_count"], 2)
+        self.assertFalse(retention["wrong_topic_byte_truncated"])
+        # The ledger saw the dropped delivery, which is what keeps it complete.
+        discovery = summary["asset_topic_discovery"]
+        self.assertTrue(discovery["capture_complete"])
+        ledger_status = {row["asset_id"]: row["status"] for row in discovery["asset_results"]}
+        self.assertEqual(ledger_status["AHU-2"], "alternate_topic_observed")
         self.assertEqual(
             [
                 (row["asset_id"], [p["actual_topic"] for p in row["payloads"]])
@@ -3666,8 +3672,9 @@ class SecondaryLaneOverflowTests(unittest.TestCase):
             [
                 MqttMessage("site/noise/N-1/state", self._STATE),
                 MqttMessage("site/noise/N-2/state", self._STATE),
-                older,
+                # Delivered out of order: the receive time decides, not arrival.
                 newer,
+                older,
             ],
             clock,
         )
@@ -3687,6 +3694,28 @@ class SecondaryLaneOverflowTests(unittest.TestCase):
         self.assertEqual(
             parameters["assets"][1]["state_payload"]["timestamp"],
             "2026-07-09T10:00:00Z",
+        )
+
+    def test_pre_cap_wrong_topic_bodies_stay_inside_their_byte_budget(self) -> None:
+        first = MqttMessage("site/moved/AHU-2/state", self._STATE)
+        with patch.object(
+            udmi_validation,
+            "DEFAULT_WRONG_TOPIC_RETAINED_BYTES",
+            len(first.topic.encode()) + len(first.payload),
+        ):
+            summary = self._capture(
+                [
+                    MqttMessage("site/noise/N-1/state", self._STATE),
+                    MqttMessage("site/noise/N-2/state", self._STATE),
+                    first,
+                    MqttMessage("site/moved/AHU-3/state", self._STATE),
+                ]
+            )
+
+        self.assertTrue(summary["capture_retention"]["wrong_topic_byte_truncated"])
+        self.assertEqual(
+            [row["asset_id"] for row in summary["wrong_topic_assets"]],
+            ["AHU-2"],
         )
 
 

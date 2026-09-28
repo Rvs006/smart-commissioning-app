@@ -9592,7 +9592,8 @@ function assetTopicDiscoveryCaptureNote({
       : null;
   }
   if (laneLimit) {
-    return "The observational topic lane reached its retention limit and only retained messages were matched, so an asset with no match may still have published.";
+    // Runs saved before the pre-cap ledger rule land here too, so stay neutral.
+    return "This capture was recorded as incomplete when the observational topic lane reached its retention limit. Topic matches may not cover every message received.";
   }
   if (status === "cancelled") {
     return "This capture was stopped early. Topic matches only cover messages received before it stopped.";
