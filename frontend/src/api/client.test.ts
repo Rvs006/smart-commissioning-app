@@ -144,24 +144,25 @@ describe("session-bound client", () => {
     expect(requestSignal?.aborted).toBe(true);
   });
 
-  it("issues requests made after abort() with a fresh, un-aborted signal", async () => {
+  it("stays aborted, so a delayed caller cannot reuse the old key after sign-out", async () => {
     let requestSignal: AbortSignal | undefined;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
         requestSignal = init?.signal ?? undefined;
+        if (init?.signal?.aborted) {
+          throw init.signal.reason;
+        }
         return jsonResponse(healthPayload);
       }),
     );
-    const client = createSessionBoundApiClient(createSessionScopeId(), DEFAULT_WORKSPACE, null);
+    const client = createSessionBoundApiClient(createSessionScopeId(), DEFAULT_WORKSPACE, "old-key");
 
-    // React.StrictMode (dev only) aborts the memoized client once on its
-    // simulated unmount and then keeps using it after the remount.
     client.abort();
 
-    await expect(client.request<HealthStatus>("/health")).resolves.toEqual(healthPayload);
-    expect(requestSignal?.aborted).toBe(false);
-    expect(client.signal.aborted).toBe(false);
+    await expect(client.request<HealthStatus>("/health")).rejects.toBeDefined();
+    expect(requestSignal?.aborted).toBe(true);
+    expect(client.signal.aborted).toBe(true);
   });
 });
 

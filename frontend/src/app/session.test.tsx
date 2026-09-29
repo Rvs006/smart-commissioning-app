@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { clearApiKey, setApiKey } from "../api/client";
 import { SessionProvider } from "./session";
-import { useSession } from "./sessionContext";
+import { useSession, type SessionContextValue } from "./sessionContext";
 
 // `npm run dev` wraps the app in React.StrictMode (main.tsx), which mounts the
 // tree, runs every effect cleanup, then remounts it with the SAME memoized
@@ -66,5 +66,45 @@ describe("SessionProvider under React.StrictMode", () => {
     );
 
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("engineer"));
+  });
+
+  it("keeps the old client aborted after sign-out and after unmount", async () => {
+    setApiKey("strict-mode-key");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ username: "engineer-1", role: "engineer", source: "user_key" }),
+      ),
+    );
+    const seen: SessionContextValue[] = [];
+    const latest = () => seen[seen.length - 1];
+    function Capture() {
+      seen.push(useSession());
+      return null;
+    }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    const view = render(
+      <StrictMode>
+        <QueryClientProvider client={queryClient}>
+          <SessionProvider>
+            <Capture />
+          </SessionProvider>
+        </QueryClientProvider>
+      </StrictMode>,
+    );
+    await waitFor(() => expect(latest()?.role).toBe("engineer"));
+
+    const signedInClient = latest().apiClient;
+    expect(signedInClient.signal.aborted).toBe(false);
+    act(() => latest().signOut());
+    // A delayed poll holding the signed-in client must not reach the API again.
+    expect(signedInClient.signal.aborted).toBe(true);
+
+    const currentClient = latest().apiClient;
+    expect(currentClient).not.toBe(signedInClient);
+    view.unmount();
+    await Promise.resolve();
+    expect(currentClient.signal.aborted).toBe(true);
   });
 });

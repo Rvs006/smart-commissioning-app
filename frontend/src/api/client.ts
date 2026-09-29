@@ -1008,12 +1008,7 @@ export function createSessionBoundApiClient(
   workspace: WorkspaceRef,
   apiKey: string | null = getApiKey(),
 ): SessionBoundApiClient {
-  // abort() ends the CURRENT generation of requests and opens a fresh one, so a
-  // request issued after it is not pre-aborted. React.StrictMode (dev only) runs
-  // the provider's effect cleanup, which aborts this client, and then remounts
-  // with the SAME memoized client; a client that stayed aborted would reject
-  // every request for the rest of the dev session.
-  let controller = new AbortController();
+  const controller = new AbortController();
   const fetchRaw = (path: string, init?: RequestInit) => {
     const signal = combineSignals(controller.signal, init?.signal);
     return fetch(`${apiBaseUrl}${path}`, withApiKey({ ...init, signal }, apiKey));
@@ -1021,13 +1016,8 @@ export function createSessionBoundApiClient(
   const client: SessionBoundApiClient = {
     sessionScopeId,
     workspace,
-    get signal() {
-      return controller.signal;
-    },
-    abort: () => {
-      controller.abort();
-      controller = new AbortController();
-    },
+    signal: controller.signal,
+    abort: () => controller.abort(),
     fetchRaw,
     request: async <T>(path: string, init?: RequestInit) =>
       parseJsonResponse<T>(await fetchRaw(path, init)),
