@@ -10,7 +10,14 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type InfiniteData,
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router";
 import { hostRangeFromCidr } from "./ipRange";
 import {
@@ -348,9 +355,12 @@ const SIDECAR_DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-scanner", "mqtt-
 const IMPORT_ERROR_DISPLAY_CAP = 50;
 const LONG_PAYLOAD_ISSUE_THRESHOLD = 8;
 // Each stored report carries full source-run snapshots, so the list opens on
-// the newest few and loads older ones on request. The API caps a page at 100.
+// the newest few and pages older ones in by offset on request.
 const REPORT_PAGE_SIZE = 10;
-const REPORT_LIST_MAX = 100;
+
+function reportsListQueryKey(sessionScopeId: SessionScopeId, workspaceRef: WorkspaceRef) {
+  return [...queryKeys.reports(sessionScopeId, workspaceRef), "pages"] as const;
+}
 const TERMINAL_RUN_STATUS_RETRY_DELAYS_MS = [300, 600, 1_000] as const;
 
 function isTransientRunStatusError(error: unknown): boolean {
@@ -893,7 +903,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Reports page: which queued reports are ticked for "Export selected" and a
   // one-shot confirmation shown after a report is generated (mqatcqb3/mqautz9j).
   const [selectedReportIds, setSelectedReportIds] = useState<Set<string>>(new Set());
-  const [reportListLimit, setReportListLimit] = useState(REPORT_PAGE_SIZE);
   const [reportToast, setReportToast] = useState<string | null>(null);
   const [reportToastWarning, setReportToastWarning] = useState(false);
   const [generatedAllReportIds, setGeneratedAllReportIds] = useState<readonly string[] | null>(
@@ -1871,13 +1880,37 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   });
 
   // Reports list for the reports page (per-report selection + Export selected).
-  const reportsQuery = useQuery({
+  // Pages of REPORT_PAGE_SIZE fetched by offset; "Show older reports" appends
+  // the next page so each click costs one page of server-side verification.
+  const reportsQuery = useInfiniteQuery<
+    ReportListResponse,
+    Error,
+    InfiniteData<ReportListResponse, number>,
+    ReturnType<typeof reportsListQueryKey>,
+    number
+  >({
     enabled: module.route === "reports",
-    queryFn: ({ signal }) =>
-      listReports({ limit: reportListLimit }, { client: apiClient, signal }),
-    queryKey: [...queryKeys.reports(sessionScopeId, workspaceRef), reportListLimit],
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.has_more
+        ? allPages.reduce((count, page) => count + page.reports.length, 0)
+        : undefined,
+    initialPageParam: 0,
+    queryFn: ({ pageParam, signal }) =>
+      listReports(
+        { limit: REPORT_PAGE_SIZE, offset: pageParam },
+        { client: apiClient, signal },
+      ),
+    queryKey: reportsListQueryKey(sessionScopeId, workspaceRef),
     placeholderData: keepPreviousData,
   });
+  const loadedReports = useMemo(() => {
+    const seen = new Set<string>();
+    return (reportsQuery.data?.pages ?? [])
+      .flatMap((page) => page.reports)
+      .filter((report) => !seen.has(report.report_id) && Boolean(seen.add(report.report_id)));
+  }, [reportsQuery.data]);
+  const reportPages = reportsQuery.data?.pages ?? [];
+  const reportsTotal = reportPages[reportPages.length - 1]?.total;
 
   // Uploaded non-published UDMI schema sets, shown on the UDMI workbench only.
   const udmiSchemaSetsQuery = useQuery({
@@ -2181,7 +2214,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setResultsObservationFilter("all");
     setExpandedAsset(null);
     setSelectedReportIds(new Set());
-    setReportListLimit(REPORT_PAGE_SIZE);
+    // Reopen a workspace on its newest page, not every page loaded last time.
+    queryClient.setQueryData<InfiniteData<ReportListResponse, number>>(
+      reportsListQueryKey(sessionScopeId, {
+        projectId: workspaceRef.projectId,
+        siteId: workspaceRef.siteId,
+      }),
+      (current) =>
+        current && current.pages.length > 1
+          ? { pages: current.pages.slice(0, 1), pageParams: current.pageParams.slice(0, 1) }
+          : current,
+    );
     setReportToast(null);
     setReportToastWarning(false);
     setGeneratedAllReportIds(null);
@@ -2217,6 +2260,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetCaptureExportDownload,
     resetGeneratedAllBundleDownload,
     resetValidationJsonDownload,
+    queryClient,
     sessionScopeId,
     workspaceRef.projectId,
     workspaceRef.siteId,
@@ -3127,9 +3171,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     },
     onSuccess: (result) => {
       const deletedIds = new Set(result.deleted_report_ids);
-      const reportsQueryKey = [...queryKeys.reports(sessionScopeId, workspaceRef), reportListLimit];
+      const reportsQueryKey = reportsListQueryKey(sessionScopeId, workspaceRef);
       const cachedReports =
-        queryClient.getQueryData<ReportListResponse>(reportsQueryKey)?.reports ?? [];
+        queryClient
+          .getQueryData<InfiniteData<ReportListResponse, number>>(reportsQueryKey)
+          ?.pages.flatMap((page) => page.reports) ?? [];
       const focusIntent = reportDeleteFocusIntentRef.current;
       reportDeleteFocusIntentRef.current = null;
       let nextFocusReportId: string | null = null;
@@ -3150,13 +3196,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       }
       // The delete response is authoritative. Remove those rows immediately so
       // a failed reconciliation fetch cannot leave dead Download/Delete actions.
-      queryClient.setQueryData<ReportListResponse>(reportsQueryKey, (current) =>
-        current
-          ? {
-              ...current,
-              reports: current.reports.filter((report) => !deletedIds.has(report.report_id)),
-            }
-          : current,
+      queryClient.setQueryData<InfiniteData<ReportListResponse, number>>(
+        reportsQueryKey,
+        (current) =>
+          current
+            ? {
+                ...current,
+                pages: current.pages.map((page) => ({
+                  ...page,
+                  reports: page.reports.filter((report) => !deletedIds.has(report.report_id)),
+                })),
+              }
+            : current,
       );
       setSelectedReportIds((current) => {
         const retained = new Set(current);
@@ -4213,9 +4264,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     if (module.route === "reports" && !reportsQuery.isLoading && reportsQuery.data) {
       return {
-        primary: String(reportsQuery.data.total ?? reportsQuery.data.reports.length),
+        primary: String(reportsTotal ?? loadedReports.length),
         primaryLabel: "reports stored",
-        secondary: String(reportsQuery.data.reports.length),
+        secondary: String(loadedReports.length),
         secondaryLabel: "newest shown",
       };
     }
@@ -4228,6 +4279,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     displayedValidationSummary,
     reportsQuery.isLoading,
     reportsQuery.data,
+    reportsTotal,
+    loadedReports,
   ]);
 
   const activeStatusClass = activeRunStatus ? toHealthState(activeRunStatus) : "queued";
@@ -4431,7 +4484,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   // All reports remain selectable for deletion. Export derives its own subset
   // because only succeeded reports have bytes behind the download endpoint.
-  const liveReports = reportsQuery.data?.reports ?? [];
+  const liveReports = loadedReports;
   const hasUdmiReports = liveReports.some((report) => report.report_type === "udmi_validation");
   const downloadableReports = liveReports.filter((report) => report.status === "succeeded");
   const selectedReports = liveReports.filter((report) => selectedReportIds.has(report.report_id));
@@ -7455,20 +7508,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </div>
               )}
             </div>
-            {reportsQuery.data?.has_more && reportListLimit < REPORT_LIST_MAX && (
+            {reportsQuery.hasNextPage && (
               <button
                 className="secondary-button compact"
-                disabled={reportsQuery.isPlaceholderData}
-                onClick={() =>
-                  setReportListLimit((current) =>
-                    Math.min(current + REPORT_PAGE_SIZE, REPORT_LIST_MAX),
-                  )
-                }
+                disabled={reportsQuery.isFetchingNextPage || reportsQuery.isPlaceholderData}
+                onClick={() => void reportsQuery.fetchNextPage()}
                 type="button"
               >
-                {reportsQuery.isPlaceholderData
+                {reportsQuery.isFetchingNextPage
                   ? "Loading older reports..."
-                  : `Show older reports (${(reportsQuery.data.total ?? 0) - liveReports.length} more)`}
+                  : `Show older reports (${Math.max((reportsTotal ?? 0) - liveReports.length, 0)} more)`}
               </button>
             )}
             {reportsQuery.isError && (
