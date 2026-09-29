@@ -162,8 +162,9 @@ export function DashboardPage() {
 
   // Reports (real) — used for the evidence-pack count KPI.
   const reportsQuery = useQuery({
-    queryFn: ({ signal }) => listReports({ limit: 100 }, { client: apiClient, signal }),
-    queryKey: queryKeys.reports(sessionScopeId, workspace),
+    // The KPI only needs the total; one row keeps this 15s poll cheap.
+    queryFn: ({ signal }) => listReports({ limit: 1 }, { client: apiClient, signal }),
+    queryKey: [...queryKeys.reports(sessionScopeId, workspace), "count"],
     refetchInterval: (query) =>
       query.state.data?.reports?.some((report) => !isTerminalStatus(report.status)) ? 1500 : 15000,
   });

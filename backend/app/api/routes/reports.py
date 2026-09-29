@@ -78,7 +78,7 @@ def _require_scoped_report(report_id: str, principal: AuthPrincipal) -> None:
 
 
 def _to_report_summary(report_id: str | RunRecord) -> ReportSummary:
-    run = service.get_run(report_id) if isinstance(report_id, str) else report_id
+    run = service.get_run_read_only(report_id) if isinstance(report_id, str) else report_id
     if run.job_type != "report_generation":
         raise FileNotFoundError(run.run_id)
 
