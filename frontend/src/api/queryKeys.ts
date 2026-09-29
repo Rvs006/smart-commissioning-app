@@ -35,6 +35,13 @@ export const queryKeys = {
     [...workspaceRoot(scope, workspace), "import-errors", importId] as const,
   latestImport: (scope: SessionScopeId, workspace: WorkspaceRef, importType?: string) =>
     [...workspaceRoot(scope, workspace), "latest-import", importType] as const,
+  // Invalidate EVERY import type's latest-import query for this workspace.
+  // `latestImport(scope, workspace)` is not that key: it appends an `undefined`
+  // slot, and TanStack's partialMatchKey compares element by element, so
+  // `[..., "latest-import", undefined]` never matches `[..., "latest-import",
+  // "ip_scanner_register"]` and the invalidation silently does nothing.
+  latestImportRoot: (scope: SessionScopeId, workspace: WorkspaceRef) =>
+    [...workspaceRoot(scope, workspace), "latest-import"] as const,
   schemaSets: (scope: SessionScopeId, workspace: WorkspaceRef) =>
     [...workspaceRoot(scope, workspace), "udmi-schema-sets"] as const,
   runs: (scope: SessionScopeId, workspace: WorkspaceRef, variant: string = "all") =>

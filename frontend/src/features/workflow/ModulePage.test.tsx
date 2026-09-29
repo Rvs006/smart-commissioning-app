@@ -907,6 +907,192 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.queryByText("Register already imported")).not.toBeInTheDocument();
   });
 
+  // "Save scan as register" writes no file, and the operator went looking for one.
+  // A register on file that came from a scan names its run, so the same CSV can be
+  // downloaded back; an uploaded one has no run to rebuild it from.
+  function stubScannerLatestImportFetch(fileName: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/imports/latest")) {
+          return jsonResponse({
+            ...latestImportSummary,
+            import_type: "ip_scanner_register",
+            file_name: fileName,
+          });
+        }
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse([
+            {
+              import_type: "ip_scanner_register",
+              description: "Expected devices for the IP scanner sidecar.",
+              required_columns: ["IP Address"],
+              duplicate_key_fields: ["IP Address"],
+            },
+          ]);
+        }
+        if (url.includes("/api/v1/")) return jsonResponse({});
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("offers the register CSV back when the register on file came from a saved scan", async () => {
+    stubScannerLatestImportFetch("scan-register-run-ip-7.csv");
+
+    renderModule("ip-scanner");
+
+    expect(await screen.findByText("Register already imported")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download register CSV" })).toBeInTheDocument();
+  });
+
+  // The register CSV is rebuilt from the run that was saved. Reading the run id
+  // off the mutable `activeRun` meant a save that resolved after the operator
+  // moved to another run built run B's URL under run A's file name.
+  function ipScannerRun(runId: string, hostname: string) {
+    return {
+      run: {
+        ...terminalRun,
+        run_id: runId,
+        job_type: "ip_scanner",
+        stage: "completed",
+      },
+      results: {
+        ...resultsPayload,
+        run_id: runId,
+        job_type: "ip_scanner",
+        discovered_assets: [],
+        devices: [
+          {
+            device_id: `${runId}-d1`,
+            address: "192.0.2.214",
+            name: hostname,
+            device_type: "ip_host",
+            attributes: { open_ports: [443] },
+          },
+        ],
+      },
+    };
+  }
+
+  function stubIpScannerRunFetch(
+    runsForCall: () => Array<Record<string, unknown>>,
+    byRunId: Record<string, ReturnType<typeof ipScannerRun>>,
+    onSaveRegister: () => Promise<unknown>,
+  ) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/save-as-register") && init?.method === "POST") {
+          return jsonResponse(await onSaveRegister());
+        }
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: url.includes("job_type=ip_scanner") ? runsForCall() : [],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        for (const [runId, fixture] of Object.entries(byRunId)) {
+          if (url.endsWith(`/api/v1/discovery/runs/${runId}/results`)) {
+            return jsonResponse(fixture.results);
+          }
+          if (url.endsWith(`/api/v1/discovery/runs/${runId}`)) {
+            return jsonResponse(fixture.run);
+          }
+        }
+        if (url.includes("/api/v1/")) return jsonResponse({});
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("binds the register CSV download to the run that was saved", async () => {
+    const runA = ipScannerRun("run-ip-A", "plant-controller-a");
+    stubIpScannerRunFetch(
+      () => [{ ...runA.run, edge_id: null }],
+      { "run-ip-A": runA },
+      async () => ({ ...latestImportSummary, file_name: "scan-register-run-ip-A.csv" }),
+    );
+
+    renderModule("ip-scanner");
+
+    const saveButton = await screen.findByRole("button", { name: "Save scan as register" });
+    await waitFor(() => expect(saveButton).toBeEnabled());
+    fireEvent.click(saveButton);
+
+    expect(await screen.findByText("Saved as register")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Download register CSV" }));
+
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(fetch)
+          .mock.calls.some(([input]) =>
+            String(input).includes("/ip_sidecar/runs/run-ip-A/register.csv"),
+          ),
+      ).toBe(true),
+    );
+  });
+
+  it("drops a save that lands after the operator switched runs", async () => {
+    const runA = ipScannerRun("run-ip-A", "plant-controller-a");
+    const runB = ipScannerRun("run-ip-B", "plant-controller-b");
+    let currentRun = runA.run;
+    let releaseSave!: () => void;
+    const savePending = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+
+    stubIpScannerRunFetch(
+      () => [{ ...currentRun, edge_id: null }],
+      { "run-ip-A": runA, "run-ip-B": runB },
+      async () => {
+        await savePending;
+        return { ...latestImportSummary, file_name: "scan-register-run-ip-A.csv" };
+      },
+    );
+
+    renderModule("ip-scanner");
+
+    const saveButton = await screen.findByRole("button", { name: "Save scan as register" });
+    await waitFor(() => expect(saveButton).toBeEnabled());
+    fireEvent.click(saveButton);
+    await screen.findByRole("button", { name: "Saving register..." });
+
+    // The operator moves to another run while run A's save is still in flight.
+    currentRun = runB.run;
+    // A window focus refetches the run-restore query, which swaps the restored
+    // run: the same thing the operator sees after picking another run.
+    window.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(document.body.textContent).toContain("run-ip-B"));
+    expect(document.body.textContent).not.toContain("run-ip-A");
+
+    releaseSave();
+
+    // Run A's summary must not repopulate the panel over run B: the note would
+    // name run A's file while the download URL pointed at run B.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save scan as register" })).toBeEnabled(),
+    );
+    expect(screen.queryByText("Saved as register")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Download register CSV" })).toBeNull();
+  });
+
+  it("offers no register CSV when the register on file was uploaded", async () => {
+    stubScannerLatestImportFetch("site_ip_register.csv");
+
+    renderModule("ip-scanner");
+
+    expect(await screen.findByText("Register already imported")).toBeInTheDocument();
+    // There is no run behind an uploaded file, so there is nothing honest to rebuild.
+    expect(screen.queryByRole("button", { name: "Download register CSV" })).toBeNull();
+  });
+
   it("sends a CIDR target override as parameters.cidr with no addresses key and no fabricated authorization principal", async () => {
     let previewBody: { parameters: Record<string, unknown> } | null = null;
     let liveBody: { parameters: Record<string, unknown> } | null = null;
