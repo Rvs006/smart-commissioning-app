@@ -6923,7 +6923,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   Blank runs until every expected asset/topic has reported or you press Stop run —
                   on the portable exe as well as the hosted worker. Every capture still ends at the
                   48-hour safety limit (real-world reporting intervals: metadata is often daily),
-                  and the completion-driven safety limit is 500 distinct concrete topics. Closing
+                  and the completion-driven safety limit is one slot per expected register topic
+                  (at least 500 distinct concrete topics). Closing
                   the app ends the run, which is then marked interrupted at next start.
                 </p>
                 {udmiUseRegister ? (
@@ -9731,6 +9732,29 @@ function assetTopicDiscoveryCaptureStatusLabel(status: string): string {
   return status.replace(/_/g, " ");
 }
 
+// The ledger sees every delivery before the observational lane's retention
+// limit, so that limit alone leaves a completed window's matches whole.
+function assetTopicDiscoveryCaptureNote({
+  capture_complete: complete,
+  capture_status: status,
+}: UdmiAssetTopicDiscovery): string | null {
+  const laneLimit =
+    status === "secondary_topic_limit_reached" || status === "secondary_byte_limit_reached";
+  if (complete) {
+    return laneLimit
+      ? "The observational topic lane reached its retention limit, but topic matches are recorded before that limit applies, so they cover the whole capture window."
+      : null;
+  }
+  if (laneLimit) {
+    // Runs saved before the pre-cap ledger rule land here too, so stay neutral.
+    return "This capture was recorded as incomplete when the observational topic lane reached its retention limit. Topic matches may not cover every message received.";
+  }
+  if (status === "cancelled") {
+    return "This capture was stopped early. Topic matches only cover messages received before it stopped.";
+  }
+  return "This capture did not complete its measurement window. Topic matches only cover messages received before it ended.";
+}
+
 function formatAssetTopicDiscoveryStatusCounts(
   statusCounts: UdmiAssetTopicDiscovery["status_counts"],
 ): string {
@@ -9772,6 +9796,7 @@ function AssetTopicDiscoveryPanel({
   discovery: UdmiAssetTopicDiscovery;
   filtered: boolean;
 }) {
+  const captureNote = assetTopicDiscoveryCaptureNote(discovery);
   return (
     <section
       className="udmi-system-summary udmi-asset-topic-discovery"
@@ -9806,11 +9831,7 @@ function AssetTopicDiscoveryPanel({
       <p className="section-copy">
         Status totals: {formatAssetTopicDiscoveryStatusCounts(discovery.status_counts)}
       </p>
-      {!discovery.capture_complete ? (
-        <p className="section-copy">
-          This capture is incomplete. Topic matches only cover messages retained before it ended.
-        </p>
-      ) : null}
+      {captureNote ? <p className="section-copy">{captureNote}</p> : null}
       {discovery.scope_error ? (
         <p className="section-copy">
           Scope configuration: {discovery.scope_error.replace(/_/g, " ")}.
@@ -9930,6 +9951,7 @@ function UdmiSummaryPanel({
   provisional: boolean;
   summary: UdmiSummaryDisplay;
 }) {
+  const unexpectedCount = summary.asset_metrics.unexpected ?? 0;
   const assets: SummaryMetric[] = [
     { label: "Expected assets", value: summary.asset_metrics.expected },
     { label: "Observed assets", value: summary.asset_metrics.observed },
@@ -9937,7 +9959,7 @@ function UdmiSummaryPanel({
     { label: "Assets with issues", value: summary.asset_metrics.with_issues },
     { label: "Successfully validated", value: summary.asset_metrics.successfully_validated },
     { label: "Wrong-topic assets", value: summary.asset_metrics.wrong_topic ?? 0 },
-    { label: "Unexpected devices", value: summary.asset_metrics.unexpected ?? 0 },
+    { label: "Unexpected devices", value: unexpectedCount },
   ];
   const faults: SummaryMetric[] = [
     { label: "Payload formatting", value: summary.fault_metrics.payload_formatting_issues },
@@ -10007,6 +10029,13 @@ function UdmiSummaryPanel({
               ? ` for ${summary.unexpected_devices_measurement_scope}`
               : " for this run"}
             .
+          </strong>
+        ) : unexpectedCount > 0 ? (
+          <strong>
+            Unexpected-device measurement was incomplete for this run; at least{" "}
+            {formatMetricCount(unexpectedCount)} unexpected{" "}
+            {unexpectedCount === 1 ? "publisher was" : "publishers were"} seen, and the true count
+            may be higher.
           </strong>
         ) : (
           <strong>

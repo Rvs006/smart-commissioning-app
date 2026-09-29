@@ -44,6 +44,31 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   save-as-register instead of showing the previous register until the page is
   reloaded. The refresh was asking for a query key with an empty import-type
   slot, which matched nothing, so it had been doing nothing at all.
+- UDMI validation now reports its observational outputs honestly when the
+  secondary (observation-only) MQTT lane hits its distinct-topic or byte limit.
+  Validation metrics were already correct in that case; three reporting paths
+  were not.
+  - Wrong-topic detection no longer depends on the secondary lane retaining the
+    message. The capture's pre-cap `on_observed_message` hook now keeps the
+    latest wrong-topic payload per registered asset and payload type, so a
+    registered asset publishing under a non-register root is listed as
+    wrong-topic and its payload is still validated, even after the lane
+    overflowed. The slot count is bounded by the register and the payload bytes
+    by the same allowance the transport gives expected payloads (256 MiB); a
+    payload refused by that cap is recorded as
+    `capture_retention.wrong_topic_byte_truncated`. Topics seen only by the
+    pre-cap hook no longer enter the per-run validation-filter cache.
+  - The asset topic-discovery ledger is fed before the secondary limit applies,
+    so secondary truncation alone no longer marks it incomplete: after a
+    completed window an unmatched asset reads "No matching asset-ID topic
+    observed", not "Capture incomplete". `capture_status` still reports
+    `secondary_topic_limit_reached` / `secondary_byte_limit_reached`, and the
+    panel note now depends on the status instead of always saying the capture
+    was incomplete.
+  - When unexpected-device measurement did not complete but devices were still
+    listed, the Results caption and the PDF/DOCX/XLSX/ZIP report note now say
+    the count is a lower bound ("at least N") instead of calling the displayed
+    count 0 or saying the devices were not measured.
 
 ## [0.1.58] - 2026-09-14
 
