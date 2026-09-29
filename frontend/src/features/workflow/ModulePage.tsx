@@ -2130,6 +2130,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setResultsObservationFilter("all");
     setExpandedAsset(null);
     setSelectedReportIds(new Set());
+    setReportListLimit(REPORT_PAGE_SIZE);
     setReportToast(null);
     setReportToastWarning(false);
     setGeneratedAllReportIds(null);

@@ -271,6 +271,26 @@ class ReportListProjectionTests(ApiTestCase):
         self.assertTrue(run_selects, statements)
         self.assertFalse(any("RUNS.PARAMETERS" in s for s in run_selects), run_selects)
 
+    def test_bulk_delete_route_authorizes_without_taking_the_write_lock(self) -> None:
+        # The route integrity-loads every id before deleting. Those loads must
+        # stay read-only so only the delete itself reserves SQLite's writer.
+        from app.api.routes import reports as reports_route
+
+        created = [self._create_report([])["report_id"] for _index in range(3)]
+        statements, stop = self._capture_statements(reports_route.service.engine)
+        try:
+            response = self.client.post("/api/v1/reports/delete", json={"report_ids": created})
+        finally:
+            stop()
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["deleted_count"], 3)
+        self.assertEqual(
+            sum(statement.startswith("BEGIN IMMEDIATE") for statement in statements),
+            1,
+            statements,
+        )
+
     def test_report_list_fails_closed_for_selected_tampered_metadata(self) -> None:
         from app.core.db import get_engine
         from smart_commissioning_core.db.models import Run

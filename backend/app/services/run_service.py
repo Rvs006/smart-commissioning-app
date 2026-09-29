@@ -785,7 +785,9 @@ class RunService:
         """
 
         verified = self._verify_report_source_seal(run_id)
-        run = self.get_run(run_id)
+        # Read-only: this also authorizes every id in a bulk delete, and a
+        # write-locked load of each snapshot-heavy report starved other requests.
+        run = self.get_run_read_only(run_id)
         return _project_verified_report_record(run, verified)
 
     def recover_expired_leases(self) -> list[str]:
