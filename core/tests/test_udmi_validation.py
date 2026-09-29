@@ -11,6 +11,7 @@ import socket
 import threading
 import time
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -3496,6 +3497,225 @@ class AssetTopicDiscoveryTests(unittest.TestCase):
         self.assertEqual(
             {row["status"] for row in discovery["asset_results"]},
             {"scope_unavailable"},
+        )
+
+
+class _FeedClock:
+    """Monotonic clock that passes the capture deadline once the feed is empty."""
+
+    def __init__(self) -> None:
+        self.exhausted = False
+
+    def __call__(self) -> float:
+        return 10.0 if self.exhausted else 0.0
+
+
+class _FeedClient:
+    """MqttClient double that feeds fixed deliveries to the real capture loop."""
+
+    def __init__(self, deliveries: list[MqttMessage], clock: _FeedClock) -> None:
+        self.deliveries = list(deliveries)
+        self.clock = clock
+
+    def __enter__(self) -> "_FeedClient":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def subscribe_many(self, _topics: list[str], _qos: int = 0) -> None:
+        return None
+
+    def ping(self) -> None:
+        return None
+
+    def read_publish_any(self, **_kwargs: object) -> MqttMessage | None:
+        if self.deliveries:
+            return self.deliveries.pop(0)
+        self.clock.exhausted = True
+        return None
+
+
+class SecondaryLaneOverflowTests(unittest.TestCase):
+    """A full observational lane must not hide registered-asset evidence."""
+
+    _STATE = json.dumps(_state()).encode()
+
+    @staticmethod
+    def _parameters() -> dict[str, object]:
+        return {
+            **_BROKER,
+            "capture_seconds": 2,
+            "unexpected_max_messages": 2,
+            "topic_discovery_enabled": True,
+            "topic_discovery_scope": "bounded",
+            "assets": [
+                {
+                    "expected_schedule": {"asset_id": asset_id, "system": "HVAC"},
+                    "state_topic": f"site/hvac/{asset_id}/state",
+                }
+                for asset_id in ("AHU-1", "AHU-2", "AHU-3")
+            ],
+        }
+
+    def _capture(self, deliveries: list[MqttMessage]) -> dict[str, object]:
+        clock = _FeedClock()
+        fake = _FeedClient(deliveries, clock)
+        with (
+            patch.object(mqtt_transport, "MqttClient", lambda _settings: fake),
+            patch.object(mqtt_transport.time, "monotonic", clock),
+        ):
+            result = validate_udmi_full_report(
+                self._parameters(),
+                cancel_check=lambda: False,
+            )
+        return result.result_summary
+
+    def test_wrong_topic_dropped_by_the_secondary_budget_is_still_reported(self) -> None:
+        summary = self._capture(
+            [
+                MqttMessage("site/noise/N-1/state", self._STATE),
+                MqttMessage("site/noise/N-2/state", self._STATE),
+                # The two-topic secondary budget is already full here.
+                MqttMessage("site/moved/AHU-2/state", self._STATE),
+                MqttMessage("site/hvac/AHU-1/state", self._STATE),
+            ]
+        )
+
+        retention = summary["capture_retention"]
+        self.assertTrue(retention["secondary_count_truncated"])
+        self.assertEqual(retention["secondary_retained_count"], 2)
+        self.assertFalse(retention["wrong_topic_byte_truncated"])
+        # The ledger saw the dropped delivery, which is what keeps it complete.
+        discovery = summary["asset_topic_discovery"]
+        self.assertTrue(discovery["capture_complete"])
+        ledger_status = {row["asset_id"]: row["status"] for row in discovery["asset_results"]}
+        self.assertEqual(ledger_status["AHU-2"], "alternate_topic_observed")
+        self.assertEqual(
+            [
+                (row["asset_id"], [p["actual_topic"] for p in row["payloads"]])
+                for row in summary["wrong_topic_assets"]
+            ],
+            [("AHU-2", ["site/moved/AHU-2/state"])],
+        )
+        validation = summary["validation_summary_v1"]
+        self.assertEqual(validation["asset_metrics"]["wrong_topic"], 1)
+        observed = {
+            row["asset_id"]: row["observed"] for row in validation["asset_results"]
+        }
+        self.assertEqual(observed, {"AHU-1": True, "AHU-2": True, "AHU-3": False})
+        # The unexpected inventory still comes from retained traffic only.
+        self.assertFalse(summary["unexpected_devices_measured"])
+        self.assertEqual(
+            [device["topic_root"] for device in summary["unexpected_devices"]],
+            ["site/noise/N-1", "site/noise/N-2"],
+        )
+
+    def test_secondary_truncation_alone_leaves_the_topic_ledger_complete(self) -> None:
+        summary = self._capture(
+            [
+                MqttMessage("site/noise/N-1/state", self._STATE),
+                MqttMessage("site/noise/N-2/state", self._STATE),
+                MqttMessage("site/noise/N-3/state", self._STATE),
+                MqttMessage("site/hvac/AHU-1/state", self._STATE),
+            ]
+        )
+
+        self.assertTrue(summary["window_completed"])
+        discovery = summary["asset_topic_discovery"]
+        self.assertTrue(discovery["capture_complete"])
+        self.assertEqual(discovery["capture_status"], "secondary_topic_limit_reached")
+        self.assertEqual(
+            {row["asset_id"]: row["status"] for row in discovery["asset_results"]},
+            {
+                "AHU-1": "expected_topic_observed",
+                "AHU-2": "no_matching_asset_id_topic_observed",
+                "AHU-3": "no_matching_asset_id_topic_observed",
+            },
+        )
+
+    def test_retained_only_ledger_stays_incomplete_after_secondary_truncation(self) -> None:
+        """An adapter that never offered deliveries pre-cap cannot vouch for them."""
+
+        def retained_only(_settings: object, **_kwargs: object) -> MqttCaptureOutcome:
+            return replace(
+                _deadline_outcome([MqttMessage("site/hvac/AHU-1/state", self._STATE)]),
+                secondary_truncated=True,
+                secondary_count_truncated=True,
+            )
+
+        result = validate_udmi_full_report(
+            self._parameters(),
+            live_capture=retained_only,
+            cancel_check=lambda: False,
+        )
+
+        discovery = result.result_summary["asset_topic_discovery"]
+        self.assertFalse(discovery["capture_complete"])
+        self.assertEqual(discovery["capture_status"], "secondary_topic_limit_reached")
+        self.assertEqual(discovery["status_counts"]["capture_incomplete"], 2)
+
+    def test_pre_cap_wrong_topic_keeps_the_latest_payload_per_slot(self) -> None:
+        older = MqttMessage(
+            "site/moved/AHU-2/state",
+            json.dumps(_state(timestamp="2026-07-09T09:00:00Z")).encode(),
+            received_at=datetime(2026, 7, 9, 9, 0, tzinfo=UTC),
+        )
+        newer = MqttMessage(
+            "site/other/AHU-2/state",
+            json.dumps(_state(timestamp="2026-07-09T10:00:00Z")).encode(),
+            received_at=datetime(2026, 7, 9, 10, 0, tzinfo=UTC),
+        )
+        parameters = self._parameters()
+        clock = _FeedClock()
+        fake = _FeedClient(
+            [
+                MqttMessage("site/noise/N-1/state", self._STATE),
+                MqttMessage("site/noise/N-2/state", self._STATE),
+                # Delivered out of order: the receive time decides, not arrival.
+                newer,
+                older,
+            ],
+            clock,
+        )
+        with (
+            patch.object(mqtt_transport, "MqttClient", lambda _settings: fake),
+            patch.object(mqtt_transport.time, "monotonic", clock),
+        ):
+            result = validate_udmi_full_report(parameters, cancel_check=lambda: False)
+
+        self.assertEqual(
+            [
+                [p["actual_topic"] for p in row["payloads"]]
+                for row in result.result_summary["wrong_topic_assets"]
+            ],
+            [["site/other/AHU-2/state"]],
+        )
+        self.assertEqual(
+            parameters["assets"][1]["state_payload"]["timestamp"],
+            "2026-07-09T10:00:00Z",
+        )
+
+    def test_pre_cap_wrong_topic_bodies_stay_inside_their_byte_budget(self) -> None:
+        first = MqttMessage("site/moved/AHU-2/state", self._STATE)
+        with patch.object(
+            udmi_validation,
+            "DEFAULT_WRONG_TOPIC_RETAINED_BYTES",
+            len(first.topic.encode()) + len(first.payload),
+        ):
+            summary = self._capture(
+                [
+                    MqttMessage("site/noise/N-1/state", self._STATE),
+                    MqttMessage("site/noise/N-2/state", self._STATE),
+                    first,
+                    MqttMessage("site/moved/AHU-3/state", self._STATE),
+                ]
+            )
+
+        self.assertTrue(summary["capture_retention"]["wrong_topic_byte_truncated"])
+        self.assertEqual(
+            [row["asset_id"] for row in summary["wrong_topic_assets"]],
+            ["AHU-2"],
         )
 
 
