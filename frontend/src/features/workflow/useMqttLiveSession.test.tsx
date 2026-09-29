@@ -21,6 +21,7 @@ import {
   subscribeMqttLive,
   type MqttLiveCallbacks,
   type MqttLiveConnection,
+  type MqttLiveFrame,
   type MqttLiveSessionInfo,
   type MqttLiveStatusResponse,
 } from "../../api/client";
@@ -214,6 +215,89 @@ describe("useMqttLiveSession", () => {
     });
     expect(result.current.phase).toBe("live");
     expect(result.current.reconnectAttempts).toBe(0);
+  });
+
+  it("ignores callbacks from a stream it has already replaced", async () => {
+    // The real client fires onClose after abort, so replacing a still-open stream
+    // made the old one report a drop. That scheduled another reconnect, which cut
+    // off the healthy replacement, and so on until the cap gave up on a working
+    // session.
+    vi.useFakeTimers();
+    try {
+      vi.mocked(connectMqttLiveSession).mockResolvedValue({
+        ok: true,
+        session: sessionInfo("me"),
+        connection: connection(),
+      });
+      const streams: MqttLiveCallbacks[] = [];
+      vi.mocked(streamMqttLiveEvents).mockImplementation((_sessionId, cb) => {
+        streams.push(cb);
+        return () => {};
+      });
+      const snapshot = (totalTopics: number): MqttLiveFrame => ({
+        type: "snapshot",
+        status: connection(),
+        stats: {
+          expectedAssets: 0,
+          subscribedAssets: 1,
+          liveAssets: 1,
+          topicsDiscovered: totalTopics,
+          issues: 0,
+          totalMessages: 5,
+        },
+        tree: [],
+        treeShown: 0,
+        totalTopics,
+        filtered: false,
+        focused: null,
+      });
+      const { result } = renderHook(() => useMqttLiveSession(true, { workspace, authorized: true }));
+      await act(async () => {
+        await result.current.start();
+      });
+      const [first] = streams;
+      act(() => {
+        first?.onFrame(snapshot(3));
+      });
+      expect(result.current.phase).toBe("live");
+
+      // The sidecar reports the broker unavailable but keeps the stream open, so
+      // the backoff timer replaces a stream that is still open.
+      act(() => {
+        first?.onControl("unavailable");
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(streamMqttLiveEvents).toHaveBeenCalledTimes(2);
+
+      // What the real client does once the replaced stream's fetch is aborted.
+      // It must change nothing: no third stream, no extra attempt, the phase the
+      // sidecar's own signal set, and no give-up error.
+      const before = { phase: result.current.phase, reconnectAttempts: result.current.reconnectAttempts };
+      act(() => {
+        first?.onClose?.();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(streamMqttLiveEvents).toHaveBeenCalledTimes(2);
+      expect(result.current.reconnectAttempts).toBe(before.reconnectAttempts);
+      expect(result.current.phase).toBe(before.phase);
+      expect(result.current.error).toBeNull();
+
+      // A late frame from the replaced stream cannot overwrite the current one.
+      act(() => {
+        streams[1]?.onFrame(snapshot(7));
+      });
+      act(() => {
+        first?.onFrame(snapshot(1));
+      });
+      expect(result.current.phase).toBe("live");
+      expect(result.current.snapshot?.totalTopics).toBe(7);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("subscribe and search send for the current session", async () => {

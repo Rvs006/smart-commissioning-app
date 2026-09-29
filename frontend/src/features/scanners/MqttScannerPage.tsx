@@ -12,11 +12,13 @@ import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext"
 import { MqttFocusedDetail } from "../workflow/MqttFocusedDetail";
 import { MqttLiveTopicTree } from "../workflow/MqttLiveTopicTree";
 import { MqttPublishModal } from "../workflow/MqttPublishModal";
-import { mqttRegisterCompareNote } from "../workflow/discoveryRows";
+import { captureRowsToCsv, mqttRegisterCompareNote, type CaptureRow } from "../workflow/discoveryRows";
+import { triggerBlobDownload, useFileDownload } from "../workflow/fileDownload";
 import { useMqttLiveSession } from "../workflow/useMqttLiveSession";
 import { ScannerScreen, type SetupCell } from "./ScannerScreen";
+import type { ScannerRow } from "./scannerRows";
 import { ScannerSidePanel } from "./ScannerSidePanel";
-import { useScannerDownload, useScannerRun, useStoredPanelWidth } from "./useScannerRun";
+import { useScannerRun, useStoredPanelWidth } from "./useScannerRun";
 
 // The scanner capture lane is bounded at 15 minutes by the sidecar adapter; the
 // setup card refuses a longer window rather than letting the adapter clamp it
@@ -25,6 +27,35 @@ const MQTT_CAPTURE_CAP_SECONDS = 900;
 const CAPTURE_UNIT_SECONDS = { hours: 3600, minutes: 60, seconds: 1 } as const;
 
 type CaptureUnit = keyof typeof CAPTURE_UNIT_SECONDS;
+
+/** A persisted attribute rendered as CSV text; an absent value is an empty cell. */
+function text(value: unknown): string {
+  return value === null || value === undefined ? "" : String(value);
+}
+
+/**
+ * One captured-topic row as the client-side CSV writes it. Built from the row
+ * the TABLE is showing, so the file always matches what the operator filtered
+ * down to; the XLSX beside it is the server-rebuilt copy of the whole run.
+ */
+function captureCsvRow(row: ScannerRow): CaptureRow {
+  const a = row.attributes;
+  return {
+    asset: text(a.asset),
+    lastSeen: text(a.last_payload_seen),
+    messageCount: text(a.message_count),
+    // Compact, unwrapped JSON on ONE line: the same value the table's "Last
+    // value" cell shows, not the pretty-printed panel form, so a payload cannot
+    // straddle CSV rows.
+    payload:
+      a.payload_raw_only === true
+        ? "non-JSON (not stored)"
+        : a.last_payload_value === null || a.last_payload_value === undefined
+          ? ""
+          : JSON.stringify(a.last_payload_value),
+    topic: text(a.topic),
+  };
+}
 
 /** The phases in which the sidecar's single broker connection is already held. */
 const LIVE_HOLDING_PHASES = new Set(["live", "connecting", "reconnecting", "unavailable"]);
@@ -59,8 +90,8 @@ export function MqttScannerPage() {
   // rather than a request that would silently do nothing, and it lifts as soon
   // as the operator focuses a different asset.
   const [focusDismissed, setFocusDismissed] = useState(false);
-  const archiveDownload = useScannerDownload();
-  const topicsXlsxDownload = useScannerDownload();
+  const archiveDownload = useFileDownload(apiClient);
+  const topicsXlsxDownload = useFileDownload(apiClient);
 
   // Run time is entered in the operator's unit and posted in seconds, exactly as
   // the module page did; a non-numeric value is left alone so the shared builder
@@ -593,6 +624,9 @@ export function MqttScannerPage() {
                 apiClient={apiClient}
                 authorizationEnforced={authorizationEnforced}
                 defaultPayload={publishPrefill?.payload}
+                // Write config opens exactly as the vendored config editor does:
+                // QoS 1, retain on. A blank publish from the toolbar keeps QoS 0.
+                defaultQos={publishPrefill ? 1 : undefined}
                 defaultRetain={publishPrefill ? true : undefined}
                 defaultTopic={publishPrefill?.topic}
                 onClose={() => {
@@ -614,7 +648,7 @@ export function MqttScannerPage() {
       onPanelWidthChange={setPanelWidth}
       panelWidth={panelWidth}
       purpose="Subscribe, watch the topic tree, capture retained payloads — native mqtt_scanner run."
-      resultsActions={
+      resultsActions={(visibleRows) => (
         <>
           {archiveArtifactId && run.activeRun && (
             <button
@@ -633,6 +667,21 @@ export function MqttScannerPage() {
               {archiveDownload.pendingKey === "mqtt-archive" ? "Downloading..." : "Export archive"}
             </button>
           )}
+          {run.activeRun && visibleRows.length > 0 && (
+            <button
+              className="secondary-button compact"
+              onClick={() => {
+                const blob = new Blob([captureRowsToCsv(visibleRows.map(captureCsvRow))], {
+                  type: "text/csv;charset=utf-8",
+                });
+                triggerBlobDownload(blob, `mqtt-capture-${run.activeRun?.runId}.csv`);
+              }}
+              title="Download the rows this table is currently showing as CSV, built here in the browser. Narrowing the filters narrows the file; 'Export topics (XLSX)' beside it is the whole run, rebuilt server-side."
+              type="button"
+            >
+              Export to CSV
+            </button>
+          )}
           {run.activeRun && (results?.topics?.length ?? 0) > 0 && (
             <button
               className="secondary-button compact"
@@ -641,10 +690,17 @@ export function MqttScannerPage() {
                 void topicsXlsxDownload.download({
                   fallbackFilename: `mqtt-capture-${run.activeRun?.runId}.xlsx`,
                   key: "capture-xlsx",
-                  path: getDiscoveryTopicsXlsxPath(run.activeRun?.runId ?? "", captureTopicFilter),
+                  // Deliberately NO topic_filter. It used to pass the setup
+                  // card's live input, so editing the filter to line up the next
+                  // capture silently narrowed (or emptied) the export of the run
+                  // still on screen. The capture already subscribed with its own
+                  // filter, so the run's persisted topics ARE the whole run;
+                  // re-filtering server-side can only ever remove rows the run
+                  // really recorded.
+                  path: getDiscoveryTopicsXlsxPath(run.activeRun?.runId ?? ""),
                 })
               }
-              title="Download the latest payload per captured topic as an Excel (XLSX) file, rebuilt server-side from this run."
+              title="Download every topic this run captured as an Excel (XLSX) file, rebuilt server-side. Filters on screen do not change it; 'Export to CSV' beside it is the filtered view."
               type="button"
             >
               {topicsXlsxDownload.pendingKey === "capture-xlsx"
@@ -653,7 +709,7 @@ export function MqttScannerPage() {
             </button>
           )}
         </>
-      }
+      )}
       resultsHeading="Captured topics"
       resultsNote={
         <>

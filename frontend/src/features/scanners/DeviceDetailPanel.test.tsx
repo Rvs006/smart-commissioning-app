@@ -80,6 +80,28 @@ function bacnetMissingRow(): ScannerRow {
   return row;
 }
 
+function mqttRow(lastPayload: unknown): ScannerRow {
+  const [row] = scannerRowsFromResults("mqtt", {
+    run_id: "run-mqtt-1",
+    job_type: "mqtt_scanner",
+    status: "succeeded",
+    result_summary: {},
+    discovered_assets: [],
+    devices: [],
+    points: [],
+    topics: [
+      {
+        topic: "example/AHU-01/pointset",
+        message_count: 4,
+        last_payload: lastPayload,
+        created_at: "2026-09-14T09:00:30Z",
+        attributes: { device_ref: "AHU-01", register_match: "matched", status_detail: "observed" },
+      },
+    ],
+  } as never);
+  return row;
+}
+
 const noop = () => {};
 
 describe("DeviceDetailPanel", () => {
@@ -195,5 +217,52 @@ describe("DeviceDetailPanel", () => {
     expect(clampPanelWidth(10)).toBe(SCANNER_PANEL_MIN_WIDTH);
     expect(clampPanelWidth(10_000)).toBe(SCANNER_PANEL_MAX_WIDTH);
     expect(clampPanelWidth(Number.NaN)).toBe(SCANNER_PANEL_DEFAULT_WIDTH);
+  });
+
+  // The payload explorer the v0.1.58 capture inspector had. It reads the
+  // UNWRAPPED payload object the row carries, never a re-parse of the rendered
+  // string, so a scalar wrapped by the engine under _value still walks.
+  it("walks the stored payload as a JSON tree, unwrapping the engine's _value", () => {
+    render(
+      <DeviceDetailPanel
+        expanded={false}
+        lane="mqtt"
+        onClose={noop}
+        onResize={noop}
+        onToggleExpand={noop}
+        row={mqttRow({ _value: { temp: 18.4, mode: "auto" } })}
+        width={SCANNER_PANEL_DEFAULT_WIDTH}
+      />,
+    );
+    const tree = screen.getByText("Explore JSON tree").closest("details") as HTMLElement;
+    // Each leaf renders as <strong>key</strong>: value in one <li>, so assert the
+    // pair, not the value alone.
+    const leaves = within(tree)
+      .getAllByRole("listitem")
+      .map((item) => item.textContent);
+    expect(leaves).toContain("temp: 18.4");
+    expect(leaves).toContain('mode: "auto"');
+    // The wrapper key itself is an engine detail; it must not surface as a node.
+    expect(tree.textContent).not.toContain("_value");
+  });
+
+  it("offers no JSON tree when the engine kept only a presence marker", () => {
+    render(
+      <DeviceDetailPanel
+        expanded={false}
+        lane="mqtt"
+        onClose={noop}
+        onResize={noop}
+        onToggleExpand={noop}
+        row={mqttRow({ _raw_present: true })}
+        width={SCANNER_PANEL_DEFAULT_WIDTH}
+      />,
+    );
+    // Nothing was stored, so a tree would be an empty box implying an empty
+    // payload. The section says what actually happened instead.
+    expect(screen.queryByText("Explore JSON tree")).toBeNull();
+    expect(
+      screen.getByText(/Non-JSON payload observed\. The engine stores a presence marker/),
+    ).toBeInTheDocument();
   });
 });
