@@ -293,13 +293,14 @@ def _refresh_runs_by_status() -> None:
     from app.core.observability import set_runs_by_status
 
     try:
+        from smart_commissioning_core.db.engine import query_session_factory
         from smart_commissioning_core.db.models import Run
         from sqlalchemy import func, select
 
         from app.core.db import get_engine
 
-        with get_engine().connect() as connection:
-            rows = connection.execute(
+        with query_session_factory(get_engine())() as session:
+            rows = session.execute(
                 select(Run.status, func.count()).group_by(Run.status),
             ).all()
         set_runs_by_status({str(status): int(count) for status, count in rows})

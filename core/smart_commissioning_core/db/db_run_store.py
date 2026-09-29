@@ -223,7 +223,7 @@ class DbRunStore:
         if limit is not None:
             statement = statement.limit(limit)
 
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             runs = session.scalars(statement).all()
             return [_run_to_dict(run) for run in runs]
 
@@ -345,7 +345,7 @@ class DbRunStore:
         Returns False for a missing run (a vanished run cannot be cancelled),
         so engine cancellation polling never raises.
         """
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             run = session.scalars(select(Run).where(Run.id == run_id)).one_or_none()
             return bool(run is not None and run.cancel_requested)
 
@@ -358,7 +358,7 @@ class DbRunStore:
 
         Raises FileNotFoundError if the run does not exist.
         """
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return self._load(session, run_id).edge_id
 
     def get_synced_at(self, run_id: str) -> datetime | None:
@@ -366,7 +366,7 @@ class DbRunStore:
 
         Raises FileNotFoundError if the run does not exist.
         """
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return self._load(session, run_id).synced_at
 
     def _load(self, session: Session, run_id: str, *, for_update: bool = False) -> Run:

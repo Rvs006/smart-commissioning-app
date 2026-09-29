@@ -76,6 +76,17 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Fixed
 
+- `GET /runs`, `/imports/latest`, and `/udmi/schemas` no longer fail with
+  `database is locked` while a scan or report write is running. Every SQLite
+  session made by `session_factory` opens with `BEGIN IMMEDIATE`, so these
+  pure reads queued behind the writer and gave up after the 5 s busy timeout.
+  They now read through `query_session_factory` (deferred `BEGIN`, query-only),
+  which WAL never blocks. Covered: the read methods of the import, UDMI schema
+  set, configuration, discovery, sync, and user repositories; the run store's
+  `list_runs`, cancel poll, and sync accessors; the per-request scope-grant
+  and import/run ownership checks; and the run-store readiness probe and
+  runs-by-status metrics gauge.
+  Read-then-write transactions keep `BEGIN IMMEDIATE`.
 - The Reports tab opens fast with a large report archive, and bulk delete no
   longer fails with "Internal Server Error". Each stored UDMI report carries
   full source-run snapshots in its parameters, so listing 100 of them read a
