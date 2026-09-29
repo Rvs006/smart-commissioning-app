@@ -7,6 +7,8 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.59] - 2026-09-29
+
 The three scanner screens (IP Discovery, BACnet Discovery, MQTT Discovery) were
 rebuilt as their own pages. Nothing moved on the engines, the run path or the
 evidence store: a scan still persists as a real `ip_scanner` / `bacnet_scanner` /
@@ -280,6 +282,15 @@ database migration in this release.
   snapshot, and the same stray close flipped a session that was taken over or
   reclaimed by the backend from ended back to reconnecting. Callbacks are now
   keyed to the stream that registered them.
+
+- `npm run dev` no longer shows every API call failing with "signal is aborted
+  without reason". React.StrictMode runs the session provider's effect cleanup
+  and then re-runs it with the same session client, and that cleanup aborted the
+  client for good. The provider now aborts a client only once it is no longer
+  the mounted one, so the dev double-run keeps it alive; sign-in, sign-out,
+  unmount and a key change still end it, and an aborted client stays aborted so
+  a delayed caller cannot reuse a signed-out key. Production builds never
+  double-run effects and were not affected.
 
 ## [0.1.58] - 2026-09-14
 
