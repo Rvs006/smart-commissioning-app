@@ -252,6 +252,15 @@ database migration in this release.
     listed, the Results caption and the PDF/DOCX/XLSX/ZIP report note now say
     the count is a lower bound ("at least N") instead of calling the displayed
     count 0 or saying the devices were not measured.
+- The MQTT live view no longer treats the closing of a stream it has just
+  replaced as another drop. Replacing a still-open stream during a reconnect
+  made the old stream report itself closed, which scheduled a second reconnect
+  that in turn cut off the healthy replacement, so a single "unavailable" signal
+  from the sidecar could walk the view to "unavailable" against a working broker
+  session. Late frames from a replaced stream could also overwrite the current
+  snapshot, and the same stray close flipped a session that was taken over or
+  reclaimed by the backend from ended back to reconnecting. Callbacks are now
+  keyed to the stream that registered them.
 
 ## [0.1.58] - 2026-09-14
 

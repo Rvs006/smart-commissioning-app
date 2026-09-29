@@ -71,10 +71,13 @@ function statusCode(error: unknown): number | null {
 
 /**
  * Drives the single MQTT live broker session: checks occupancy on enable, opens
- * a session (start), streams the topic tree, and stops it (stop). The stream is
- * generation-guarded so a stale reconnect cannot write into a newer session, and
- * unmount aborts the stream WITHOUT disconnecting (a route change or StrictMode
- * remount must not flap the broker; the backend idle reaper reclaims the lease).
+ * a session (start), streams the topic tree, and stops it (stop). Stream
+ * callbacks are guarded by the session generation, so a stale reconnect cannot
+ * write into a newer session, and by a per-open stream token, so a replaced or
+ * disposed stream (the client still fires onClose after abort) cannot schedule a
+ * reconnect or overwrite the snapshot. Unmount aborts the stream WITHOUT
+ * disconnecting (a route change or StrictMode remount must not flap the broker;
+ * the backend idle reaper reclaims the lease).
  */
 export function useMqttLiveSession(
   enabled: boolean,
@@ -106,6 +109,7 @@ export function useMqttLiveSession(
   apiClientRef.current = apiClient;
 
   const generationRef = useRef(0);
+  const streamIdRef = useRef(0);
   const streamDisposeRef = useRef<(() => void) | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryIndexRef = useRef(0);
@@ -130,6 +134,7 @@ export function useMqttLiveSession(
   }, []);
 
   const disposeStream = useCallback(() => {
+    streamIdRef.current += 1;
     streamDisposeRef.current?.();
     streamDisposeRef.current = null;
   }, []);
@@ -157,11 +162,14 @@ export function useMqttLiveSession(
   const openStream = useCallback(
     (sessionId: string, generation: number) => {
       disposeStream();
+      const streamId = ++streamIdRef.current;
+      const stale = () =>
+        generationRef.current !== generation || streamIdRef.current !== streamId || !mountedRef.current;
       streamDisposeRef.current = streamMqttLiveEvents(
         sessionId,
         {
           onFrame: (frame: MqttLiveFrame) => {
-            if (generationRef.current !== generation || !mountedRef.current) {
+            if (stale()) {
               return;
             }
             retryIndexRef.current = 0;
@@ -182,7 +190,7 @@ export function useMqttLiveSession(
             }
           },
           onControl: (name: MqttLiveControlName) => {
-            if (generationRef.current !== generation || !mountedRef.current) {
+            if (stale()) {
               return;
             }
             if (name === "closed") {
@@ -196,7 +204,7 @@ export function useMqttLiveSession(
             // "timeout" (wall-clock cap): the onClose below reconnects silently.
           },
           onClose: () => {
-            if (generationRef.current !== generation || !mountedRef.current) {
+            if (stale()) {
               return;
             }
             // The stream ended (cap or upstream close) but the lease may still be
@@ -205,7 +213,7 @@ export function useMqttLiveSession(
             scheduleReconnectRef.current(sessionId, generation, "reconnecting");
           },
           onError: (error: unknown) => {
-            if (generationRef.current !== generation || !mountedRef.current) {
+            if (stale()) {
               return;
             }
             if (statusCode(error) === 409) {
