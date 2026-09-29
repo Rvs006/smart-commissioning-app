@@ -56,6 +56,7 @@ from smart_commissioning_core.sealed_run_integrity import (
 from sqlalchemy import and_, false, func, or_, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import load_only
 
 from app.core.config import edge_identity, get_settings
 from app.core.db import get_engine
@@ -1404,7 +1405,19 @@ class RunService:
 
         ordered_ids = list(dict.fromkeys(report_id.strip() for report_id in report_ids))
         with session_factory(self._engine).begin() as session:
-            rows = session.execute(select(Run).where(Run.id.in_(ordered_ids)).with_for_update()).scalars().all()
+            # Report runs carry full source-run snapshots in ``parameters``
+            # (megabytes each on a large site). Deletion needs none of it, so
+            # skip loading it while this transaction holds the write lock.
+            rows = (
+                session.execute(
+                    select(Run)
+                    .where(Run.id.in_(ordered_ids))
+                    .options(load_only(Run.id, Run.job_type, Run.result_summary))
+                    .with_for_update()
+                )
+                .scalars()
+                .all()
+            )
             rows_by_id = {row.id: row for row in rows}
             for report_id in ordered_ids:
                 row = rows_by_id.get(report_id)
@@ -1479,8 +1492,8 @@ class RunService:
         if limit is not None:
             statement = statement.limit(limit)
 
-        with self._engine.connect() as connection:
-            rows = connection.execute(statement).all()
+        with query_session_factory(self._engine)() as session:
+            rows = session.execute(statement).all()
         return [
             JobSummary(
                 run_id=row.id,
@@ -1540,7 +1553,7 @@ class RunService:
         statement = select(Run).where(Run.job_type == "report_generation")
         statement = _limit_statement_to_scopes(statement, scope_pairs)
         statement = statement.order_by(Run.created_at.desc(), Run.id.desc()).offset(safe_offset).limit(safe_limit)
-        with session_factory(self._engine)() as session:
+        with query_session_factory(self._engine)() as session:
             rows = session.scalars(statement).all()
             return [
                 RunRecord.model_validate(
@@ -1567,7 +1580,7 @@ class RunService:
     def count_report_records(self, *, scope_pairs: ScopePairs = None) -> int:
         statement = select(func.count()).select_from(Run).where(Run.job_type == "report_generation")
         statement = _limit_statement_to_scopes(statement, scope_pairs)
-        with session_factory(self._engine)() as session:
+        with query_session_factory(self._engine)() as session:
             return int(session.scalar(statement) or 0)
 
     def page_verified_report_records(
@@ -1633,7 +1646,7 @@ class RunService:
             statement,
             scope_pairs,
         )
-        with session_factory(self._engine)() as session:
+        with query_session_factory(self._engine)() as session:
             total = int(session.scalar(count_statement) or 0)
             candidates = session.execute(statement).all()
 

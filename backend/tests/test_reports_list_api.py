@@ -224,6 +224,53 @@ class ReportListProjectionTests(ApiTestCase):
             "one verifier query set per archived report.",
         )
 
+    def _capture_statements(self, engine):
+        from sqlalchemy import event
+
+        statements: list[str] = []
+
+        def record(_conn, _cursor, statement, _parameters, _context, _many) -> None:
+            statements.append(" ".join(statement.split()).upper())
+
+        event.listen(engine, "before_cursor_execute", record)
+        return statements, lambda: event.remove(engine, "before_cursor_execute", record)
+
+    def test_report_and_run_lists_read_without_taking_the_write_lock(self) -> None:
+        # Report runs embed full source-run snapshots, so a page load can read
+        # megabytes. Holding BEGIN IMMEDIATE for that long starved every other
+        # request into "database is locked" on a large field site.
+        from app.api.routes import reports as reports_route
+
+        self._create_report([])
+        service = reports_route.service
+        statements, stop = self._capture_statements(service.engine)
+        try:
+            records, total = service.page_verified_report_records(limit=10)
+            service.list_runs(limit=5)
+        finally:
+            stop()
+
+        self.assertGreaterEqual(total, 1)
+        self.assertTrue(records)
+        self.assertFalse(
+            any(statement.startswith("BEGIN IMMEDIATE") for statement in statements),
+            statements,
+        )
+
+    def test_delete_does_not_load_report_snapshot_parameters(self) -> None:
+        from app.api.routes import reports as reports_route
+
+        created = self._create_report([])
+        statements, stop = self._capture_statements(reports_route.service.engine)
+        try:
+            reports_route.service.delete_report_runs([created["report_id"]])
+        finally:
+            stop()
+
+        run_selects = [s for s in statements if s.startswith("SELECT") and "FROM RUNS" in s]
+        self.assertTrue(run_selects, statements)
+        self.assertFalse(any("RUNS.PARAMETERS" in s for s in run_selects), run_selects)
+
     def test_report_list_fails_closed_for_selected_tampered_metadata(self) -> None:
         from app.core.db import get_engine
         from smart_commissioning_core.db.models import Run

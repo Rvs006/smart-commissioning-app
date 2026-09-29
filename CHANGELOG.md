@@ -9,6 +9,23 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Fixed
 
+- The Reports tab opens fast with a large report archive, and bulk delete no
+  longer fails with "Internal Server Error". Each stored UDMI report carries
+  full source-run snapshots in its parameters, so listing 100 of them read a
+  lot of JSON, and it did so inside a `BEGIN IMMEDIATE` transaction. That held
+  the SQLite write lock for the whole read, so concurrent requests (run list,
+  imports, schemas, delete) hit the 5 s busy timeout and returned
+  `database is locked`.
+  - The report list and the run list now read through the existing query-only
+    session (deferred `BEGIN`, no write lock), so WAL readers and writers stop
+    blocking each other.
+  - Report delete loads only the id, job type, and artifact manifest, never
+    the snapshot parameters.
+  - The Reports tab shows the newest 10 reports and loads older ones in steps
+    of 10 via "Show older reports" (up to the API's 100-row page cap). Its
+    header now reads "reports stored" (the archive total) and "newest shown".
+  - The Home dashboard's evidence-pack count polls with `limit=1` and reads
+    `total`, instead of pulling 100 verified reports every 15 s.
 - UDMI validation now reports its observational outputs honestly when the
   secondary (observation-only) MQTT lane hits its distinct-topic or byte limit.
   Validation metrics were already correct in that case; three reporting paths
