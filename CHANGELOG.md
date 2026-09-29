@@ -86,7 +86,9 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   `list_runs`, cancel poll, and sync accessors; the per-request scope-grant
   and import/run ownership checks; and the run-store readiness probe and
   runs-by-status metrics gauge.
-  Read-then-write transactions keep `BEGIN IMMEDIATE`.
+  Read-then-write transactions keep `BEGIN IMMEDIATE`. A named user's
+  `last_used_at` stamp (a real write) now runs on a read at most once a
+  minute per user; mutations still stamp every time.
 - The Reports tab opens fast with a large report archive, and bulk delete no
   longer fails with "Internal Server Error". Each stored UDMI report carries
   full source-run snapshots in its parameters, so listing 100 of them read a

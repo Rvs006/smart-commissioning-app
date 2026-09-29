@@ -37,6 +37,7 @@ import ipaddress
 import logging
 import secrets
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import Depends, HTTPException, Request
@@ -63,6 +64,13 @@ _LAST_USED_TOUCH_EXEMPT_READ_ROUTES = frozenset(
         "/api/v1/discovery/runs/{run_id}/observations",
     }
 )
+
+# Any other read stamps last_used_at at most once per interval. The stamp is a
+# BEGIN IMMEDIATE write, so a per-request stamp made every named-user GET wait
+# behind a running scan or report writer for up to the 5 s busy timeout.
+# ponytail: a read inside the window still waits once per interval per user;
+# move the stamp off the request thread if that single wait matters.
+_LAST_USED_READ_TOUCH_INTERVAL = timedelta(seconds=60)
 
 PrincipalSource = Literal["user_key", "shared_key", "local"]
 
@@ -154,11 +162,24 @@ def _should_touch_last_used(request: Request) -> bool:
     return route_path not in _LAST_USED_TOUCH_EXEMPT_READ_ROUTES
 
 
+def _recently_used(last_used_at: object) -> bool:
+    if not isinstance(last_used_at, str):
+        return False
+    try:
+        stamp = datetime.fromisoformat(last_used_at)
+    except ValueError:
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return datetime.now(UTC) - stamp < _LAST_USED_READ_TOUCH_INTERVAL
+
+
 def _resolve_user_principal(
     presented: str | None,
     rejection_detail: str,
     *,
     touch_last_used: bool,
+    throttle_touch: bool = False,
 ) -> AuthPrincipal | None:
     """Resolve a presented key to an active user's principal, or None.
 
@@ -190,7 +211,7 @@ def _resolve_user_principal(
         # privilege — and, like an inactive user, must not fall through either.
         logger.warning("User %s has an unknown role value; rejecting.", user["id"])
         raise HTTPException(status_code=401, detail=rejection_detail) from error
-    if touch_last_used:
+    if touch_last_used and not (throttle_touch and _recently_used(user.get("last_used_at"))):
         try:
             UserRepository(get_engine()).touch_last_used(str(user["id"]))
         except Exception:  # noqa: BLE001 (a last_used touch must never fail a request)
@@ -227,6 +248,7 @@ def _resolve_principal(request: Request) -> AuthPrincipal:
         presented,
         rejection_detail,
         touch_last_used=_should_touch_last_used(request),
+        throttle_touch=request.method.upper() in {"GET", "HEAD", "OPTIONS"},
     )
     if user_principal is not None:
         return user_principal

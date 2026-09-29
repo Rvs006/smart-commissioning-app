@@ -59,19 +59,32 @@ class ReadOnlyGetRouteTests(ApiTestCase):
     def test_named_user_scope_checks_read_without_the_write_lock(self) -> None:
         # A named user's scope grants are resolved on every request, so a
         # write-session grant lookup would lock every scoped GET, not just one.
-        from smart_commissioning_core.db.repositories import UserRepository
-
+        # The last_used_at stamp is a real write, so reads throttle it: only the
+        # first GET in the interval takes the writer.
         created = self.client.post(
             "/api/v1/users",
             json={"username": f"read-only-viewer-{uuid.uuid4().hex[:8]}", "role": "viewer"},
         )
         self.assertEqual(created.status_code, 201, created.text)
         headers = {"X-API-Key": created.json()["api_key"]}
-        # last_used_at is a genuine write; this test is about the reads around it.
-        with mock.patch.object(UserRepository, "touch_last_used"):
-            for path, params in self._GETS:
-                with self.subTest(path=path):
-                    self.assertEqual(self._write_locks_taken(path, params, headers), [])
+        self.assertEqual(len(self._write_locks_taken("/api/v1/me", {}, headers)), 1)
+        for path, params in self._GETS:
+            with self.subTest(path=path):
+                self.assertEqual(self._write_locks_taken(path, params, headers), [])
+
+    def test_named_user_mutation_still_stamps_last_used(self) -> None:
+        from smart_commissioning_core.db.repositories import UserRepository
+
+        created = self.client.post(
+            "/api/v1/users",
+            json={"username": f"read-only-engineer-{uuid.uuid4().hex[:8]}", "role": "engineer"},
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        headers = {"X-API-Key": created.json()["api_key"]}
+        self.client.get("/api/v1/me", headers=headers)
+        with mock.patch.object(UserRepository, "touch_last_used") as touch:
+            self.client.post("/api/v1/runs/run_missing/cancel", headers=headers)
+        touch.assert_called_once()
 
 
 if __name__ == "__main__":
