@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -10,7 +10,7 @@ import {
   roleAtLeast,
   setApiKey,
 } from "../api/client";
-import type { MeResponse } from "../api/client";
+import type { MeResponse, SessionBoundApiClient } from "../api/client";
 import { SessionContext, type SessionContextValue } from "./sessionContext";
 import { queryKeys } from "../api/queryKeys";
 import { createSessionScopeId, DEFAULT_WORKSPACE } from "./sessionScope";
@@ -48,7 +48,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [apiKey, sessionScopeId],
   );
 
-  useEffect(() => () => apiClient.abort(), [apiClient]);
+  // Abort a client once it stops being the mounted one (key/scope change or
+  // unmount). abort() is terminal, so it waits a microtask: React.StrictMode (dev
+  // only) runs this cleanup and then synchronously re-runs the effect with the
+  // SAME client, and aborting it there would reject every request for the rest
+  // of the dev session. signIn/signOut still abort synchronously.
+  const mountedClient = useRef<SessionBoundApiClient | null>(null);
+  useEffect(() => {
+    mountedClient.current = apiClient;
+    return () => {
+      mountedClient.current = null;
+      queueMicrotask(() => {
+        if (mountedClient.current !== apiClient) {
+          apiClient.abort();
+        }
+      });
+    };
+  }, [apiClient]);
 
   const removeSessionState = useCallback(
     (scope: SessionScopeId) => {

@@ -143,6 +143,27 @@ describe("session-bound client", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(requestSignal?.aborted).toBe(true);
   });
+
+  it("stays aborted, so a delayed caller cannot reuse the old key after sign-out", async () => {
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestSignal = init?.signal ?? undefined;
+        if (init?.signal?.aborted) {
+          throw init.signal.reason;
+        }
+        return jsonResponse(healthPayload);
+      }),
+    );
+    const client = createSessionBoundApiClient(createSessionScopeId(), DEFAULT_WORKSPACE, "old-key");
+
+    client.abort();
+
+    await expect(client.request<HealthStatus>("/health")).rejects.toBeDefined();
+    expect(requestSignal?.aborted).toBe(true);
+    expect(client.signal.aborted).toBe(true);
+  });
 });
 
 const healthPayload = { status: "ok", version: "0.1.39", timestamp: "2026-06-11T00:00:00Z" };
