@@ -3348,6 +3348,43 @@ describe("ModulePage reports wiring", () => {
     await waitFor(() => expect(exportSelected).toBeEnabled());
   });
 
+  it("opens on the newest 10 reports and loads older ones on request", async () => {
+    const reportRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
+          reportRequests.push(url);
+          const expanded = url.includes("limit=20");
+          return jsonResponse({
+            ...reportsPayload,
+            total: 25,
+            limit: expanded ? 20 : 10,
+            has_more: true,
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("reports");
+
+    const showOlder = await screen.findByRole("button", { name: /Show older reports/i });
+    expect(reportRequests[0]).toContain("limit=10");
+    fireEvent.click(showOlder);
+    await waitFor(() => expect(reportRequests.some((url) => url.includes("limit=20"))).toBe(true));
+  });
+
   function stubReports(onDownload?: (url: string) => void, payload: unknown = reportsPayload) {
     vi.stubGlobal(
       "fetch",

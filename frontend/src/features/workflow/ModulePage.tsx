@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router";
 import {
   ApiError,
@@ -272,7 +272,10 @@ const DISCOVERY_ROUTES = new Set([
 const DISCOVERY_EVIDENCE_REQUIREMENTS = ["run", "results"] as const;
 const VALIDATION_EVIDENCE_REQUIREMENTS = ["run", "issues"] as const;
 const LONG_PAYLOAD_ISSUE_THRESHOLD = 8;
-const REPORT_PAGE_SIZE = 100;
+// Each stored report carries full source-run snapshots, so the list opens on
+// the newest few and loads older ones on request. The API caps a page at 100.
+const REPORT_PAGE_SIZE = 10;
+const REPORT_LIST_MAX = 100;
 
 function isDefinitiveLiveSubmissionRejection(error: unknown): boolean {
   return (
@@ -742,6 +745,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Reports page: which queued reports are ticked for "Export selected" and a
   // one-shot confirmation shown after a report is generated (mqatcqb3/mqautz9j).
   const [selectedReportIds, setSelectedReportIds] = useState<Set<string>>(new Set());
+  const [reportListLimit, setReportListLimit] = useState(REPORT_PAGE_SIZE);
   const [reportToast, setReportToast] = useState<string | null>(null);
   const [reportToastWarning, setReportToastWarning] = useState(false);
   const [generatedAllReportIds, setGeneratedAllReportIds] = useState<readonly string[] | null>(
@@ -1649,8 +1653,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const reportsQuery = useQuery({
     enabled: module.route === "reports",
     queryFn: ({ signal }) =>
-      listReports({ limit: REPORT_PAGE_SIZE }, { client: apiClient, signal }),
-    queryKey: queryKeys.reports(sessionScopeId, workspaceRef),
+      listReports({ limit: reportListLimit }, { client: apiClient, signal }),
+    queryKey: [...queryKeys.reports(sessionScopeId, workspaceRef), reportListLimit],
+    placeholderData: keepPreviousData,
   });
 
   // Uploaded non-published UDMI schema sets, shown on the UDMI workbench only.
@@ -1859,6 +1864,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setResultsObservationFilter("all");
     setExpandedAsset(null);
     setSelectedReportIds(new Set());
+    setReportListLimit(REPORT_PAGE_SIZE);
     setReportToast(null);
     setReportToastWarning(false);
     setGeneratedAllReportIds(null);
@@ -2723,7 +2729,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     },
     onSuccess: (result) => {
       const deletedIds = new Set(result.deleted_report_ids);
-      const reportsQueryKey = queryKeys.reports(sessionScopeId, workspaceRef);
+      const reportsQueryKey = [...queryKeys.reports(sessionScopeId, workspaceRef), reportListLimit];
       const cachedReports =
         queryClient.getQueryData<ReportListResponse>(reportsQueryKey)?.reports ?? [];
       const focusIntent = reportDeleteFocusIntentRef.current;
@@ -3716,13 +3722,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       }
     }
     if (module.route === "reports" && !reportsQuery.isLoading && reportsQuery.data) {
-      const reports = reportsQuery.data.reports;
-      const ready = reports.filter((report) => report.status === "succeeded").length;
       return {
-        primary: String(ready),
-        primaryLabel: "reports ready",
-        secondary: String(reports.length),
-        secondaryLabel: "reports generated",
+        primary: String(reportsQuery.data.total ?? reportsQuery.data.reports.length),
+        primaryLabel: "reports stored",
+        secondary: String(reportsQuery.data.reports.length),
+        secondaryLabel: "newest shown",
       };
     }
     return null;
@@ -6293,6 +6297,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </div>
               )}
             </div>
+            {reportsQuery.data?.has_more && reportListLimit < REPORT_LIST_MAX && (
+              <button
+                className="secondary-button compact"
+                disabled={reportsQuery.isPlaceholderData}
+                onClick={() =>
+                  setReportListLimit((current) =>
+                    Math.min(current + REPORT_PAGE_SIZE, REPORT_LIST_MAX),
+                  )
+                }
+                type="button"
+              >
+                {reportsQuery.isPlaceholderData
+                  ? "Loading older reports..."
+                  : `Show older reports (${(reportsQuery.data.total ?? 0) - liveReports.length} more)`}
+              </button>
+            )}
             {reportsQuery.isError && (
               <span className="error-text">
                 Could not load reports:{" "}
