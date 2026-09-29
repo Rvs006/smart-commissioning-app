@@ -3738,6 +3738,62 @@ describe("ModulePage reports wiring", () => {
     expect(screen.getByLabelText(/Select report paged_report_1.xlsx/i)).toBeInTheDocument();
   });
 
+  it("re-reads loaded report pages when another session changes the list between clicks", async () => {
+    const stored = Array.from({ length: 12 }, (_, index) => ({
+      report_id: `rep-page-${index + 1}`,
+      report_type: "issue_report",
+      output_format: "xlsx",
+      status: "succeeded",
+      file_name: `paged_report_${index + 1}.xlsx`,
+      created_at: "2026-07-15T10:00:00Z",
+      source_run_ids: [],
+    }));
+    const reportRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
+          const params = new URLSearchParams(url.split("?")[1] ?? "");
+          reportRequests.push(params.toString());
+          const limit = Number(params.get("limit"));
+          const offset = Number(params.get("offset"));
+          return jsonResponse({
+            reports: stored.slice(offset, offset + limit),
+            total: stored.length,
+            limit,
+            offset,
+            has_more: offset + limit < stored.length,
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("reports");
+    const showOlder = await screen.findByRole("button", {
+      name: "Show older reports (2 more)",
+    });
+    // Another session deletes a first-page report: paged_report_11 moves to
+    // offset 9, so offset 10 alone would skip it.
+    stored.splice(0, 1);
+    fireEvent.click(showOlder);
+
+    expect(
+      await screen.findByLabelText(/Select report paged_report_11.xlsx/i),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/Select report paged_report_12.xlsx/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Select report paged_report_1.xlsx/i)).not.toBeInTheDocument();
+    expect(reportRequests.slice(0, 3)).toEqual([
+      "limit=10&offset=0",
+      "limit=10&offset=10",
+      "limit=10&offset=0",
+    ]);
+  });
+
   function stubReports(onDownload?: (url: string) => void, payload: unknown = reportsPayload) {
     vi.stubGlobal(
       "fetch",

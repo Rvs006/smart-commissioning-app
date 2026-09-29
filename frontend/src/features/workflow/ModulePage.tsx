@@ -7512,7 +7512,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <button
                 className="secondary-button compact"
                 disabled={reportsQuery.isFetchingNextPage || reportsQuery.isPlaceholderData}
-                onClick={() => void reportsQuery.fetchNextPage()}
+                onClick={() =>
+                  void reportsQuery.fetchNextPage().then((result) => {
+                    // Offsets assume the list did not change between clicks. A
+                    // different total means another session added or deleted
+                    // reports, so re-read every loaded page from offset 0 rather
+                    // than skip or duplicate rows.
+                    // ponytail: an add plus a delete between clicks keeps the
+                    // total and goes unnoticed; a cursor would close that gap.
+                    const pages = result.data?.pages ?? [];
+                    if (pages.length > 1 && pages[pages.length - 1].total !== pages[0].total) {
+                      void reportsQuery.refetch();
+                    }
+                  })
+                }
                 type="button"
               >
                 {reportsQuery.isFetchingNextPage
