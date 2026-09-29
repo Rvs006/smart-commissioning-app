@@ -1676,6 +1676,32 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertEqual(matrix["rows"], [])
         self.assertEqual(details["rows"], [])
 
+    def test_unmeasured_unexpected_count_is_reported_as_a_lower_bound(self) -> None:
+        partial = copy.deepcopy(_SCOPABLE_SUMMARY)
+        partial["unexpected_devices_measured"] = False
+        source_id = self._seed_run(summary=partial)
+        lower_bound = (
+            "Unexpected-device measurement was incomplete for at least one selected "
+            "source run; the Unexpected Devices count of 1 is a lower bound, and the "
+            "true count may be higher."
+        )
+
+        report = self._create_report("zip", [source_id])
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            summary = json.loads(archive.read("validation_summary.json"))
+        self.assertEqual(summary["asset_metrics"]["unexpected"], 1)
+        self.assertIn(lower_bound, summary["notes"])
+        self.assertFalse(any("were not measured" in note for note in summary["notes"]))
+
+        report = self._create_report("xlsx", [source_id])
+        executive = load_workbook(io.BytesIO(self._download(report["report_id"]).content))[
+            "Executive Summary"
+        ]
+        self.assertIn(
+            ("Note", lower_bound),
+            [(row[0], row[1]) for row in executive.iter_rows(values_only=True)],
+        )
+
     def test_schema_1_payload_issue_counts_include_received_payloads_only(self) -> None:
         summary = {
             "schema_version": "1.0",

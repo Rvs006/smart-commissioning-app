@@ -907,6 +907,192 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.queryByText("Register already imported")).not.toBeInTheDocument();
   });
 
+  // "Save scan as register" writes no file, and the operator went looking for one.
+  // A register on file that came from a scan names its run, so the same CSV can be
+  // downloaded back; an uploaded one has no run to rebuild it from.
+  function stubScannerLatestImportFetch(fileName: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/imports/latest")) {
+          return jsonResponse({
+            ...latestImportSummary,
+            import_type: "ip_scanner_register",
+            file_name: fileName,
+          });
+        }
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse([
+            {
+              import_type: "ip_scanner_register",
+              description: "Expected devices for the IP scanner sidecar.",
+              required_columns: ["IP Address"],
+              duplicate_key_fields: ["IP Address"],
+            },
+          ]);
+        }
+        if (url.includes("/api/v1/")) return jsonResponse({});
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("offers the register CSV back when the register on file came from a saved scan", async () => {
+    stubScannerLatestImportFetch("scan-register-run-ip-7.csv");
+
+    renderModule("ip-scanner");
+
+    expect(await screen.findByText("Register already imported")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download register CSV" })).toBeInTheDocument();
+  });
+
+  // The register CSV is rebuilt from the run that was saved. Reading the run id
+  // off the mutable `activeRun` meant a save that resolved after the operator
+  // moved to another run built run B's URL under run A's file name.
+  function ipScannerRun(runId: string, hostname: string) {
+    return {
+      run: {
+        ...terminalRun,
+        run_id: runId,
+        job_type: "ip_scanner",
+        stage: "completed",
+      },
+      results: {
+        ...resultsPayload,
+        run_id: runId,
+        job_type: "ip_scanner",
+        discovered_assets: [],
+        devices: [
+          {
+            device_id: `${runId}-d1`,
+            address: "192.0.2.214",
+            name: hostname,
+            device_type: "ip_host",
+            attributes: { open_ports: [443] },
+          },
+        ],
+      },
+    };
+  }
+
+  function stubIpScannerRunFetch(
+    runsForCall: () => Array<Record<string, unknown>>,
+    byRunId: Record<string, ReturnType<typeof ipScannerRun>>,
+    onSaveRegister: () => Promise<unknown>,
+  ) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/save-as-register") && init?.method === "POST") {
+          return jsonResponse(await onSaveRegister());
+        }
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: url.includes("job_type=ip_scanner") ? runsForCall() : [],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        for (const [runId, fixture] of Object.entries(byRunId)) {
+          if (url.endsWith(`/api/v1/discovery/runs/${runId}/results`)) {
+            return jsonResponse(fixture.results);
+          }
+          if (url.endsWith(`/api/v1/discovery/runs/${runId}`)) {
+            return jsonResponse(fixture.run);
+          }
+        }
+        if (url.includes("/api/v1/")) return jsonResponse({});
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("binds the register CSV download to the run that was saved", async () => {
+    const runA = ipScannerRun("run-ip-A", "plant-controller-a");
+    stubIpScannerRunFetch(
+      () => [{ ...runA.run, edge_id: null }],
+      { "run-ip-A": runA },
+      async () => ({ ...latestImportSummary, file_name: "scan-register-run-ip-A.csv" }),
+    );
+
+    renderModule("ip-scanner");
+
+    const saveButton = await screen.findByRole("button", { name: "Save scan as register" });
+    await waitFor(() => expect(saveButton).toBeEnabled());
+    fireEvent.click(saveButton);
+
+    expect(await screen.findByText("Saved as register")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Download register CSV" }));
+
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(fetch)
+          .mock.calls.some(([input]) =>
+            String(input).includes("/ip_sidecar/runs/run-ip-A/register.csv"),
+          ),
+      ).toBe(true),
+    );
+  });
+
+  it("drops a save that lands after the operator switched runs", async () => {
+    const runA = ipScannerRun("run-ip-A", "plant-controller-a");
+    const runB = ipScannerRun("run-ip-B", "plant-controller-b");
+    let currentRun = runA.run;
+    let releaseSave!: () => void;
+    const savePending = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+
+    stubIpScannerRunFetch(
+      () => [{ ...currentRun, edge_id: null }],
+      { "run-ip-A": runA, "run-ip-B": runB },
+      async () => {
+        await savePending;
+        return { ...latestImportSummary, file_name: "scan-register-run-ip-A.csv" };
+      },
+    );
+
+    renderModule("ip-scanner");
+
+    const saveButton = await screen.findByRole("button", { name: "Save scan as register" });
+    await waitFor(() => expect(saveButton).toBeEnabled());
+    fireEvent.click(saveButton);
+    await screen.findByRole("button", { name: "Saving register..." });
+
+    // The operator moves to another run while run A's save is still in flight.
+    currentRun = runB.run;
+    // A window focus refetches the run-restore query, which swaps the restored
+    // run: the same thing the operator sees after picking another run.
+    window.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(document.body.textContent).toContain("run-ip-B"));
+    expect(document.body.textContent).not.toContain("run-ip-A");
+
+    releaseSave();
+
+    // Run A's summary must not repopulate the panel over run B: the note would
+    // name run A's file while the download URL pointed at run B.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save scan as register" })).toBeEnabled(),
+    );
+    expect(screen.queryByText("Saved as register")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Download register CSV" })).toBeNull();
+  });
+
+  it("offers no register CSV when the register on file was uploaded", async () => {
+    stubScannerLatestImportFetch("site_ip_register.csv");
+
+    renderModule("ip-scanner");
+
+    expect(await screen.findByText("Register already imported")).toBeInTheDocument();
+    // There is no run behind an uploaded file, so there is nothing honest to rebuild.
+    expect(screen.queryByRole("button", { name: "Download register CSV" })).toBeNull();
+  });
+
   it("sends a CIDR target override as parameters.cidr with no addresses key and no fabricated authorization principal", async () => {
     let previewBody: { parameters: Record<string, unknown> } | null = null;
     let liveBody: { parameters: Record<string, unknown> } | null = null;
@@ -4354,6 +4540,106 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(metadataRow).getByText("Expected topic")).toBeInTheDocument();
   });
 
+  it("reports an overflowing observational lane as a lower bound, not a missing capture", async () => {
+    const overflowRun = {
+      ...udmiTerminalRun,
+      result_summary: {
+        ...udmiTerminalRun.result_summary,
+        asset_topic_discovery: {
+          enabled: true,
+          scope: "site/#",
+          scope_source: "register_common_ancestor",
+          scope_error: null,
+          topic_limit_per_asset: 20,
+          capture_complete: true,
+          capture_status: "secondary_topic_limit_reached",
+          status_counts: { expected_topic_observed: 1 },
+          asset_results: [
+            {
+              asset_id: "EM-1",
+              system: "BMS",
+              expected_topic_root: "site/registered/EM-1",
+              expected_topics: ["site/registered/EM-1/pointset"],
+              observed_expected_topics: [
+                {
+                  topic: "site/registered/EM-1/pointset",
+                  message_count: 3,
+                  last_seen: "2026-07-09T09:04:00Z",
+                },
+              ],
+              observed_alternate_topics: [],
+              matched_message_count: 3,
+              topic_limit_reached: false,
+              status: "expected_topic_observed",
+            },
+          ],
+        },
+        validation_summary_v1: {
+          schema_version: "1.1",
+          asset_metrics: {
+            expected: 1,
+            observed: 1,
+            not_observed: 0,
+            with_issues: 0,
+            successfully_validated: 1,
+            unexpected: 2,
+            wrong_topic: 0,
+          },
+          payload_metrics: {
+            expected: 1,
+            received: 1,
+            not_received: 0,
+            with_issues: 0,
+            successfully_validated: 1,
+          },
+          fault_metrics: {
+            payload_formatting_issues: 0,
+            missing_points: 0,
+            point_naming_issues: 0,
+            additional_points: 0,
+            stale_or_cadence: 0,
+            other_issues: 0,
+          },
+          issue_metrics: { blocking: 0, warning: 0 },
+          system_metrics: [],
+          asset_results: [],
+          fault_rows: [],
+          unexpected_devices: ["site/noise/N-1", "site/noise/N-2"].map((topicRoot, index) => ({
+            id: `unexpected-${index}`,
+            topic_root: topicRoot,
+            topics: [`${topicRoot}/state`],
+            last_seen: "2026-07-09T09:04:00Z",
+          })),
+          unexpected_devices_measured: false,
+          unexpected_devices_measurement_scope: "site/#",
+        },
+      },
+    };
+    stubUdmiRunFetch({ run_id: "run-udmi-1", issues: [] }, undefined, overflowRun);
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    const summary = (await screen.findByRole("heading", { name: "Validation summary" })).closest(
+      ".udmi-summary",
+    ) as HTMLElement;
+    expect(
+      within(summary).getByText(
+        /at least 2 unexpected publishers were seen, and the true count may be higher/i,
+      ),
+    ).toBeInTheDocument();
+    expect(within(summary).queryByText(/the displayed 0/i)).not.toBeInTheDocument();
+
+    const discovery = screen
+      .getByRole("heading", { name: "Asset topic discovery" })
+      .closest(".udmi-asset-topic-discovery") as HTMLElement;
+    expect(within(discovery).getByText("secondary topic limit reached")).toBeInTheDocument();
+    expect(within(discovery).getByText(/recorded before that limit applies/i)).toBeInTheDocument();
+    expect(within(discovery).queryByText(/capture is incomplete/i)).not.toBeInTheDocument();
+  });
+
   it("keeps topic discovery opt-in and requires acknowledgement before widening to all topics", async () => {
     const postedRequest: { body: { parameters: Record<string, unknown> } | null } = { body: null };
     vi.stubGlobal(
@@ -6485,6 +6771,10 @@ describe("ModulePage UDMI workbench live results", () => {
       .getByText("Unexpected devices")
       .closest("div") as HTMLElement;
     expect(within(unexpectedMetric).getByText("1")).toBeInTheDocument();
+    // No measured flag on a legacy run: the listed device is a floor, not a total.
+    expect(
+      within(summary).getByText(/at least 1 unexpected publisher was seen/i),
+    ).toBeInTheDocument();
   });
 
   it("keeps non-expected payload evidence visible but excludes it from exact report scope", async () => {
@@ -7116,7 +7406,7 @@ describe("ModulePage UDMI workbench live results", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        /48-hour safety limit.*500 distinct\s*concrete topics.*Closing the app ends the run/i,
+        /48-hour safety limit.*one slot per expected\s*register topic\s*\(at least 500 distinct\s*concrete topics\).*Closing the app ends the run/i,
       ),
     ).toBeInTheDocument();
   });

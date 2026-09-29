@@ -310,6 +310,11 @@ def _map_result(
     discovered_assets: list[dict[str, Any]] = []
     structured_records: list[dict[str, Any]] = []
     issues: list[ValidationIssueRecord] = []
+    # The register rows that answered nothing, in the shape the inventory report's
+    # "expected not responding" section reads (bacnet_discovery stamps the same
+    # key). Without it a signed report omitted the silent devices the results
+    # screen now shows, so the two disagreed.
+    expected_not_responding: list[dict[str, Any]] = []
 
     # A device whose object count exceeds the sidecar's 2000-object export cap
     # comes back truncated=true on its per-asset export entry (server.js
@@ -323,7 +328,10 @@ def _map_result(
         instance = row.get("instance")
         rag = row.get("rag")
         register_state = row.get("register")
-        # "missing" = expected-but-not-discovered: an issue, not a device.
+        # "missing" = expected-but-not-discovered. It is NOT a device (it stays
+        # out of structured_records, which the devices table owns and which must
+        # remain observed-only), but it IS a result row the operator has to see,
+        # so it gets an observation entry alongside its issue.
         is_device = register_state != "missing" and row.get("status") != "unreachable"
 
         if is_device:
@@ -390,6 +398,46 @@ def _map_result(
                     }
                 )
             )
+        elif register_state == "missing":
+            # Expected by the register, no Who-Is answer. Observation-only: no
+            # structured device record, and last_seen_at stays None because this
+            # device was never seen. name/address are the register's expectation
+            # (the sidecar's compare() fills them from the register row), which
+            # is all that is known about a device that did not answer.
+            #
+            # asset_id is None for a register row whose Device Instance was blank
+            # or unparseable — the vendored compare() spells that "—", and
+            # "bacnet-device-—" would be the SAME id for every such row, silently
+            # collapsing them into one. Same guard _issue_for_row already applies.
+            missing_asset_id = (
+                f"bacnet-device-{instance}" if instance not in (None, "", "—") else None
+            )
+            discovered_assets.append(
+                json_safe_value(
+                    {
+                        "asset_id": missing_asset_id,
+                        "device_instance": instance,
+                        "address": row.get("ip"),
+                        "name": row.get("name") or row.get("expectedName") or None,
+                        "rag": rag,
+                        "register_state": register_state,
+                        "last_seen_at": None,
+                    }
+                )
+            )
+            expected_not_responding.append(
+                {
+                    "asset_id": missing_asset_id,
+                    "asset_name": row.get("name") or row.get("expectedName") or None,
+                    "device_instance": instance,
+                    "address": row.get("ip"),
+                    # The sidecar discovers by broadcast Who-Is (optionally bounded
+                    # to an instance range); it never unicasts a probe at a silent
+                    # device's address, so this is False by construction, not by
+                    # omission.
+                    "directed_probe_sent": False,
+                }
+            )
 
         severity = _RAG_SEVERITY.get(str(rag))
         if severity is not None:
@@ -428,6 +476,9 @@ def _map_result(
             "register_partial": summary.get("partial"),
             "register_missing": summary.get("missing"),
             "register_rogue": summary.get("rogue"),
+            # Always stamped (an empty list when every expected device answered),
+            # so the report can tell "none silent" from a run that predates this.
+            "expected_not_responding": expected_not_responding,
             "points_exported": sum(len(a.get("points") or []) for a in device_files),
             # Did point acquisition finish? False means the export deadline hit /
             # stream ended before `ready`, OR at least one device exceeded the
@@ -1124,7 +1175,36 @@ def _demo() -> None:
     ]
     result = _map_result(rows, summary, device_files, {"project_id": "p", "site_id": "s"})
 
-    # missing (unreachable) is an issue, not a device; the other 3 are devices.
+    # Every compare() row becomes an observation, including the expected-but-
+    # silent one; only the 3 that answered become devices (observed-only table).
+    assert len(result.discovered_assets) == 4, result.discovered_assets
+    missing_asset = next(
+        a for a in result.discovered_assets if a["register_state"] == "missing"
+    )
+    assert missing_asset["asset_id"] == "bacnet-device-9", missing_asset
+    assert missing_asset["device_instance"] == 9, missing_asset
+    assert missing_asset["rag"] == "red", missing_asset
+    assert missing_asset["last_seen_at"] is None, missing_asset
+    silent = result.result_summary_extra["expected_not_responding"]
+    assert [entry["device_instance"] for entry in silent] == [9], silent
+    assert silent[0]["directed_probe_sent"] is False, silent
+
+    # A register row with a blank Device Instance comes back as "—" from the
+    # vendored compare(). Two of them must stay two distinct observations, so
+    # neither may take the shared "bacnet-device-—" id.
+    blank_rows = [
+        {"instance": "—", "register": "missing", "rag": "red", "status": "unreachable",
+         "ip": "10.0.0.41", "name": "NO-INSTANCE-A"},
+        {"instance": "—", "register": "missing", "rag": "red", "status": "unreachable",
+         "ip": "10.0.0.42", "name": "NO-INSTANCE-B"},
+    ]
+    blank = _map_result(blank_rows, {}, [], {})
+    assert len(blank.discovered_assets) == 2, blank.discovered_assets
+    assert all(a["asset_id"] is None for a in blank.discovered_assets), blank.discovered_assets
+    assert {a["address"] for a in blank.discovered_assets} == {
+        "10.0.0.41", "10.0.0.42"
+    }, blank.discovered_assets
+
     devices = [r for r in result.structured_records if "device_ref" not in r]
     points = [r for r in result.structured_records if "device_ref" in r]
     assert len(devices) == 3, devices

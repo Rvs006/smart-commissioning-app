@@ -234,19 +234,51 @@ export function formatIpHeadlineMetrics(value: unknown): IpHeadlineMetricDisplay
 
 export type IpSidecarSummaryCard = Readonly<{ heading: string; value: string }>;
 
-// GAP-C2: the four-card summary strip for the native IP sidecar lane. The
-// sidecar engine stamps its totals straight onto result_summary
-// (register_expected / hosts_scanned / register_matches / register_rogue),
-// not the sealed lane's ip_headline_metrics_v1 snapshot, so this reads them
-// directly. Returns null when none is a number (a dry-run, an older run, or a
-// failed scan has nothing to show, so the strip is omitted rather than faked);
-// a present-but-null field renders "—", never an invented count.
+// GAP-C2: the summary strip for the native IP sidecar lane. The sidecar engine
+// stamps its totals straight onto result_summary, not the sealed lane's
+// ip_headline_metrics_v1 snapshot, so this reads them directly. All six of the
+// sidecar's compare() counters are shown (expected / reachable / match /
+// partial / missing / rogue) — Partial and Missing were stamped by the engine
+// but never surfaced, so an operator could not see that expected devices had
+// gone silent. Returns null when none is a number (a dry-run, an older run, or
+// a failed scan has nothing to show, so the strip is omitted rather than
+// faked); a present-but-null field renders "—", never an invented count.
+// "Reachable" counts everything that answered, rogues included (the sidecar's
+// summary.reachable), which is what this card has always shown.
 const IP_SIDECAR_SUMMARY_FIELDS = [
   ["Expected", "register_expected"],
-  ["Reachable / Discovered", "hosts_scanned"],
-  ["Matches", "register_matches"],
+  ["Reachable", "hosts_scanned"],
+  ["Match", "register_matches"],
+  ["Partial", "register_partial"],
+  ["Missing", "register_missing"],
   ["Rogue", "register_rogue"],
 ] as const;
+
+// The sidecar engines stamp result_summary.scanner = ENGINE_NAME
+// (ip_scanner_sidecar.py / bacnet_scanner_sidecar.py), and no other engine
+// writes that key. It is the only field that identifies the lane on its own.
+const IP_SIDECAR_SCANNER = "ip_scanner";
+const BACNET_SIDECAR_SCANNER = "bacnet_scanner";
+
+// A summary belongs to this sidecar lane when it says so, or when it carries a
+// register counter only the sidecar compare() produces. The plain generic keys
+// must NOT qualify: the built-in ip_scan lane stamps hosts_scanned too (and a
+// dry run stamps hosts_scanned: 0), so keying off those rendered the six-card
+// strip as "Reachable 0" with five dashes for a run that never compared a
+// register — the exact opposite of this formatter's null-when-no-signal
+// contract. A genuine sidecar run whose counters are all zero still renders.
+function isSidecarSummary(
+  summary: Record<string, unknown>,
+  scanner: string,
+  registerFields: readonly (readonly [string, string])[],
+): boolean {
+  if (summary.scanner === scanner) {
+    return true;
+  }
+  return registerFields.some(
+    ([, key]) => key.startsWith("register_") && typeof summary[key] === "number",
+  );
+}
 
 export function formatIpSidecarSummaryCards(
   summary: Record<string, unknown> | null | undefined,
@@ -254,10 +286,7 @@ export function formatIpSidecarSummaryCards(
   if (!summary || typeof summary !== "object") {
     return null;
   }
-  const anyPresent = IP_SIDECAR_SUMMARY_FIELDS.some(
-    ([, key]) => typeof summary[key] === "number",
-  );
-  if (!anyPresent) {
+  if (!isSidecarSummary(summary, IP_SIDECAR_SCANNER, IP_SIDECAR_SUMMARY_FIELDS)) {
     return null;
   }
   return IP_SIDECAR_SUMMARY_FIELDS.map(([heading, key]) => {
@@ -266,16 +295,19 @@ export function formatIpSidecarSummaryCards(
   });
 }
 
-// GAP-C2 (BACnet): the four-card summary strip for the native BACnet sidecar
-// lane. The bacnet_scanner engine stamps these totals straight onto
-// result_summary (devices_discovered / points_exported / register_matches /
-// register_rogue), so read them directly, exactly like the IP variant. Same
+// GAP-C2 (BACnet): the summary strip for the native BACnet sidecar lane. The
+// bacnet_scanner engine stamps these totals straight onto result_summary, so
+// read them directly, exactly like the IP variant, and show the same six
+// register counters so the two scanner screens read alike. Same
 // null-when-none / "—"-for-null-field contract so a dry-run or an older run
-// omits the strip rather than faking counts.
+// omits the strip rather than faking counts. "Reachable" is
+// devices_discovered: every device that answered, rogues included.
 const BACNET_SIDECAR_SUMMARY_FIELDS = [
-  ["Discovered", "devices_discovered"],
-  ["Points", "points_exported"],
-  ["Matches", "register_matches"],
+  ["Expected", "register_expected"],
+  ["Reachable", "devices_discovered"],
+  ["Match", "register_matches"],
+  ["Partial", "register_partial"],
+  ["Missing", "register_missing"],
   ["Rogue", "register_rogue"],
 ] as const;
 
@@ -285,10 +317,16 @@ export function formatBacnetSidecarSummaryCards(
   if (!summary || typeof summary !== "object") {
     return null;
   }
-  const anyPresent = BACNET_SIDECAR_SUMMARY_FIELDS.some(
-    ([, key]) => typeof summary[key] === "number",
-  );
-  if (!anyPresent) {
+  // points_exported is checked but NOT displayed. The engine computes it as a
+  // sum, so it is a number on every real bacnet_scanner run even when every
+  // register counter is null (a cancelled or empty scan); dropping it from the
+  // strip must not also drop it from the "is this a scanner run at all?" test,
+  // or such a run would lose its summary entirely instead of showing dashes.
+  // Unlike the generic hosts_scanned, no other engine writes it.
+  const isSidecar =
+    typeof summary.points_exported === "number" ||
+    isSidecarSummary(summary, BACNET_SIDECAR_SCANNER, BACNET_SIDECAR_SUMMARY_FIELDS);
+  if (!isSidecar) {
     return null;
   }
   return BACNET_SIDECAR_SUMMARY_FIELDS.map(([heading, key]) => {
@@ -305,7 +343,9 @@ export function formatBacnetSidecarSummaryCards(
 const MQTT_SIDECAR_SUMMARY_FIELDS = [
   ["Topics", "topics_discovered"],
   ["Assets", "assets_discovered"],
-  ["Matches", "register_matches"],
+  // "Match", not "Matches", so the same counter is named the same way on all
+  // three scanner screens.
+  ["Match", "register_matches"],
   ["Rogue", "register_rogue"],
 ] as const;
 

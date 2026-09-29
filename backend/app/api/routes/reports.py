@@ -694,6 +694,7 @@ _SILENT_COLUMNS = ("Source Run", "Device ID")
 # formats, same convention as the validation section titles above.
 _INVENTORY_SUMMARY_TITLE = "Discovery summary"
 _INVENTORY_IP_TITLE = "Discovered IP hosts"
+_INVENTORY_IP_SILENT_TITLE = "Expected IP hosts not responding"
 _INVENTORY_BACNET_DEVICES_TITLE = "Discovered BACnet devices"
 _INVENTORY_BACNET_POINTS_TITLE = "Discovered BACnet points"
 _INVENTORY_BACNET_SILENT_TITLE = "Expected BACnet devices not responding"
@@ -723,6 +724,13 @@ _BACNET_DEVICE_COLUMNS = (
 )
 _BACNET_POINT_COLUMNS = ("Source Run", "Device", "Point ID", "Point Name", "Value", "Units")
 _BACNET_SILENT_COLUMNS = ("Source Run", "Register Asset", "Instance", "Address", "Directed Who-Is")
+_IP_SILENT_COLUMNS = (
+    "Source Run",
+    "Register Host",
+    "Address",
+    "Expected Ports",
+    "Direct Probe",
+)
 _BACNET_ROUTER_COLUMNS = ("Source Run", "Router Address", "Reachable Networks")
 _MQTT_TOPIC_COLUMNS = ("Source Run", "Topic", "Messages", "Device Ref")
 
@@ -733,6 +741,18 @@ _BACNET_SILENT_NOTE = (
     "Expected devices that did not answer during the scan window. Directed-Who-Is silence is "
     "inconclusive under BACnet-135 (an off-subnet device may reply with a local broadcast we "
     "cannot hear); these rows are neither confirmed present nor absent."
+)
+# The IP twin. The vendored sweep ICMP-pings every address in the scanned range
+# and then reads the ARP cache, so "Direct Probe: sent" means a packet really
+# went to that address. Silence is still inconclusive: a host can drop ICMP and
+# sit off the local segment, so it appears in neither result. "not sent" means
+# the register's address fell outside the range this run swept, so the scan says
+# nothing at all about that host.
+_IP_SILENT_NOTE = (
+    "Register hosts that answered nothing during the scan. The sweep pings each address in the "
+    "scanned range and reads the ARP cache; silence is inconclusive, because a host that drops "
+    "ICMP and is off the local segment appears in neither. These rows are neither confirmed "
+    "present nor absent, and a row marked “not sent” was never probed at all."
 )
 # Routers/BBMDs that answered Who-Is-Router during discovery. The advertised
 # network numbers are reachability facts, not scanned devices — devices on those
@@ -749,9 +769,14 @@ _INVENTORY_EMPTY_NOTE = (
     "not an omission)."
 )
 
-# Excel caps sheet names at 31 chars; only the silent title exceeds it, so map
-# it to a short unique name (the full title is surfaced in the sheet's row 1).
-_INVENTORY_SHEET_NAMES = {_INVENTORY_BACNET_SILENT_TITLE: "Expected not responding"}
+# Excel caps sheet names at 31 chars; the two silent titles exceed it (34 and
+# 32), so map each to a short unique name (the full title is surfaced in the
+# sheet's row 1). The names must stay distinct or one sheet would overwrite the
+# other when both an IP and a BACnet scanner run are in scope.
+_INVENTORY_SHEET_NAMES = {
+    _INVENTORY_BACNET_SILENT_TITLE: "Expected not responding",
+    _INVENTORY_IP_SILENT_TITLE: "Expected IP not responding",
+}
 
 # xlsx column widths by column name (reused across every inventory sheet — the
 # names are unique enough that one map covers all sections). Wide free-text
@@ -779,6 +804,9 @@ _INVENTORY_COLUMN_WIDTHS = {
     "Value": 20,
     "Units": 12,
     "Directed Who-Is": 16,
+    "Register Host": 26,
+    "Expected Ports": 18,
+    "Direct Probe": 14,
     "Topic": 40,
     "Messages": 12,
     "Device Ref": 24,
@@ -1351,8 +1379,10 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
     router_rows: list[dict[str, str]] = []
     # (sort key, row) so the silent rows can be ordered independently of scope.
     silent_entries: list[tuple[tuple[str, str, str], dict[str, str]]] = []
+    ip_silent_entries: list[tuple[tuple[str, str], dict[str, str]]] = []
 
     has_ip = has_bacnet = has_mqtt = has_silent = has_routers = False
+    has_ip_silent = False
 
     for source in sources:
         run_id = str(source.run_id)
@@ -1390,6 +1420,40 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
                 )
             counts = f"{_inv_count(summary.get('hosts_scanned'))} hosts scanned, "
             counts += f"{_inv_count(summary.get('hosts_responsive'))} responsive"
+            # Register hosts that answered nothing are excluded from the devices
+            # table on purpose (it is observed-only), so without this section the
+            # signed report omitted the silent hosts the results screen shows.
+            # Gate on the key's presence, not truthiness: an empty list is the
+            # real result "every expected host answered".
+            if "expected_not_responding" in summary:
+                has_ip_silent = True
+                silent_hosts = summary.get("expected_not_responding")
+                if isinstance(silent_hosts, list):
+                    for entry in silent_hosts:
+                        if not isinstance(entry, dict):
+                            continue
+                        address = entry.get("address")
+                        # True/False/None from the engine: it knows whether the
+                        # address sat inside the range this run actually swept.
+                        probe = entry.get("directed_probe_sent")
+                        ip_silent_entries.append(
+                            (
+                                (str(address), run_id),
+                                {
+                                    "Source Run": run_id,
+                                    "Register Host": _inv_cell(entry.get("asset_name")),
+                                    "Address": _inv_cell(address),
+                                    "Expected Ports": _inv_ports(entry.get("expected_ports")),
+                                    "Direct Probe": (
+                                        "sent"
+                                        if probe is True
+                                        else "not sent"
+                                        if probe is False
+                                        else _inv_cell(None)
+                                    ),
+                                },
+                            )
+                        )
 
         elif source.job_type in ("bacnet_discovery", "bacnet_scanner"):
             has_bacnet = True
@@ -1538,6 +1602,8 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
 
     silent_entries.sort(key=lambda item: item[0])
     silent_rows = [row for _, row in silent_entries]
+    ip_silent_entries.sort(key=lambda item: item[0])
+    ip_silent_rows = [row for _, row in ip_silent_entries]
 
     def _section(
         title: str,
@@ -1556,6 +1622,15 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
     ]
     if has_ip:
         sections.append(_section(_INVENTORY_IP_TITLE, _IP_INVENTORY_COLUMNS, ip_rows))
+    if has_ip_silent:
+        sections.append(
+            _section(
+                _INVENTORY_IP_SILENT_TITLE,
+                _IP_SILENT_COLUMNS,
+                ip_silent_rows,
+                note=_IP_SILENT_NOTE,
+            )
+        )
     if has_bacnet:
         sections.append(_section(_INVENTORY_BACNET_DEVICES_TITLE, _BACNET_DEVICE_COLUMNS, device_rows))
         sections.append(_section(_INVENTORY_BACNET_POINTS_TITLE, _BACNET_POINT_COLUMNS, point_rows))
@@ -3226,11 +3301,14 @@ _PDF_IP_WEIGHTS = (92, 74, 70, 58, 62, 46, 46, 46)
 _PDF_BACNET_DEVICE_WEIGHTS = (92, 42, 62, 74, 52, 52, 74, 30)
 _PDF_BACNET_POINT_WEIGHTS = (86, 60, 56, 104, 78, 40)
 _PDF_BACNET_SILENT_WEIGHTS = (86, 96, 44, 72, 58)
+# Source Run / Register Host / Address / Expected Ports / Direct Probe.
+_PDF_IP_SILENT_WEIGHTS = (86, 96, 72, 62, 50)
 _PDF_BACNET_ROUTER_WEIGHTS = (92, 90, 140)
 _PDF_MQTT_WEIGHTS = (72, 214, 46, 80)
 _PDF_INVENTORY_WEIGHTS = {
     _INVENTORY_SUMMARY_TITLE: _PDF_INVENTORY_SUMMARY_WEIGHTS,
     _INVENTORY_IP_TITLE: _PDF_IP_WEIGHTS,
+    _INVENTORY_IP_SILENT_TITLE: _PDF_IP_SILENT_WEIGHTS,
     _INVENTORY_BACNET_DEVICES_TITLE: _PDF_BACNET_DEVICE_WEIGHTS,
     _INVENTORY_BACNET_POINTS_TITLE: _PDF_BACNET_POINT_WEIGHTS,
     _INVENTORY_BACNET_SILENT_TITLE: _PDF_BACNET_SILENT_WEIGHTS,
