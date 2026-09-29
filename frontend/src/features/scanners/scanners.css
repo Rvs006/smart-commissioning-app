@@ -1,0 +1,618 @@
+/* ============================================================================
+   Native scanner screens (IP / BACnet) — plan section 4.5.
+   Token-only: every colour comes from electracom-theme.css, so the dark palette
+   applies with no extra rules. No new dependency, no shadow beyond --shadow.
+   ============================================================================ */
+
+/* The app shell's .page-frame already supplies the content column's padding and
+   max-width, so this only stacks the cards at the mockup's 18px rhythm. */
+.scanner-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.scanner-page-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scanner-eyebrow {
+  margin: 0;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.scanner-page-head h1 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 25px;
+  font-weight: 600;
+}
+
+.scanner-purpose {
+  margin: 0;
+  max-width: 700px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+/* ---- card ---------------------------------------------------------------- */
+.scanner-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.scanner-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.scanner-card-head h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.scanner-card-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent);
+  font-size: 12.5px;
+  text-decoration: none;
+}
+
+.scanner-card-link:hover {
+  color: var(--accent-hover);
+}
+
+.scanner-card-body {
+  padding: 16px 18px;
+}
+
+/* ---- setup --------------------------------------------------------------- */
+.scanner-setup-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  padding: 16px 18px;
+}
+
+.scanner-setup-grid > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.scanner-setup-label {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.scanner-setup-value {
+  color: var(--ink);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.scanner-setup-sub {
+  color: var(--text);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+/* Scoped to this page: .mono is a common enough class name that a bare global
+   rule would reach into any other feature that ever uses it. */
+.scanner-page .mono,
+.scanner-page .scanner-table td.mono,
+.scanner-page .scanner-object-row .mono {
+  font-family: var(--dc-mono);
+}
+
+.scanner-setup-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  padding: 0 18px 16px;
+}
+
+.scanner-setup-fields > .confirm-row,
+.scanner-setup-fields > .scanner-setup-span {
+  grid-column: 1 / -1;
+}
+
+.scanner-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.scanner-action-row .primary-button,
+.scanner-action-row .secondary-button {
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font-size: 13.5px;
+}
+
+.scanner-last-run {
+  margin: 0 0 0 auto;
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.scanner-last-run strong {
+  color: var(--ink);
+}
+
+.scanner-stage {
+  margin: 8px 0 0;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.scanner-card > .state-panel,
+.scanner-card > .error-text {
+  margin: 0 18px 14px;
+}
+
+/* ---- results heading ----------------------------------------------------- */
+.scanner-results-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.scanner-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Page-scoped on purpose. styles.css has `.data-table td span { display:block }`
+   at (0,1,2), which outranks a bare `.scanner-chip` (0,1,0) and turned every
+   status and register chip inside the results table into a full-width block bar.
+   Scoping the whole chip block under .scanner-page takes it to (0,2,0), which
+   wins, and keeps the tone variants above it. */
+.scanner-page .scanner-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* Cancels the same global rule's 3px sub-line gap. */
+  margin-top: 0;
+  padding: 3px 9px;
+  border-radius: 20px;
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.scanner-page .scanner-chip.chip-pass {
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+.scanner-page .scanner-chip.chip-warn {
+  background: var(--amber-bg);
+  color: var(--amber);
+}
+
+.scanner-page .scanner-chip.chip-fail {
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+.scanner-page .scanner-chip.chip-info {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.scanner-filter-bar {
+  padding: 12px 18px 0;
+}
+
+.scanner-chip-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.scanner-chip-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.scanner-chip-button.chip-pass span {
+  color: var(--green);
+}
+
+.scanner-chip-button.chip-warn span {
+  color: var(--amber);
+}
+
+.scanner-chip-button.chip-fail span {
+  color: var(--red);
+}
+
+.scanner-chip-button.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.scanner-chip-button:hover:not(.active) {
+  border-color: var(--accent);
+}
+
+/* ---- table + side panel -------------------------------------------------- */
+.scanner-results-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  align-items: start;
+  padding: 14px 18px 0;
+}
+
+.scanner-results-layout.with-panel {
+  grid-template-columns: minmax(0, 1fr) var(--scanner-panel-width, 380px);
+  gap: 16px;
+}
+
+.scanner-results-layout.with-panel.panel-expanded {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.scanner-table-wrap {
+  min-width: 0;
+}
+
+/* The cell sub-line (the vendor under a MAC, say). It must NOT catch the status
+   and register chips, which are spans too: this selector is more specific than
+   .scanner-chip, so an unscoped rule turned every chip into a full-width block
+   bar with a 3px gap above it. */
+.scanner-table td > span:not(.scanner-chip) {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.scanner-table tbody tr:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.scanner-detail {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-height: calc(100vh - 120px);
+  padding: 0 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.scanner-results-layout:not(.with-panel) .scanner-detail {
+  display: none;
+}
+
+.scanner-results-layout.panel-expanded .scanner-detail {
+  position: static;
+  max-height: none;
+  margin-top: 16px;
+}
+
+.scanner-detail.empty {
+  padding: 16px 18px;
+}
+
+.scanner-detail-resizer {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+}
+
+.scanner-results-layout.panel-expanded .scanner-detail-resizer {
+  display: none;
+}
+
+.scanner-detail-resizer:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
+.scanner-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.scanner-detail-head h3,
+.scanner-detail.empty h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.scanner-detail-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.scanner-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.scanner-icon-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.scanner-detail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 16px 0;
+}
+
+.scanner-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 14px 16px 0;
+  overflow-y: auto;
+}
+
+.scanner-detail-section h4 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.scanner-kv {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.scanner-kv > div {
+  display: contents;
+}
+
+.scanner-kv dt {
+  color: var(--muted);
+}
+
+.scanner-kv dd {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.scanner-kv-pass {
+  color: var(--green);
+}
+
+.scanner-kv-warn {
+  color: var(--amber);
+}
+
+.scanner-kv-fail {
+  color: var(--red);
+}
+
+.scanner-detail-note {
+  margin: 8px 0 0;
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.scanner-detail-note.tone-pass {
+  color: var(--green);
+}
+
+.scanner-detail-note.tone-warn {
+  color: var(--amber);
+}
+
+.scanner-detail-note.tone-fail {
+  color: var(--red);
+}
+
+.scanner-detail-empty {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.scanner-service-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scanner-service-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.scanner-service-head {
+  color: var(--ink);
+  font-family: var(--dc-mono);
+  font-size: 12px;
+}
+
+.scanner-service-detail {
+  color: var(--text);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+/* ---- inline object grid (BACnet) ----------------------------------------- */
+.scanner-object-grid {
+  margin-top: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+/* The artboard's 120px 1fr 120px 90px assumes a full-width expanded row; inside
+   a 380px panel those fixed columns leave the name nothing, so each one carries
+   a floor and a cap and only the name column takes the slack. */
+.scanner-object-row {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1.1fr) minmax(0, 1.6fr)
+    minmax(0, 1fr) minmax(0, 0.7fr);
+  border-top: 1px solid var(--border-soft);
+  font-size: 12.5px;
+}
+
+.scanner-object-row:first-child {
+  border-top: 0;
+}
+
+.scanner-object-row.head {
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.scanner-object-row > span {
+  padding: 8px 12px;
+  overflow-wrap: anywhere;
+}
+
+/* ---- footer -------------------------------------------------------------- */
+.scanner-footer-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.scanner-footer-line code {
+  color: var(--ink);
+  font-family: var(--dc-mono);
+}
+
+.scanner-footer-line span[aria-hidden="true"] {
+  color: var(--green);
+}
+
+.scanner-report-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.scanner-report-form label {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 220px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* ---- responsive ---------------------------------------------------------- */
+@media (max-width: 1100px) {
+  .scanner-results-layout.with-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scanner-results-layout.with-panel .scanner-detail {
+    position: static;
+    max-height: none;
+    margin-top: 16px;
+  }
+
+  .scanner-detail-resizer {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .scanner-setup-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .scanner-setup-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scanner-last-run {
+    margin-left: 0;
+  }
+}
