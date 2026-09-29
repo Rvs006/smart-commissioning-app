@@ -48,7 +48,7 @@ class LiveSession:
 
 
 class MqttLiveSessionService:
-    """One live session, guarded by one non-reentrant lock."""
+    """One live session, guarded by two locks (see ``__init__`` for the order)."""
 
     IDLE_GRACE_SECONDS = 120.0
     ABSOLUTE_CAP_SECONDS = 14_400.0  # 4h hard ceiling regardless of activity
@@ -59,6 +59,23 @@ class MqttLiveSessionService:
         # PUBLIC: the create-run guard in scanners.py serialises on this same lock
         # so a live session and a capture run can never both start.
         self.lock = threading.Lock()
+        # PUBLIC: the sidecar-ceremony lock. Every sequence that mutates the ONE
+        # shared sidecar's register or connection, and every transition that hands
+        # sidecar ownership from one lane to another, runs under it: connect
+        # (register push + /api/connect), live save-as-register (generate ->
+        # import -> push), and lease release / reap.
+        #
+        # Releasing the lease is what lets the capture lane in (its guard is
+        # "no live session held"), so a release that did not take this lock could
+        # let a capture push its own register and connect while a live save's push
+        # was still in flight - the capture would then compare against a register
+        # other than the one frozen in its run parameters.
+        #
+        # LOCK ORDER, always: ceremony_lock -> lock. Never the reverse. Reentrant
+        # because connect() releases the lease from inside its own ceremony.
+        # Deliberately NOT `lock`: the async relay and the reaper take that one,
+        # and a ceremony can block for seconds on loopback calls.
+        self.ceremony_lock = threading.RLock()
         self._session: LiveSession | None = None
         self._reaper: threading.Thread | None = None
 
@@ -125,20 +142,24 @@ class MqttLiveSessionService:
     def release(self, session_id: str | None) -> bool:
         """Release the lease (``None`` releases whatever is held). Idempotent.
 
-        The sidecar disconnect runs OUTSIDE the lock so a slow best-effort POST
-        never stalls connect / create-run / the relay.
+        The sidecar disconnect runs outside ``self.lock`` (but inside the ceremony)
+        so a slow best-effort POST never stalls the relay or a stream attach.
         """
         disconnect: Callable[[], None] | None = None
         released = False
-        with self.lock:
-            held = self._session
-            if held is not None and (session_id is None or held.session_id == session_id):
-                disconnect = held.disconnect
-                self._session = None
-                released = True
-                logger.info("mqtt live session closed session=%s by=owner-stop", held.session_id)
-        if disconnect is not None:
-            _best_effort(disconnect)
+        # Under the ceremony lock: a release hands the sidecar to whoever takes it
+        # next (a capture run's guard is "no live session held"), so it must not
+        # land in the middle of another lane's register push.
+        with self.ceremony_lock:
+            with self.lock:
+                held = self._session
+                if held is not None and (session_id is None or held.session_id == session_id):
+                    disconnect = held.disconnect
+                    self._session = None
+                    released = True
+                    logger.info("mqtt live session closed session=%s by=owner-stop", held.session_id)
+            if disconnect is not None:
+                _best_effort(disconnect)
         return released
 
     def reap_if_stale(self, *, now_mono: float | None = None) -> str | None:
@@ -150,21 +171,23 @@ class MqttLiveSessionService:
         now = time.monotonic() if now_mono is None else now_mono
         disconnect: Callable[[], None] | None = None
         reason: str | None = None
-        with self.lock:
-            held = self._session
-            if held is not None:
-                if now - held.acquired_mono > self.ABSOLUTE_CAP_SECONDS:
-                    reason = "cap"
-                elif held.attached_streams <= 0 and (
-                    now - max(held.acquired_mono, held.last_stream_mono) > self.IDLE_GRACE_SECONDS
-                ):
-                    reason = "idle"
-                if reason is not None:
-                    disconnect = held.disconnect
-                    self._session = None
-                    logger.info("mqtt live session reaped session=%s reason=%s", held.session_id, reason)
-        if disconnect is not None:
-            _best_effort(disconnect)
+        # Same ceremony as release(): a reap frees the sidecar for the next lane.
+        with self.ceremony_lock:
+            with self.lock:
+                held = self._session
+                if held is not None:
+                    if now - held.acquired_mono > self.ABSOLUTE_CAP_SECONDS:
+                        reason = "cap"
+                    elif held.attached_streams <= 0 and (
+                        now - max(held.acquired_mono, held.last_stream_mono) > self.IDLE_GRACE_SECONDS
+                    ):
+                        reason = "idle"
+                    if reason is not None:
+                        disconnect = held.disconnect
+                        self._session = None
+                        logger.info("mqtt live session reaped session=%s reason=%s", held.session_id, reason)
+            if disconnect is not None:
+                _best_effort(disconnect)
         return reason
 
     # -- stream attachment ----------------------------------------------------
