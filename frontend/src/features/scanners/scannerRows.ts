@@ -4,10 +4,11 @@ import type {
   DiscoveryRowRecord,
   ObservedPort,
 } from "../../api/client";
-import { bacnetRowVerdict, ipRowVerdict } from "../workflow/discoveryRows";
+import { bacnetRowVerdict, ipRowVerdict, mqttRowsFromResults } from "../workflow/discoveryRows";
 import {
   formatBacnetSidecarSummaryCards,
   formatIpSidecarSummaryCards,
+  formatMqttSidecarSummaryCards,
 } from "../workflow/ipDiscoveryModel";
 import type { ScannerLane } from "./useScannerRun";
 
@@ -31,6 +32,14 @@ export type ScannerRow = {
   status: string;
   /** True for an expected device that never answered (no observed evidence). */
   missing: boolean;
+  /**
+   * IP only, and only on a `missing` row: did this scan actually probe the
+   * address? The sweep pings every address between start and end, so a register
+   * host OUTSIDE that range was never contacted and its silence is not evidence
+   * of anything. `undefined` = the engine could not answer (no recorded range,
+   * or an unparseable address).
+   */
+  probed?: boolean;
   deviceInstance?: number;
   /** The persisted device attributes, empty for a missing (never-observed) row. */
   attributes: Record<string, unknown>;
@@ -59,8 +68,21 @@ export const BACNET_COLUMNS = [
   "Register",
 ] as const;
 
+// The MQTT capture table from the full-app artboard. "Register Match" is added
+// to the artboard's five so the capture keeps the register verdict the v0.1.58
+// table carried; Asset / Message count / Last payload seen / Detailed status
+// ride each row's cell sub-lines and the detail panel, so no evidence is lost.
+export const MQTT_COLUMNS = [
+  "Topic",
+  "Ret",
+  "QoS",
+  "JSON size",
+  "Last value",
+  "Register Match",
+] as const;
+
 export function scannerColumns(lane: ScannerLane): readonly string[] {
-  return lane === "bacnet" ? BACNET_COLUMNS : IP_COLUMNS;
+  return lane === "bacnet" ? BACNET_COLUMNS : lane === "mqtt" ? MQTT_COLUMNS : IP_COLUMNS;
 }
 
 const DASH = "—";
@@ -128,6 +150,13 @@ function statusChip(status: string): ScannerCell {
       return { text: "Rogue host", chip: "fail" };
     case "unreachable":
       return { text: "Unreachable", chip: "fail" };
+    // Register hosts the scan cannot call unreachable. Both stay red, because
+    // the register expects them and neither is accounted for, but "Unreachable"
+    // would be a claim about the network that this scan did not make.
+    case "not-probed":
+      return { text: "Not probed", chip: "fail" };
+    case "expected":
+      return { text: "Expected", chip: "fail" };
     default:
       return { text: status ? status : DASH, chip: "neutral" };
   }
@@ -168,7 +197,128 @@ export function scannerRowsFromResults(
   if (!results) {
     return [];
   }
-  return lane === "bacnet" ? bacnetRows(results) : ipRows(results);
+  return lane === "bacnet" ? bacnetRows(results) : lane === "mqtt" ? mqttRows(results) : ipRows(results);
+}
+
+/**
+ * UTF-8 size of the STORED JSON payload — the same text the "Last value" cell
+ * shows, so the two cells always describe one thing. The engine records no wire
+ * message length, so this is not it; the column is named "JSON size" and carries
+ * that caveat as its title. Unknown reads "—", never 0: a run with no payload,
+ * and a non-JSON payload kept only as a presence marker, have no honest size.
+ */
+function payloadBytes(stored: string | null): string {
+  if (stored === null) {
+    return DASH;
+  }
+  try {
+    return String(new TextEncoder().encode(stored).length);
+  } catch {
+    return String(stored.length);
+  }
+}
+
+/** Column headers that need a caveat the header itself cannot carry. */
+export const COLUMN_TITLES: Record<string, string> = {
+  "JSON size":
+    "Size of the stored JSON payload; the engine does not record the wire message length.",
+};
+
+/**
+ * The engine's stored payload shapes, unwrapped for display exactly as the
+ * v0.1.58 payload inspector did: `_raw_present` marks a non-JSON payload whose
+ * bytes were NOT stored, and `_value` wraps a payload that was not a JSON object.
+ * Returns the pretty-printed payload, or null when there is nothing to show.
+ */
+function displayPayload(value: unknown): {
+  text: string | null;
+  compact: string | null;
+  rawOnly: boolean;
+} {
+  if (value === null || value === undefined) {
+    return { text: null, compact: null, rawOnly: false };
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (record._raw_present === true) {
+      return { text: null, compact: null, rawOnly: true };
+    }
+    const unwrapped = "_value" in record ? record._value : value;
+    return {
+      text: JSON.stringify(unwrapped, null, 2),
+      compact: JSON.stringify(unwrapped),
+      rawOnly: false,
+    };
+  }
+  return { text: String(value), compact: String(value), rawOnly: false };
+}
+
+/**
+ * MQTT capture rows. The per-topic projection is discoveryRows'
+ * mqttRowsFromResults, verbatim, so the capture table and Run History can never
+ * disagree about a topic's register verdict or its retained / QoS metadata; only
+ * the column set and the chips differ here.
+ */
+function mqttRows(results: DiscoveryResultsResponse): ScannerRow[] {
+  // mqttRowsFromResults maps results.topics 1:1 and in order, so the index also
+  // reaches the topic record's real last_payload OBJECT. The stringified cell is
+  // never re-parsed to get it back.
+  return mqttRowsFromResults(results).map((row, index) => {
+    const topic = row.Topic ?? DASH;
+    const asset = row.Asset ?? DASH;
+    const verdictText = row["Register Match"] ?? DASH;
+    const tone: RowTone = row.__tone === "pass" ? "pass" : row.__tone === "fail" ? "fail" : null;
+    // ScannerRow.register drives the chip filter; keep the two register words the
+    // MQTT engine actually reports ("matched" / "unmatched") in the shared
+    // vocabulary the filters use.
+    const register = tone === "pass" ? "match" : tone === "fail" ? "rogue" : "";
+    const payload = displayPayload(results.topics[index]?.last_payload);
+    const retained = row.__retained;
+    const lastSeen = row["Last Payload Seen"] ?? DASH;
+    const messageCount = row["Message Count"] ?? DASH;
+    const statusDetail = row["Detailed Status"] ?? DASH;
+    return {
+      id: topic === DASH ? `mqtt:row-${index}` : `mqtt:${topic}`,
+      title: topic,
+      tone,
+      register,
+      status: statusDetail,
+      missing: false,
+      attributes: {
+        topic,
+        asset,
+        message_count: messageCount,
+        last_payload_seen: lastSeen,
+        status_detail: statusDetail,
+        last_retained: retained,
+        last_qos: row.__qos,
+        subscribe_qos: row.__subscribeQos,
+        last_payload: payload.text,
+        payload_raw_only: payload.rawOnly,
+        register_match: verdictText,
+      },
+      cells: {
+        Topic: { text: topic, mono: true, sub: asset === DASH ? undefined : asset },
+        // "" = the run predates per-message metadata: unknown reads "—", which
+        // must not be confused with an observed "not retained".
+        Ret: { text: retained === "yes" ? "✓" : retained === "no" ? "✗" : DASH },
+        QoS: { text: row.__qos ? row.__qos : DASH, mono: true },
+        // Measured on the SAME text "Last value" renders (payload.compact), not
+        // on the re-serialized wrapper: {"_value":42} would have read 13 bytes
+        // beside a cell showing "42".
+        "JSON size": { text: payloadBytes(payload.compact), mono: true },
+        "Last value": {
+          text: payload.rawOnly ? "non-JSON (not stored)" : (payload.compact ?? DASH),
+          mono: true,
+          sub: `${messageCount} msg · ${lastSeen}`,
+        },
+        "Register Match": {
+          text: verdictText,
+          chip: tone === "pass" ? "pass" : tone === "fail" ? "fail" : "neutral",
+        },
+      },
+    };
+  });
 }
 
 function ipRows(results: DiscoveryResultsResponse): ScannerRow[] {
@@ -186,8 +336,20 @@ function ipRows(results: DiscoveryResultsResponse): ScannerRow[] {
     const attributes = attributesOf(device);
     const state = registerStateOf(asset as Record<string, unknown>);
     const verdict = ipRowVerdict(asset);
-    const status = statusFromDetail(asset.status_detail, state === "missing" ? "unreachable" : "reachable");
     const missing = state === "missing";
+    // Track A's engine stamps directed_probe_sent on a silent host: true inside
+    // the swept range, false outside it, absent when it could not tell. A host
+    // the scan never reached must not be reported as unreachable — that turns
+    // "we did not look" into "it did not answer".
+    const probeSent = asset.directed_probe_sent;
+    const probed = typeof probeSent === "boolean" ? probeSent : undefined;
+    const status = missing
+      ? probed === false
+        ? "not-probed"
+        : probed === true
+          ? "unreachable"
+          : "expected"
+      : statusFromDetail(asset.status_detail, "reachable");
     // A silent host resolved no hostname: the engine keeps `hostname` null and
     // carries the register's expectation in `expected_hostname`, so an
     // expectation is never rendered as a discovery.
@@ -201,6 +363,7 @@ function ipRows(results: DiscoveryResultsResponse): ScannerRow[] {
       register: state,
       status,
       missing,
+      probed,
       // A silent host has no device record; carry the register's expectation so
       // the panel can name what was expected without claiming it was observed.
       attributes: missing ? { expected_hostname: asset.expected_hostname } : attributes,
@@ -298,7 +461,9 @@ export function scannerSummaryPills(
   const cards =
     (lane === "bacnet"
       ? formatBacnetSidecarSummaryCards(summary)
-      : formatIpSidecarSummaryCards(summary)) ?? [];
+      : lane === "mqtt"
+        ? formatMqttSidecarSummaryCards(summary)
+        : formatIpSidecarSummaryCards(summary)) ?? [];
   return cards.map((card) => ({
     label: card.heading,
     value: card.value,
@@ -329,6 +494,20 @@ export const RAG_FILTERS: ReadonlyArray<{ id: RagFilter; label: string; chip: Ch
   { id: "partial", label: "Partial", chip: "warn" },
   { id: "missing-rogue", label: "Missing / Rogue", chip: "fail" },
 ];
+
+// The MQTT capture compares a topic against the register's filters, so it only
+// ever reports matched / not-in-register: no Partial, and no Missing row (an
+// expected topic the capture never saw is reported in the register-comparison
+// note, never as a row, because nothing was observed).
+export const MQTT_RAG_FILTERS: ReadonlyArray<{ id: RagFilter; label: string; chip: ChipTone }> = [
+  { id: "all", label: "All", chip: "neutral" },
+  { id: "match", label: "Matched", chip: "pass" },
+  { id: "missing-rogue", label: "Not in register", chip: "fail" },
+];
+
+export function ragFiltersFor(lane: ScannerLane) {
+  return lane === "mqtt" ? MQTT_RAG_FILTERS : RAG_FILTERS;
+}
 
 export function rowMatchesRagFilter(row: ScannerRow, filter: RagFilter): boolean {
   if (filter === "all") {
@@ -365,7 +544,13 @@ export function clampPanelWidth(width: number): number {
   return Math.min(SCANNER_PANEL_MAX_WIDTH, Math.max(SCANNER_PANEL_MIN_WIDTH, Math.round(width)));
 }
 
-export type DetailItem = { label: string; value: string; tone?: RowTone };
+export type DetailItem = {
+  label: string;
+  value: string;
+  tone?: RowTone;
+  /** Offer a copy control beside the value (a raw payload, a banner). */
+  copyable?: boolean;
+};
 export type DetailSection = {
   heading: string;
   items: DetailItem[];
@@ -569,4 +754,58 @@ export function bacnetDetailSections(row: ScannerRow): DetailSection[] {
     });
   }
   return sections;
+}
+
+/**
+ * MQTT capture detail panel. Every field the v0.1.58 capture table carried in a
+ * column (asset, message count, last payload seen, detailed status) lives here
+ * alongside the per-message metadata the old inspector showed, so narrowing the
+ * table to the artboard's columns loses nothing. A blank metadata value means
+ * the run predates that capture, and is said so rather than shown as a zero.
+ */
+export function mqttDetailSections(row: ScannerRow): DetailSection[] {
+  const a = row.attributes;
+  const notRecorded = (value: unknown) =>
+    value === undefined || value === null || value === "" ? "Not recorded" : String(value);
+  return [
+    {
+      heading: "Topic",
+      items: [
+        { label: "Topic", value: text(a.topic) },
+        { label: "Asset", value: text(a.asset) },
+        { label: "Messages", value: text(a.message_count) },
+        { label: "Last payload seen", value: text(a.last_payload_seen) },
+        { label: "Detailed status", value: text(a.status_detail) },
+      ],
+    },
+    {
+      heading: "Message metadata",
+      items: [
+        {
+          label: "Retained",
+          value:
+            a.last_retained === "yes" ? "Yes" : a.last_retained === "no" ? "No" : "Not recorded",
+        },
+        { label: "Delivery QoS", value: notRecorded(a.last_qos) },
+        { label: "Subscription QoS cap", value: notRecorded(a.subscribe_qos) },
+      ],
+      note:
+        "Delivery QoS is min(publisher QoS, this run's subscription QoS), not the publisher's own.",
+    },
+    {
+      heading: "Register",
+      items: [
+        { label: "Verdict", value: text(a.register_match), tone: row.tone },
+      ],
+    },
+    {
+      heading: "Last payload",
+      items: a.payload_raw_only
+        ? []
+        : [{ label: "Raw", value: text(a.last_payload), copyable: true }],
+      note: a.payload_raw_only
+        ? "Non-JSON payload observed. The engine stores a presence marker, not the raw bytes."
+        : undefined,
+    },
+  ];
 }

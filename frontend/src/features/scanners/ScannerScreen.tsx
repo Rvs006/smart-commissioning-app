@@ -21,11 +21,9 @@ import { formatRelativeTime, humanizeStage } from "../workflow/runFormat";
 import { DeviceDetailPanel } from "./DeviceDetailPanel";
 import { GenerateReportCard } from "./GenerateReportCard";
 import {
-  RAG_FILTERS,
-  SCANNER_PANEL_DEFAULT_WIDTH,
-  SCANNER_PANEL_WIDTH_STORAGE_KEY,
+  COLUMN_TITLES,
   bacnetObjectsPill,
-  clampPanelWidth,
+  ragFiltersFor,
   rowMatchesRagFilter,
   rowMatchesText,
   scannerColumns,
@@ -36,6 +34,7 @@ import {
 } from "./scannerRows";
 import {
   useScannerDownload,
+  useStoredPanelWidth,
   type ScannerRunController,
   type ScannerRunInputs,
 } from "./useScannerRun";
@@ -60,32 +59,42 @@ export type ScannerScreenProps = {
   /** What Start posts. */
   inputs: ScannerRunInputs;
   onIgnoreRegisterChange: (next: boolean) => void;
-  /** A lane-specific reason Start must stay disabled (e.g. a bad instance range). */
-  startBlockedReason?: string | null;
-  /** Extra buttons in the results heading (BACnet export assets). */
+  /**
+   * A lane-specific reason Start must stay disabled. A string is an operator
+   * fault (red, role="alert"); the object form lets a lane say the block is an
+   * expected state instead, which renders as a neutral status panel — a
+   * live-first page would otherwise shout an assertive alert as its resting UI.
+   */
+  startBlockedReason?:
+    | string
+    | null
+    | { tone: "error" | "status"; title?: string; reason: string };
+  /**
+   * The side-panel width, when the page owns it. Two panels on one page must
+   * not run two states over the same localStorage key. Omit to keep it here.
+   */
+  panelWidth?: number;
+  onPanelWidthChange?: (width: number) => void;
+  /** Extra buttons in the results heading (BACnet export assets, MQTT archive). */
   resultsActions?: ReactNode;
   /** Lane-specific evidence cards below the results table (BACnet routers / points). */
   evidenceCards?: ReactNode;
+  /** Setup-card heading. MQTT names it "Broker & capture". */
+  setupHeading?: string;
+  /** Results-card heading. MQTT names it "Captured topics". */
+  resultsHeading?: string;
+  /**
+   * The MQTT lane runs no register comparison from a checkbox: its capture
+   * parameters carry no ignore_register key, so the control would be a lie.
+   */
+  showIgnoreRegister?: boolean;
+  /** Extra content in the setup action row, left of the last-run line (MQTT live status). */
+  actionRowExtra?: ReactNode;
+  /** A whole card between the setup card and the register import card (MQTT live topics). */
+  afterSetup?: ReactNode;
+  /** A lane-specific note above the results table (the MQTT register comparison). */
+  resultsNote?: ReactNode;
 };
-
-function useStoredPanelWidth() {
-  const [width, setWidth] = useState(() => {
-    try {
-      const stored = window.localStorage.getItem(SCANNER_PANEL_WIDTH_STORAGE_KEY);
-      return stored ? clampPanelWidth(Number(stored)) : SCANNER_PANEL_DEFAULT_WIDTH;
-    } catch {
-      return SCANNER_PANEL_DEFAULT_WIDTH;
-    }
-  });
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(SCANNER_PANEL_WIDTH_STORAGE_KEY, String(width));
-    } catch {
-      // A private window can refuse storage; the panel still works this session.
-    }
-  }, [width]);
-  return [width, setWidth] as const;
-}
 
 export function ScannerScreen({
   run,
@@ -96,8 +105,16 @@ export function ScannerScreen({
   inputs,
   onIgnoreRegisterChange,
   startBlockedReason = null,
+  panelWidth: panelWidthProp,
+  onPanelWidthChange,
   resultsActions,
   evidenceCards,
+  setupHeading = "Scan setup",
+  resultsHeading = "Results",
+  showIgnoreRegister = true,
+  actionRowExtra,
+  afterSetup,
+  resultsNote,
 }: ScannerScreenProps) {
   const {
     activeRun,
@@ -154,7 +171,9 @@ export function ScannerScreen({
   const [ragFilter, setRagFilter] = useState<RagFilter>("all");
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
   const [panelExpanded, setPanelExpanded] = useState(false);
-  const [panelWidth, setPanelWidth] = useStoredPanelWidth();
+  const [ownPanelWidth, setOwnPanelWidth] = useStoredPanelWidth();
+  const panelWidth = panelWidthProp ?? ownPanelWidth;
+  const setPanelWidth = onPanelWidthChange ?? setOwnPanelWidth;
   const rowRefs = useRef(new Map<string, HTMLTableRowElement>());
   const filterInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -282,13 +301,20 @@ export function ScannerScreen({
   const hiddenImportErrorCount = Math.max(importErrors.length - IMPORT_ERROR_DISPLAY_CAP, 0);
   const importWarnings = importOutcome?.warnings ?? [];
 
+  const laneNoun = lane === "bacnet" ? "BACnet" : lane === "mqtt" ? "MQTT" : "IP";
+  const laneRunNoun = lane === "mqtt" ? "capture" : "scan";
+
   // ---- run gating -----------------------------------------------------------
+  const startBlock =
+    typeof startBlockedReason === "string"
+      ? { tone: "error" as const, title: undefined, reason: startBlockedReason }
+      : startBlockedReason;
   const startBlocked =
     !canEngineer ||
     startedRunActive ||
     runAccessClosed ||
     !scanAuthorized ||
-    Boolean(startBlockedReason) ||
+    Boolean(startBlock) ||
     run.startMutation.isPending;
   const startTooltip = !canEngineer
     ? ENGINEER_REQUIRED_TOOLTIP
@@ -298,7 +324,7 @@ export function ScannerScreen({
         ? "A run is already in progress. Stop it before starting another."
         : !scanAuthorized
           ? "Confirm scan authorization before starting this scan."
-          : (startBlockedReason ?? undefined);
+          : (startBlock?.reason ?? undefined);
 
   const lastRunLine = activeRunRecord
     ? `Last run ${formatRelativeTime(activeRunRecord.updated_at ?? activeRunRecord.created_at)}`
@@ -324,7 +350,7 @@ export function ScannerScreen({
       {/* ---- Scan setup ---- */}
       <section className="scanner-card" aria-labelledby="scanner-setup-heading">
         <div className="scanner-card-head">
-          <h2 id="scanner-setup-heading">Scan setup</h2>
+          <h2 id="scanner-setup-heading">{setupHeading}</h2>
           <Link className="scanner-card-link" to="/configuration">
             Edit in Configuration <span aria-hidden="true">→</span>
           </Link>
@@ -340,14 +366,16 @@ export function ScannerScreen({
         </div>
         <div className="scanner-setup-fields">
           {setupFields}
-          <label className="confirm-row">
-            <input
-              checked={inputs.ignoreRegister}
-              onChange={(event) => onIgnoreRegisterChange(event.target.checked)}
-              type="checkbox"
-            />
-            Ignore register for this run (scan without RAG comparison)
-          </label>
+          {showIgnoreRegister && (
+            <label className="confirm-row">
+              <input
+                checked={inputs.ignoreRegister}
+                onChange={(event) => onIgnoreRegisterChange(event.target.checked)}
+                type="checkbox"
+              />
+              Ignore register for this run (scan without RAG comparison)
+            </label>
+          )}
           {authorizationEnforced && (
             <label className="confirm-row">
               <input
@@ -377,6 +405,7 @@ export function ScannerScreen({
           >
             {run.cancelMutation.isPending ? "Stopping..." : "Stop"}
           </button>
+          {actionRowExtra}
           <p className="scanner-last-run">
             {lastRunLine}
             {activeRunStatus ? (
@@ -388,11 +417,17 @@ export function ScannerScreen({
           </p>
         </div>
 
-        {startBlockedReason && (
-          <p className="error-text" role="alert">
-            {startBlockedReason}
-          </p>
-        )}
+        {startBlock &&
+          (startBlock.tone === "status" ? (
+            <div className="state-panel" role="status">
+              {startBlock.title && <strong>{startBlock.title}</strong>}
+              <span>{startBlock.reason}</span>
+            </div>
+          ) : (
+            <p className="error-text" role="alert">
+              {startBlock.reason}
+            </p>
+          ))}
         {run.startMutation.isError && (
           <div className="state-panel error">
             <strong>Run request failed</strong>
@@ -487,6 +522,10 @@ export function ScannerScreen({
           </div>
         )}
       </section>
+
+      {/* The MQTT lane's live explorer sits here: above the register card, so a
+          live-first page opens on the tree rather than on an import form. */}
+      {afterSetup}
 
       {/* ---- Register import ---- */}
       <section className="scanner-card" aria-labelledby="scanner-import-heading">
@@ -739,7 +778,7 @@ export function ScannerScreen({
       <section className="scanner-card" aria-labelledby="scanner-results-heading">
         <div className="scanner-card-head">
           <div className="scanner-results-title">
-            <h2 id="scanner-results-heading">Results</h2>
+            <h2 id="scanner-results-heading">{resultsHeading}</h2>
             <div className="scanner-pills">
               {pills.map((pill) => (
                 <span className={`scanner-chip chip-${pill.chip}`} key={pill.label}>
@@ -760,14 +799,18 @@ export function ScannerScreen({
               onClick={run.saveAsRegister}
               title={
                 canEngineer
-                  ? "Turn this scan's discovered devices into an expected-device register."
+                  ? lane === "mqtt"
+                    ? "Turn this capture's discovered assets into an expected-asset MQTT register (one row per asset, with its topic, schema, site and location)."
+                    : lane === "bacnet"
+                      ? "Turn this scan's discovered devices into an expected-device register (their reported object counts become the expected objects)."
+                      : "Turn this scan's responding devices into an expected-device register (their open ports become the expected ports)."
                   : ENGINEER_REQUIRED_TOOLTIP
               }
               type="button"
             >
               {run.saveRegisterMutation.isPending
                 ? "Saving register..."
-                : "Save scan as register (applies to the next scan)"}
+                : `Save ${laneRunNoun} as register (applies to the next ${laneRunNoun})`}
             </button>
             {resultsActions}
           </div>
@@ -782,9 +825,8 @@ export function ScannerScreen({
             <span>
               {savedRegister.summary.file_name}: {savedRegister.summary.accepted_rows} of{" "}
               {savedRegister.summary.total_rows} rows accepted ({savedRegister.summary.import_id}).
-              It is stored here and applies automatically to the next{" "}
-              {lane === "bacnet" ? "BACnet" : "IP"} scan for this project and site. There is nothing
-              to upload. Keep a copy if you want one:
+              It is stored here and applies automatically to the next {laneNoun} {laneRunNoun} for
+              this project and site. There is nothing to upload. Keep a copy if you want one:
             </span>
             <button
               className="secondary-button compact inline-link-button"
@@ -852,6 +894,7 @@ export function ScannerScreen({
             a TCP-connect miss is not proof the host is absent.
           </div>
         )}
+        {resultsNote}
 
         {rows.length > 0 && (
           <div className="results-filter-bar scanner-filter-bar">
@@ -859,13 +902,15 @@ export function ScannerScreen({
               Filter results
               <input
                 onChange={(event) => setTextFilter(event.target.value)}
-                placeholder="Address, name, vendor, status"
+                placeholder={
+                  lane === "mqtt" ? "Topic, asset, payload" : "Address, name, vendor, status"
+                }
                 ref={filterInputRef}
                 value={textFilter}
               />
             </label>
             <div aria-label="Register verdict" className="scanner-chip-filters" role="group">
-              {RAG_FILTERS.map((filter) => (
+              {ragFiltersFor(lane).map((filter) => (
                 <button
                   aria-pressed={ragFilter === filter.id}
                   className={`scanner-chip-button chip-${filter.chip}${
@@ -902,14 +947,18 @@ export function ScannerScreen({
                   {emptyState
                     ? emptyState.title
                     : activeRun && !activeRunTerminal
-                      ? "Scan in progress..."
-                      : "No results yet"}
+                      ? `${lane === "mqtt" ? "Capture" : "Scan"} in progress...`
+                      : lane === "mqtt"
+                        ? "No captured topics yet"
+                        : "No results yet"}
                 </strong>
                 <span>
                   {emptyState
                     ? emptyState.detail
                     : activeRun && !activeRunTerminal
-                      ? "Rows appear when the scan finishes and its evidence is confirmed."
+                      ? `Rows appear when the ${laneRunNoun} finishes and its evidence is confirmed.`
+                      : lane === "mqtt"
+                        ? "Record a capture to persist the topics and payloads as run evidence. Empty live results stay empty — no sample payloads are shown."
                       : "Start a scan to populate this table."}
                 </span>
               </div>
@@ -918,7 +967,7 @@ export function ScannerScreen({
                 <thead>
                   <tr>
                     {columns.map((column) => (
-                      <th key={column} scope="col">
+                      <th key={column} scope="col" title={COLUMN_TITLES[column]}>
                         {column}
                       </th>
                     ))}

@@ -9,6 +9,24 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Added
 
+- The MQTT Discovery screen is now a dedicated live-first page. It opens on the
+  live topic tree instead of a capture form: when Configuration has a broker and
+  nobody else holds the session, the page connects by itself on arrival. The tree
+  sits in a 320px mono rail with its counts, message rates, activity flash, copy
+  and sort controls, and the focused asset fills the sticky side panel beside it,
+  with the Overview, Live payload, Points and Metadata tabs unchanged. The header
+  carries the Topics, Live assets, Messages and Issues counters, the live search
+  and "Registered assets only" toggle, "Apply subscription filter", "Save as
+  register" from the live session, and "Publish message...". Recording a capture
+  is a secondary action on the Broker and capture card above it, and its results
+  stay the persisted-evidence view: a Captured topics card with the four capture
+  counters, a Topic, Ret, QoS, Bytes, Last value and Register Match table, the
+  matched / not-in-register chips, the capture archive and register CSV
+  downloads, and the run footer. Clicking a captured row opens the same side
+  panel with that topic's asset, message count, retained flag, delivery QoS,
+  subscription QoS cap and last payload. A run that recorded no per-message
+  metadata reads "Not recorded" rather than a zero, and a non-JSON payload says
+  the engine kept a presence marker instead of the bytes.
 - The native IP and BACnet scanner results tables now show a row for every
   device the uploaded register expects, including the ones that never answered.
   An expected-but-silent device used to appear only in the issues list, so an
@@ -45,6 +63,10 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Changed
 
+- The MQTT capture table's payload-size column is named "JSON size" and measures
+  the stored JSON exactly as the "Last value" cell renders it. The engine records
+  no wire message length, so the column says what it is rather than implying it
+  is the size of the message on the broker.
 - Row colour on the native IP and BACnet results tables now comes from the
   register verdict the scan actually reached, instead of being guessed from the
   status text. A device that answered but is not in the register reads "Rogue
@@ -74,8 +96,48 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   payload, with Cancel and "Send to device". Nothing is published until "Send to
   device" is pressed. Builds that enforce approval are unchanged.
 
+### Removed
+
+- Three things the old MQTT module page had are not on the new MQTT Discovery
+  screen. The captured-topics "Export to CSV" button is gone; the same rows and
+  the same topic filter still download as XLSX from the run, and the raw capture
+  archive still holds every payload. The "Explore JSON tree" inspector under a
+  selected topic is gone; the side panel shows the stored payload pretty-printed
+  with a copy button, and says so plainly when the engine kept only a presence
+  marker for a non-JSON payload. Both come back with the module-page cleanup
+  that removes the old screen. The results filter's "No verdict" option is gone
+  for good: within one capture a register is either bound, so every topic
+  carries a verdict, or it is not, so none do, and the option could never select
+  a subset.
+
 ### Fixed
 
+- The MQTT live view now says what is actually happening when the broker session
+  is held but no topics are arriving. A sidecar that accepts the session and then
+  drops its event stream before the first snapshot used to be retried forever:
+  the status line read "reconnecting" while the page underneath said "Live view
+  not running", with no tree and nothing to press. The page now reports the real
+  state, counting the attempts, keeps the last snapshot on screen through a drop
+  and marks it stale rather than blanking the tree, and never claims the live
+  view is off while the sidecar is holding the broker. After five consecutive
+  reopens with no frame the session is reported unavailable, naming the session
+  and saying nothing is being received, so Stop and Start are the way out
+  instead of an endless retry.
+- An IP register host whose address falls outside the scanned Start/End range is
+  no longer reported as unreachable. The sweep pings every address between start
+  and end, so a register row outside that window was never contacted, and the
+  row used to read "Unreachable" with a panel saying it "did not answer this
+  scan" — turning "we did not look" into negative evidence about a device. The
+  row now reads "Not probed", the panel says the scan never reached the address
+  and suggests widening the range, and a run that did not record the answer says
+  so instead of guessing. The register verdict stays red in all three cases,
+  because the register still expects the host and it is still unaccounted for.
+- The scanner screens' detail panel now actually sticks as the results scroll
+  past it. Every card clipped its content with `overflow: hidden`, which makes
+  the card a scroll container, and a scroll-container ancestor disables
+  `position: sticky` on everything inside it, so the panel had been scrolling
+  away on all three screens. The cards clip with `overflow: clip` instead, which
+  trims to the same rounded corner without creating a scrollport.
 - The Reports tab opens fast with a large report archive, and bulk delete no
   longer fails with "Internal Server Error". Each stored UDMI report carries
   full source-run snapshots in its parameters, so listing 100 of them read a

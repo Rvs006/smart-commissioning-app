@@ -88,7 +88,8 @@ export function App() {
   const pageOwnsTitle =
     location.pathname === "/udmi-validation" ||
     location.pathname === "/ip-scanner" ||
-    location.pathname === "/bacnet-scanner";
+    location.pathname === "/bacnet-scanner" ||
+    location.pathname === "/mqtt-scanner";
 
   // The Users entry is admin-only; everyone else never sees it (the route itself
   // stays admin-gated server-side, so this is a UX nicety, not security). It
