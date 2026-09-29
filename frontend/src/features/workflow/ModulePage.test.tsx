@@ -4236,6 +4236,106 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(metadataRow).getByText("Expected topic")).toBeInTheDocument();
   });
 
+  it("reports an overflowing observational lane as a lower bound, not a missing capture", async () => {
+    const overflowRun = {
+      ...udmiTerminalRun,
+      result_summary: {
+        ...udmiTerminalRun.result_summary,
+        asset_topic_discovery: {
+          enabled: true,
+          scope: "site/#",
+          scope_source: "register_common_ancestor",
+          scope_error: null,
+          topic_limit_per_asset: 20,
+          capture_complete: true,
+          capture_status: "secondary_topic_limit_reached",
+          status_counts: { expected_topic_observed: 1 },
+          asset_results: [
+            {
+              asset_id: "EM-1",
+              system: "BMS",
+              expected_topic_root: "site/registered/EM-1",
+              expected_topics: ["site/registered/EM-1/pointset"],
+              observed_expected_topics: [
+                {
+                  topic: "site/registered/EM-1/pointset",
+                  message_count: 3,
+                  last_seen: "2026-07-09T09:04:00Z",
+                },
+              ],
+              observed_alternate_topics: [],
+              matched_message_count: 3,
+              topic_limit_reached: false,
+              status: "expected_topic_observed",
+            },
+          ],
+        },
+        validation_summary_v1: {
+          schema_version: "1.1",
+          asset_metrics: {
+            expected: 1,
+            observed: 1,
+            not_observed: 0,
+            with_issues: 0,
+            successfully_validated: 1,
+            unexpected: 2,
+            wrong_topic: 0,
+          },
+          payload_metrics: {
+            expected: 1,
+            received: 1,
+            not_received: 0,
+            with_issues: 0,
+            successfully_validated: 1,
+          },
+          fault_metrics: {
+            payload_formatting_issues: 0,
+            missing_points: 0,
+            point_naming_issues: 0,
+            additional_points: 0,
+            stale_or_cadence: 0,
+            other_issues: 0,
+          },
+          issue_metrics: { blocking: 0, warning: 0 },
+          system_metrics: [],
+          asset_results: [],
+          fault_rows: [],
+          unexpected_devices: ["site/noise/N-1", "site/noise/N-2"].map((topicRoot, index) => ({
+            id: `unexpected-${index}`,
+            topic_root: topicRoot,
+            topics: [`${topicRoot}/state`],
+            last_seen: "2026-07-09T09:04:00Z",
+          })),
+          unexpected_devices_measured: false,
+          unexpected_devices_measurement_scope: "site/#",
+        },
+      },
+    };
+    stubUdmiRunFetch({ run_id: "run-udmi-1", issues: [] }, undefined, overflowRun);
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    const summary = (await screen.findByRole("heading", { name: "Validation summary" })).closest(
+      ".udmi-summary",
+    ) as HTMLElement;
+    expect(
+      within(summary).getByText(
+        /at least 2 unexpected publishers were seen, and the true count may be higher/i,
+      ),
+    ).toBeInTheDocument();
+    expect(within(summary).queryByText(/the displayed 0/i)).not.toBeInTheDocument();
+
+    const discovery = screen
+      .getByRole("heading", { name: "Asset topic discovery" })
+      .closest(".udmi-asset-topic-discovery") as HTMLElement;
+    expect(within(discovery).getByText("secondary topic limit reached")).toBeInTheDocument();
+    expect(within(discovery).getByText(/recorded before that limit applies/i)).toBeInTheDocument();
+    expect(within(discovery).queryByText(/capture is incomplete/i)).not.toBeInTheDocument();
+  });
+
   it("keeps topic discovery opt-in and requires acknowledgement before widening to all topics", async () => {
     const postedRequest: { body: { parameters: Record<string, unknown> } | null } = { body: null };
     vi.stubGlobal(
@@ -6367,6 +6467,10 @@ describe("ModulePage UDMI workbench live results", () => {
       .getByText("Unexpected devices")
       .closest("div") as HTMLElement;
     expect(within(unexpectedMetric).getByText("1")).toBeInTheDocument();
+    // No measured flag on a legacy run: the listed device is a floor, not a total.
+    expect(
+      within(summary).getByText(/at least 1 unexpected publisher was seen/i),
+    ).toBeInTheDocument();
   });
 
   it("keeps non-expected payload evidence visible but excludes it from exact report scope", async () => {
@@ -6998,7 +7102,7 @@ describe("ModulePage UDMI workbench live results", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        /48-hour safety limit.*500 distinct\s*concrete topics.*Closing the app ends the run/i,
+        /48-hour safety limit.*one slot per expected\s*register topic\s*\(at least 500 distinct\s*concrete topics\).*Closing the app ends the run/i,
       ),
     ).toBeInTheDocument();
   });

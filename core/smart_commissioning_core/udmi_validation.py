@@ -140,6 +140,10 @@ MAX_RAW_EVIDENCE_BYTES = 10 * 1024 * 1024
 # small: a broad MQTT subscription may carry unrelated high-volume traffic.
 DEFAULT_ASSET_TOPIC_DISCOVERY_LIMIT = 20
 MAX_ASSET_TOPIC_DISCOVERY_LIMIT = 100
+# Wrong-topic payloads kept before the secondary lane's limit are still
+# validated, so they get the transport's expected-payload byte allowance, not
+# the 2 MiB diagnostic lane budget that hid them.
+DEFAULT_WRONG_TOPIC_RETAINED_BYTES = DEFAULT_PRIMARY_RETAINED_BYTES
 
 
 def validate_udmi_full_report(
@@ -2507,7 +2511,9 @@ def _capture_live_payloads_per_asset(
     progress_message_count = 0
     progress_state_lock = threading.Lock()
 
-    def matching_validation_entries(topic: str) -> frozenset[int]:
+    def matching_validation_entries(topic: str, *, store: bool = True) -> frozenset[int]:
+        # Pre-cap callers pass ``store=False``: they see every broker topic,
+        # and caching their misses would grow with traffic, not the register.
         cached = validation_entry_cache.get(topic)
         if cached is not None:
             return cached
@@ -2516,7 +2522,8 @@ def _capture_live_payloads_per_asset(
             if _topic_matches_filter(topic, topic_filter):
                 matching_entries.add(entry_index)
         result = frozenset(matching_entries)
-        validation_entry_cache[topic] = result
+        if store:
+            validation_entry_cache[topic] = result
         return result
 
     def topic_matches_validation_filter(topic: str) -> bool:
@@ -2541,15 +2548,68 @@ def _capture_live_payloads_per_asset(
             and _topic_matches_filter(message.topic, measurement_scope)
         )
 
-    diagnostic_callback_count = 0
+    observed_callback_count = 0
+    # Latest wrong-topic delivery per (asset, payload type), kept before the
+    # observational secondary budget can drop it: a registered asset on a wrong
+    # root shares that lane with every unregistered sibling. One slot per
+    # expected payload bounds the count by the register and a byte cap bounds
+    # the bodies; a refused slot keeps its prior evidence and is recorded as
+    # ``wrong_topic_byte_truncated``. The terminal result merges these;
+    # provisional snapshots still route retained deliveries only.
+    # ponytail: one topic per slot, and the byte truncation is telemetry only.
+    # Key by topic with a per-asset cap, or show the wrong-topic count as a
+    # lower bound, if either ever matters in the field.
+    pre_cap_wrong_topic_messages: dict[tuple[int, str], MqttMessage] = {}
+    pre_cap_wrong_topic_bytes = 0
+    pre_cap_wrong_topic_truncated = False
+
+    def retained_bytes(message: MqttMessage | None) -> int:
+        # Same accounting as the transport's retention lanes.
+        if message is None:
+            return 0
+        return len(message.topic.encode("utf-8")) + len(message.payload)
 
     def on_observed_message(message: MqttMessage) -> None:
-        """Index an exact registered asset ID without retaining its payload body."""
+        """Keep bounded pre-cap evidence: wrong-topic payloads and the topic ledger.
 
-        nonlocal diagnostic_callback_count
+        The ledger indexes an exact registered asset ID without retaining its
+        payload body.
+        """
+
+        nonlocal observed_callback_count, pre_cap_wrong_topic_bytes
+        nonlocal pre_cap_wrong_topic_truncated
+        observed_callback_count += 1
+        wrong_topic_entry = _registered_wrong_topic_entry_index(
+            message.topic,
+            expected_publisher_roots,
+            registered_asset_routes,
+            lambda topic: bool(matching_validation_entries(topic, store=False)),
+        )
+        # A candidate matches no validation filter, so under a confirmed ``#``
+        # trace only the bounded measurement scope makes it normal evidence
+        # (see ``matches_normal_capture_scope``).
+        if wrong_topic_entry is not None and (
+            diagnostic_scope != "#"
+            or bool(
+                measurement_scope
+                and _topic_matches_filter(message.topic, measurement_scope)
+            )
+        ):
+            slot = (wrong_topic_entry, str(_payload_key_for_topic(message.topic)))
+            current = pre_cap_wrong_topic_messages.get(slot)
+            if current is None or message.received_at >= current.received_at:
+                projected = (
+                    pre_cap_wrong_topic_bytes
+                    - retained_bytes(current)
+                    + retained_bytes(message)
+                )
+                if projected > DEFAULT_WRONG_TOPIC_RETAINED_BYTES:
+                    pre_cap_wrong_topic_truncated = True
+                else:
+                    pre_cap_wrong_topic_messages[slot] = message
+                    pre_cap_wrong_topic_bytes = projected
         if not diagnostic_enabled or diagnostic_scope is None:
             return
-        diagnostic_callback_count += 1
         entry_index = _registered_asset_entry_index_from_topic(
             message.topic,
             registered_asset_routes,
@@ -2559,7 +2619,9 @@ def _capture_live_payloads_per_asset(
         _record_asset_topic_discovery_message(
             diagnostic_states[entry_index],
             message,
-            is_expected_topic=(entry_index in matching_validation_entries(message.topic)),
+            is_expected_topic=(
+                entry_index in matching_validation_entries(message.topic, store=False)
+            ),
             topic_limit=diagnostic_topic_limit,
         )
 
@@ -2725,12 +2787,11 @@ def _capture_live_payloads_per_asset(
             ),
             "stop_when": stop_when,
             "on_message": on_message,
+            # Invoked before observational secondary-topic retention drops a
+            # new topic. It keeps only the bounded wrong-topic slots and, when
+            # enabled, the per-asset topic-metadata ledger.
+            "on_observed_message": on_observed_message,
         }
-        if diagnostic_enabled:
-            # This hook is invoked before observational secondary-topic retention
-            # drops a new topic. It retains only exact registered asset-ID topic
-            # metadata in its own small per-asset ledger.
-            capture_options["on_observed_message"] = on_observed_message
         if validation_topics:
             # Reserve the configured cap for the concrete expected payload
             # filters. Register wildcards and other observation-only traffic
@@ -2790,8 +2851,10 @@ def _capture_live_payloads_per_asset(
     # Fakes and third-party transport adapters predating ``on_observed_message``
     # may return evidence without invoking the hook. Preserve deterministic
     # diagnostic results for those adapters without double-counting the real
-    # transport, which always invokes it before returning.
-    if diagnostic_enabled and diagnostic_callback_count == 0:
+    # transport, which always invokes it before returning. Only the real hook
+    # saw deliveries the secondary budget dropped.
+    observed_pre_cap = observed_callback_count > 0
+    if diagnostic_enabled and not observed_pre_cap:
         for message in messages:
             on_observed_message(message)
 
@@ -2802,6 +2865,20 @@ def _capture_live_payloads_per_asset(
     normal_messages = [
         message for message in messages if matches_normal_capture_scope(message)
     ]
+    # A pre-cap wrong-topic slot supersedes a retained copy of its topic and
+    # restores one the secondary budget dropped.
+    pre_cap_wrong_topics = {
+        message.topic: message for message in pre_cap_wrong_topic_messages.values()
+    }
+    retained_topics = {message.topic for message in normal_messages}
+    normal_messages = [
+        pre_cap_wrong_topics.get(message.topic, message) for message in normal_messages
+    ] + [
+        message
+        for topic, message in pre_cap_wrong_topics.items()
+        if topic not in retained_topics
+    ]
+    transport_telemetry["wrong_topic_byte_truncated"] = pre_cap_wrong_topic_truncated
 
     capture_observed_at = datetime.now(UTC).isoformat()
 
@@ -2868,7 +2945,13 @@ def _capture_live_payloads_per_asset(
         and transport_window_completed
         and not transport_telemetry.get("primary_cap_reached", False)
         and not transport_telemetry.get("primary_byte_cap_reached", False)
-        and not transport_telemetry.get("secondary_truncated", False)
+        # The hook fed the ledger before the secondary budget dropped anything,
+        # so that lane's truncation leaves it whole; ``capture_status`` below
+        # still names the truncation. Replayed retained evidence cannot.
+        and (
+            observed_pre_cap
+            or not transport_telemetry.get("secondary_truncated", False)
+        )
     )
     diagnostic_capture_status = (
         capture_error_status
@@ -3349,10 +3432,11 @@ def _registered_wrong_topic_entry_index(
     MQTT segments and register IDs are compared exactly and case-sensitively.
     A topic naming no registered ID, more than one registered ID, or a duplicate
     register ID is left as observational traffic rather than guessed.
+
+    The validation matcher runs last because it is the costliest check, and
+    the pre-cap capture hook calls this for every broker delivery.
     """
     if _payload_key_for_topic(topic) is None:
-        return None
-    if validation_topic_matcher(topic):
         return None
     entry_index = _registered_asset_entry_index_from_topic(topic, registered_asset_routes)
     if entry_index is None:
@@ -3362,6 +3446,8 @@ def _registered_wrong_topic_entry_index(
         return None
     actual_root = _publisher_root_from_message_topic(topic)
     if actual_root == expected_root:
+        return None
+    if validation_topic_matcher(topic):
         return None
     return entry_index
 
