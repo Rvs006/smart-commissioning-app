@@ -7,6 +7,15 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.60] - 2026-10-01
+
+A field-fix release. Plain reads stop failing with `database is locked` while a
+scan or report is writing, BACnet discovery lists the objects of a device that
+cannot segment its object-list reply, UDMI validation measures the
+unexpected-device count on large sites, and Configuration shows when the Source
+Interface on screen is not the saved one. There is no database migration in
+this release.
+
 ### Added
 
 - UDMI validation warns before a run when the run time is shorter than the
