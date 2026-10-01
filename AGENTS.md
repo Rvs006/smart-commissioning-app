@@ -70,15 +70,17 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-09-16. The latest public release is
-  v0.1.58, published 2026-09-14 and still the current one, a small capacity
-  release: the built-in MQTT discovery engine retains up to 30,000 distinct
-  topics per capture instead of 10,000 (#216), so
-  a registerless sweep of a 5,000-asset site publishing three UDMI topics per
-  asset is captured whole, and the release secret scan fails closed on a missing
-  or empty bundle path (#212, backported to the older wrappers in #213); field
-  acceptance for it stays open until recorded privately. In flight on
-  `feat/native-scanners-v2-cleanup`, unreleased and unmerged: the three scanner
+- **Current handoff**: status as of 2026-09-29. The latest public release is
+  v0.1.59, and field acceptance for it stays open until recorded privately.
+  v0.1.59 ships #219 (register RAG rows, Missing rows, six
+  counters), #218 (register CSV download, MQTT live save-as-register, confirm
+  before a direct config send), #220/#221/#222 (the scanner page rebuild below),
+  #224 (Reports tab reads without the SQLite write lock; bulk delete fixed), #226
+  (Reports tab pages older reports by offset, past the newest 100), #223
+  (UDMI secondary-lane reporting after an overflow) and #225 (dev-only StrictMode
+  session-client abort). v0.1.58 raised the built-in MQTT discovery cap to
+  30,000 distinct topics (#216) and made the release secret scan fail closed
+  (#212, #213). In v0.1.59 the three scanner
   screens are rebuilt as dedicated pages under `frontend/src/features/scanners/`
   (`ScannerScreen` shell plus `IpScannerPage` / `BacnetScannerPage` /
   `MqttScannerPage`), which `routes.tsx` serves for `ip-scanner`,
@@ -105,7 +107,7 @@ collection order is alphabetical - keep it so.
   `ip_scanner` / `bacnet_scanner` / `mqtt_scanner` run, so the Results tab, run
   history and reports fill in; no engine, backend route, API call, run parameter
   or discovery logic moved, and there is no database migration; the Alembic head
-  is unchanged from v0.1.57 (a6b7c8d9e0f1). Earlier context still holds: the
+  is unchanged from v0.1.58 (a6b7c8d9e0f1). Earlier context still holds: the
   native-scanner engines and their SCT wiring landed in v0.1.56 (PRs #201, #203,
   #204), v0.1.57 put those screens on one configure-and-scan page (#210), and
   PR #205 deleted the old embed stack (the Advanced-panel reverse proxy, the
