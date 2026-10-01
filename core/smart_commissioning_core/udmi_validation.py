@@ -148,9 +148,11 @@ DEFAULT_WRONG_TOPIC_RETAINED_BYTES = DEFAULT_PRIMARY_RETAINED_BYTES
 # secondary lane's payload cap, so a large site's unexpected-device count is
 # measured even when payload retention overflows. One root string plus its
 # latest topic name per entry; no payload bodies.
-# ponytail: fixed ceiling (~25 MB worst case). Past it the count is reported as
-# a lower bound; switch to a HyperLogLog estimate if a site ever exceeds it.
+# Both a root count and a byte budget bound it: MQTT topics may be ~64 KiB.
+# ponytail: fixed ceilings. Past either the count is reported as a lower
+# bound; switch to a HyperLogLog estimate if a site ever exceeds them.
 MAX_UNEXPECTED_ROOT_INVENTORY = 100_000
+MAX_UNEXPECTED_ROOT_INVENTORY_BYTES = 32 * 1024 * 1024
 
 
 def validate_udmi_full_report(
@@ -2572,6 +2574,7 @@ def _capture_live_payloads_per_asset(
     # Topic-name-only inventory of unexpected publisher roots: root -> (latest
     # topic, received_at). See ``MAX_UNEXPECTED_ROOT_INVENTORY``.
     pre_cap_unexpected_roots: dict[str, tuple[str, datetime]] = {}
+    pre_cap_unexpected_roots_bytes = 0
     pre_cap_unexpected_roots_truncated = False
     expected_root_set = {root for root in expected_publisher_roots if root}
 
@@ -2590,6 +2593,7 @@ def _capture_live_payloads_per_asset(
 
         nonlocal observed_callback_count, pre_cap_wrong_topic_bytes
         nonlocal pre_cap_wrong_topic_truncated, pre_cap_unexpected_roots_truncated
+        nonlocal pre_cap_unexpected_roots_bytes
         observed_callback_count += 1
         wrong_topic_entry = _registered_wrong_topic_entry_index(
             message.topic,
@@ -2605,12 +2609,22 @@ def _capture_live_payloads_per_asset(
             and not _topic_under_any_root(message.topic, expected_root_set)
         ):
             root = _publisher_root_from_message_topic(message.topic)
-            if (
-                root in pre_cap_unexpected_roots
+            current = pre_cap_unexpected_roots.get(root)
+            topic_bytes = len(message.topic.encode("utf-8"))
+            projected = pre_cap_unexpected_roots_bytes + (
+                topic_bytes - len(current[0].encode("utf-8"))
+                if current is not None
+                else topic_bytes + len(root.encode("utf-8"))
+            )
+            if projected <= MAX_UNEXPECTED_ROOT_INVENTORY_BYTES and (
+                current is not None
                 or len(pre_cap_unexpected_roots) < MAX_UNEXPECTED_ROOT_INVENTORY
             ):
                 pre_cap_unexpected_roots[root] = (message.topic, message.received_at)
-            else:
+                pre_cap_unexpected_roots_bytes = projected
+            elif current is None:
+                # A known root that cannot afford a longer topic keeps its
+                # older one; only an uncounted root makes the count a bound.
                 pre_cap_unexpected_roots_truncated = True
         # A candidate matches no validation filter, so under a confirmed ``#``
         # trace only the bounded measurement scope makes it normal evidence

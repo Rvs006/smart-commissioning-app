@@ -3759,6 +3759,21 @@ class SecondaryLaneOverflowTests(unittest.TestCase):
         self.assertFalse(summary["unexpected_devices_measured"])
         self.assertEqual(summary["unexpected_device_count"], 3)
 
+    def test_root_inventory_byte_budget_keeps_the_count_a_lower_bound(self) -> None:
+        # Room for exactly one root plus its topic name.
+        budget = len("site/noise/N-0") + len("site/noise/N-0/state")
+        with patch.object(udmi_validation, "MAX_UNEXPECTED_ROOT_INVENTORY_BYTES", budget):
+            summary = self._capture(
+                [
+                    MqttMessage(f"site/noise/N-{index}/state", self._STATE)
+                    for index in range(5)
+                ]
+                + [MqttMessage("site/hvac/AHU-1/state", self._STATE)]
+            )
+
+        self.assertTrue(summary["capture_retention"]["unexpected_root_inventory_truncated"])
+        self.assertFalse(summary["unexpected_devices_measured"])
+
 
 class PointsetTimestampDiagnosisTests(unittest.TestCase):
     """Freshness issues carry the pointset_timestamp category (UDMI-TS) so they
