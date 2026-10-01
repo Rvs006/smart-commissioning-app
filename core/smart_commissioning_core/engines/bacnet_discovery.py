@@ -2582,6 +2582,11 @@ async def _run_bacnet_discovery(
                     ):
                         result["object_list_error"] = True
                         return result
+                    if ctx.is_cancelled():
+                        # Stop arrived during the aborted read: send nothing more
+                        # (a silent device would hold Stop for another timeout).
+                        result["heard_only"] = True
+                        return result
                     try:
                         objects, indexed = await _read_object_list_by_index(ctx, source, device)
                     except _OBJECT_LIST_PROPAGATE:

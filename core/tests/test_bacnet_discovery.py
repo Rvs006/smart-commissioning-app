@@ -767,6 +767,25 @@ class BacnetDiscoveryEngineTests(unittest.TestCase):
             {"entries_total": 51, "entries_read": 3, "stopped": "cancelled"},
         )
 
+    def test_stop_during_the_aborted_whole_read_sends_no_index_request(self) -> None:
+        store = FakeRunStore()
+        cancel_state = {"cancel": False}
+        backend = self._segmenting_backend(5)
+        whole_read = type(backend).read_object_list
+
+        async def stop_then_abort(self: Any, device: Any) -> list[dict[str, Any]]:
+            cancel_state["cancel"] = True
+            return await whole_read(self, device)
+
+        type(backend).read_object_list = stop_then_abort  # type: ignore[method-assign]
+        ctx = _ctx(store, parameters=self._one_device_params(), is_cancelled=lambda: cancel_state["cancel"])
+        result, _ = self._run(store, ctx, backend)
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(backend.index_reads, [])
+        asset = store.summary_calls[-1]["discovered_assets"][0]
+        self.assertTrue(asset["heard_not_enriched"])
+
     def test_indexed_fallback_only_for_too_big_aborts_and_timeouts(self) -> None:
         from smart_commissioning_core.engines.bacnet_discovery import _needs_indexed_object_list
 
