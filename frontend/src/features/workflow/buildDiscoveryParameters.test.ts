@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ModuleRunAction } from "./moduleData";
-import { buildDiscoveryParameters } from "./ModulePage";
+import { buildDiscoveryParameters } from "./buildDiscoveryParameters";
 
 // GAP-B1 / F1: the BACnet device-instance range is pair-or-neither. The sidecar
 // sends a bounded Who-Is only when BOTH low and high arrive; a lone bound falls

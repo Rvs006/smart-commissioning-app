@@ -81,10 +81,13 @@ export function MqttFocusedDetail({
   focused,
   canEngineer,
   onWriteConfig,
+  /** The side panel already titles itself with the asset; don't say it twice. */
+  titled = true,
 }: {
   focused: MqttLiveFocused;
   canEngineer: boolean;
   onWriteConfig: (topic: string, payload: string) => void;
+  titled?: boolean;
 }) {
   const [tab, setTab] = useState<Tab>("overview");
   const [paused, setPaused] = useState(false);
@@ -197,7 +200,7 @@ export function MqttFocusedDetail({
     <div className="property-expansion-panel" aria-live="polite">
       <div className="surface-heading">
         <div>
-          <strong>Focused: {focused.asset}</strong>
+          {titled && <strong>Focused: {focused.asset}</strong>}
           <p className="section-copy">Live detail for this asset. Read-only unless you write a config.</p>
         </div>
         {focused.configTopic ? (
