@@ -91,17 +91,6 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             "BACnet Network Number": "2001",
             "UDP Port": "47808",
             "Device Instance Range": "1 - 4194303",
-            # INFORMATIONAL ONLY — discovery never reads this toggle. It seeds
-            # Disabled because Enabled used to LOCK the "Foreign Device" control
-            # (UI) and be rejected alongside it (validation), so a default install
-            # could not enable the one setting that makes cross-subnet discovery
-            # work. Discovery gates STRICTLY on "Foreign Device" (see
-            # bacnet_transport_defaults).
-            # NOTE: changing this default does NOT touch an already-persisted
-            # snapshot — _merge_with_defaults only fills MISSING keys, so an
-            # existing install keeps whatever it saved until an operator edits
-            # and saves the Configuration page.
-            "BBMD": "Disabled",
             # Demo seed, NOT a real BBMD. Nothing may register against it: only
             # "Foreign Device" == Enabled triggers registration, and an operator
             # who enables it must type their real BBMD's address here.
@@ -414,8 +403,8 @@ class ConfigurationService:
         port or BBMD fields and the scan ignored them".
 
         THE TRIGGER IS "Foreign Device" == Enabled (casefolded) AND NOTHING ELSE.
-        Not the confusingly-named "BBMD" toggle, not a non-empty "BBMD Address":
-        both are seeded on a default install (with the FICTIONAL demo address
+        Not the removed legacy "BBMD" toggle, not a non-empty "BBMD Address":
+        the address is seeded on a default install (with the FICTIONAL demo address
         192.0.2.20), so keying on either would make every default install
         register against a host that does not exist. Anything but Enabled returns
         ``{}`` and the run stays local-broadcast — byte-identical to today's
@@ -703,15 +692,9 @@ class ConfigurationService:
         if bbmd_udp_port:
             self._validate_port(errors, "BBMD UDP Port", bbmd_udp_port)
         self._validate_enabled_disabled(errors, "BACnet Foreign Device", configuration.bacnet.values.get("Foreign Device", ""))
-        self._validate_enabled_disabled(errors, "BACnet BBMD", configuration.bacnet.values.get("BBMD", ""))
-        # The FD/BBMD mutual-exclusion rule is GONE (was: "Foreign Device must be
-        # Disabled when BBMD is Enabled."). It encoded a real BACnet constraint —
-        # a node that IS a BBMD cannot also be a foreign device — but this app is
-        # never a BBMD. Combined with the seeded BBMD=Enabled it made Foreign
-        # Device unsettable on a default install, which is why the transport
-        # config never reached a scan. "BBMD" is informational now.
-        #
-        # In its place: BBMD Address is only load-bearing when Foreign Device is
+        # The informational "BBMD" toggle is gone (see _migrate_bacnet_fields);
+        # this app is never a BBMD, so Foreign Device is the only BBMD switch.
+        # BBMD Address is only load-bearing when Foreign Device is
         # Enabled, so validate it as an IP exactly then. Validating it always
         # would fail every default install that never intends to use FD; not
         # validating it at all (the old behaviour) let garbage through to a
@@ -824,6 +807,7 @@ class ConfigurationService:
     def _merge_with_defaults(self, configuration: ConfigurationSnapshot) -> ConfigurationSnapshot:
         self._migrate_mqtt_fields(configuration)
         self._migrate_logging_fields(configuration)
+        self._migrate_bacnet_fields(configuration)
         self._migrate_seeded_placeholders(configuration)
         for section_name in ConfigurationSnapshot.model_fields:
             loaded_section = getattr(configuration, section_name)
@@ -872,6 +856,15 @@ class ConfigurationService:
         logging_values = configuration.logging.values
         for field in self._REMOVED_LOGGING_FIELDS:
             logging_values.pop(field, None)
+
+    # The "BBMD" Enabled/Disabled toggle was informational only: discovery never
+    # read it (bacnet_transport_defaults gates strictly on "Foreign Device"), yet
+    # field engineers kept setting it expecting cross-subnet discovery. Dropping
+    # the key here is LOAD-BEARING for the same reason as Root Topic: the
+    # {**default, **loaded} union would otherwise keep a stored or imported key
+    # alive. "BBMD Address" / "BBMD UDP Port" are unrelated and untouched.
+    def _migrate_bacnet_fields(self, configuration: ConfigurationSnapshot) -> None:
+        configuration.bacnet.values.pop("BBMD", None)
 
     # Honesty rule: earlier releases SEEDED fabricated observation verdicts
     # ("Last Backup Status": "Success", section pills "Healthy"/"Listening"/

@@ -50,7 +50,6 @@ function configurationPayload() {
         "Internetwork ID": "primary",
         "BACnet Network Number": "2001",
         "UDP Port": "47808",
-        BBMD: "Enabled",
         "Foreign Device": "Disabled",
       },
       status: "Listening",
@@ -457,8 +456,9 @@ describe("ConfigurationPage", () => {
   // scan. The two controls are independent — this app is never itself a BBMD —
   // so all four blockers are gone and these tests hold them gone.
   //
-  // The fixture is field engineer's shape: BBMD "Enabled", Foreign Device "Disabled".
-  it("lets Foreign Device be enabled while BBMD is Enabled (v0.1.12 unlock)", async () => {
+  // The fixture is field engineer's shape: Foreign Device "Disabled". (The BBMD
+  // toggle itself is removed; the backend drops the legacy key on load.)
+  it("lets Foreign Device be enabled (v0.1.12 unlock)", async () => {
     stubFetch((url) => {
       if (url.endsWith("/api/v1/configuration")) {
         return jsonResponse(configurationPayload());
@@ -479,40 +479,11 @@ describe("ConfigurationPage", () => {
     expect(select.value).toBe("Enabled");
   });
 
-  it("does not reset Foreign Device when BBMD is switched back to Enabled", async () => {
-    stubFetch((url) => {
-      if (url.endsWith("/api/v1/configuration")) {
-        return jsonResponse(configurationPayload());
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    renderPage();
-
-    const fdSelect = within((await screen.findByText("Foreign Device")).closest("label") as HTMLElement).getByRole(
-      "combobox",
-    ) as HTMLSelectElement;
-    const bbmdSelect = within(screen.getByText("BBMD").closest("label") as HTMLElement).getByRole(
-      "combobox",
-    ) as HTMLSelectElement;
-
-    fireEvent.change(fdSelect, { target: { value: "Enabled" } });
-    fireEvent.change(bbmdSelect, { target: { value: "Disabled" } });
-    fireEvent.change(bbmdSelect, { target: { value: "Enabled" } });
-
-    // The old auto-reset made this "Disabled" — silently discarding the
-    // operator's choice as a side effect of touching an unrelated toggle.
-    expect(fdSelect.value).toBe("Enabled");
-    expect(bbmdSelect.value).toBe("Enabled");
-  });
-
   it("loads a saved Foreign Device = Enabled snapshot without resetting it", async () => {
     // The load-time normalizer was the deepest of the four blockers: even with
     // the select enabled, a stored FD=Enabled alongside BBMD=Enabled was reset
     // to Disabled on every load, so the value could never survive a refresh.
     const payload = configurationPayload();
-    // BBMD stays Enabled (fixture default) — the combination the normalizer used
-    // to treat as impossible.
     payload.bacnet.values["Foreign Device"] = "Enabled";
     stubFetch((url) => {
       if (url.endsWith("/api/v1/configuration")) {
@@ -529,7 +500,7 @@ describe("ConfigurationPage", () => {
     expect(fdSelect.value).toBe("Enabled");
   });
 
-  it("tells the operator Foreign Device is the setting discovery uses, and BBMD is not", async () => {
+  it("tells the operator Foreign Device is the setting discovery uses, with no BBMD toggle", async () => {
     stubFetch((url) => {
       if (url.endsWith("/api/v1/configuration")) {
         return jsonResponse(configurationPayload());
@@ -545,8 +516,10 @@ describe("ConfigurationPage", () => {
     // The stale "(locked when BBMD is enabled)" claim is gone.
     expect(fdLabel).not.toHaveAttribute("title", expect.stringMatching(/locked/i));
 
-    const bbmdLabel = screen.getByText("BBMD").closest("label");
-    expect(bbmdLabel).toHaveAttribute("title", expect.stringMatching(/Discovery does not read this toggle/i));
+    // The informational BBMD Enabled/Disabled toggle (never read by discovery)
+    // is gone; only the Foreign Device / BBMD address fields remain.
+    expect(screen.queryByText("BBMD")).not.toBeInTheDocument();
+    expect(screen.getByText(/foreign device registration with a BBMD/i)).toBeInTheDocument();
   });
 
   it("warns that a TLS connection to an IP literal needs the certificate SAN", async () => {
@@ -981,6 +954,67 @@ describe("ConfigurationPage", () => {
     const sourceLabel = (await screen.findByText("Source Interface")).closest("label");
     const select = within(sourceLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
     await waitFor(() => expect(select.value).toBe("10.20.30.7/24"));
+  });
+
+  it("flags a wired-default Source Interface as not saved until Save Configuration", async () => {
+    // Field trap: the wired default is draft-only, but scans read the SAVED
+    // snapshot, so the dropdown looked set while scans failed with "No Source
+    // Interface selected". The note stays until the pick is actually saved.
+    interfacesPayload = [interfaceFixture()];
+    let saved: unknown = payloadWithSourceInterface("");
+    stubFetch((url, init) => {
+      if (url.endsWith("/api/v1/configuration") && init?.method === "PUT") {
+        saved = JSON.parse(String(init.body));
+        return jsonResponse(saved);
+      }
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(saved);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const sourceLabel = (await screen.findByText("Source Interface")).closest("label") as HTMLElement;
+    const select = within(sourceLabel).getByRole("combobox") as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("192.168.1.10/24"));
+    const note = within(sourceLabel).getByRole("status");
+    expect(note).toHaveTextContent(
+      "Not saved yet. Press Save Configuration to use this interface for scans.",
+    );
+    expect(select.getAttribute("aria-describedby")).toContain(note.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Configuration" }));
+
+    await screen.findByText("Configuration saved");
+    expect(within(sourceLabel).queryByRole("status")).not.toBeInTheDocument();
+    expect(select.value).toBe("192.168.1.10/24");
+  });
+
+  it("shows the unsaved Source Interface note only while the draft differs from the saved value", async () => {
+    interfacesPayload = [
+      interfaceFixture(),
+      interfaceFixture({ cidr: "10.20.30.7/24", ipv4: "10.20.30.7", name: "Ethernet 4" }),
+    ];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("192.168.1.10/24"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    await screen.findByRole("option", { name: /10\.20\.30\.7\/24 — Ethernet 4/ });
+    const sourceLabel = (await screen.findByText("Source Interface")).closest("label") as HTMLElement;
+    const select = within(sourceLabel).getByRole("combobox") as HTMLSelectElement;
+    expect(within(sourceLabel).queryByRole("status")).not.toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: "10.20.30.7/24" } });
+    expect(within(sourceLabel).getByRole("status")).toHaveTextContent(/Not saved yet/);
+
+    fireEvent.change(select, { target: { value: "192.168.1.10/24" } });
+    expect(within(sourceLabel).queryByRole("status")).not.toBeInTheDocument();
   });
 
   it("keeps Auto when no wired adapter is up for an unset Source Interface", async () => {

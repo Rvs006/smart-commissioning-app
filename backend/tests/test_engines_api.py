@@ -1169,9 +1169,9 @@ class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
         self.assertNotIn("192.0.2.20", str(parameters))
 
     def test_bbmd_enabled_alone_never_triggers_foreign_device_registration(self) -> None:
-        # THE trigger-discipline guard. "BBMD" is a different, informational
-        # setting that happened to be seeded Enabled alongside a fictional
-        # address; gating on it (or on "a BBMD Address is present") would make
+        # THE trigger-discipline guard. "BBMD" is the removed informational
+        # toggle (a legacy snapshot may still carry it, seeded Enabled alongside
+        # a fictional address); gating on it (or on "a BBMD Address is present") would make
         # every default install register against a host that does not exist.
         # Only "Foreign Device" == Enabled counts.
         self._save_bacnet_config(

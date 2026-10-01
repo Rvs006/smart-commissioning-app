@@ -530,6 +530,37 @@ class RootTopicRemovalTests(SecretStorageTestCase):
         self.assertTrue(self.service.validate(snapshot).valid)
 
 
+class LegacyBbmdToggleRemovalTests(SecretStorageTestCase):
+    """The informational "BBMD" Enabled/Disabled toggle is gone: discovery never
+    read it. A stored or imported snapshot that still carries it must load,
+    validate and import without error, and the key must not come back."""
+
+    def test_default_snapshot_has_no_bbmd_toggle(self) -> None:
+        snapshot = self.service.load(mask_secrets=False)
+        self.assertNotIn("BBMD", snapshot.bacnet.values)
+        # The real Foreign Device / BBMD address fields stay.
+        for field in ("BBMD Address", "BBMD UDP Port", "Foreign Device", "TTL"):
+            self.assertIn(field, snapshot.bacnet.values)
+
+    def test_stored_bbmd_toggle_is_dropped_on_load_and_next_save(self) -> None:
+        payload = DEFAULT_CONFIGURATION.model_copy(deep=True).model_dump(mode="json")
+        payload["bacnet"]["values"]["BBMD"] = "Enabled"
+        ConfigurationRepository(self.engine).save(DEFAULT_PROJECT_ID, DEFAULT_SITE_ID, payload)
+        loaded = self.service.load(mask_secrets=False)
+        self.assertNotIn("BBMD", loaded.bacnet.values)
+        self.service.save(loaded)
+        self.assertNotIn("BBMD", self.stored_payload()["bacnet"]["values"])
+
+    def test_imported_config_with_bbmd_toggle_validates_and_imports(self) -> None:
+        configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
+        # Even a value the old validator rejected must not block an import now.
+        configuration.bacnet.values["BBMD"] = "Maybe"
+        self.assertTrue(self.service.validate(configuration.model_copy(deep=True)).valid)
+        self.service.import_with_secrets(ConfigurationImportRequest(configuration=configuration))
+        self.assertNotIn("BBMD", self.stored_payload()["bacnet"]["values"])
+        self.assertNotIn("BBMD", self.service.load().bacnet.values)
+
+
 def _dt(year: int, month: int, day: int):
     from datetime import UTC, datetime
 
