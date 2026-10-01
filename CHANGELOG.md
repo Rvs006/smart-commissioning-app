@@ -9,6 +9,16 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Fixed
 
+- UDMI validation now measures the unexpected-device count on large sites
+  instead of reporting "at least N". The secondary lane's distinct-topic cap
+  is register-sized, so a site with more unregistered publishers than that cap
+  overflowed it and the count became a lower bound. The pre-cap capture hook now
+  keeps a topic-name-only inventory of distinct unexpected publisher roots (no
+  payload bodies, up to 100,000 roots or 32 MiB of names), and the run is marked measured when that
+  inventory did not overflow, even if payload retention did. Roots seen only by
+  name carry their latest topic in the device row. Past either ceiling the count
+  stays an honest lower bound, flagged as
+  `capture_retention.unexpected_root_inventory_truncated`.
 - BACnet discovery no longer returns zero objects for a device that cannot
   segment its object-list reply. When the whole-array `object-list` read Aborts
   (segmentation-not-supported, buffer-overflow, apdu-too-long) or times out, the
