@@ -7,6 +7,7 @@ behind any running writer and, after the 5 s busy timeout, fails with
 query-only session instead (deferred ``BEGIN``), which WAL never blocks.
 """
 
+import threading
 import unittest
 import uuid
 from unittest import mock
@@ -40,6 +41,11 @@ class ReadOnlyGetRouteTests(ApiTestCase):
         statements: list[str] = []
 
         def record(_conn, _cursor, statement, _parameters, _context, _many) -> None:
+            # The listener is engine-wide. The lifespan's lease-recovery thread
+            # legitimately writes when earlier suites left expired leases in the
+            # shared test DB; that is not the request under test.
+            if threading.current_thread().name == "run-lifecycle-maintenance":
+                return
             statements.append(" ".join(statement.split()).upper())
 
         engine = get_engine()
@@ -85,6 +91,15 @@ class ReadOnlyGetRouteTests(ApiTestCase):
         with mock.patch.object(UserRepository, "touch_last_used") as touch:
             self.client.post("/api/v1/runs/run_missing/cancel", headers=headers)
         touch.assert_called_once()
+
+
+class QuerySessionFactoryTests(unittest.TestCase):
+    def test_building_a_repository_without_an_engine_does_not_touch_it(self) -> None:
+        # Mirrors session_factory: DB-less paths (run context build) construct
+        # repositories with engine=None and must not fail until they query.
+        from smart_commissioning_core.db.repositories import ImportRepository
+
+        ImportRepository(None)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":
