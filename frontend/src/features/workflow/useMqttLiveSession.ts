@@ -38,6 +38,12 @@ export type MqttLiveSessionState = {
   snapshot: MqttLiveSnapshot | null;
   lastActivity: { paths: string[]; at: number } | null;
   error: string | null;
+  /**
+   * Consecutive stream reopens since the last frame arrived. 0 while the stream
+   * is delivering. The page reports it so "reconnecting" is a count the operator
+   * can watch rather than a spinner that never resolves.
+   */
+  reconnectAttempts: number;
   start: (opts?: { takeOver?: boolean }) => Promise<void>;
   stop: () => Promise<void>;
   focus: (asset: string) => Promise<void>;
@@ -47,6 +53,12 @@ export type MqttLiveSessionState = {
 };
 
 const RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 15_000] as const;
+
+// A sidecar that accepts the session but never delivers a frame used to be
+// retried forever, leaving the page saying "reconnecting" with nothing to show
+// and no way out. After this many consecutive reopens with no frame, stop and
+// report the session as unavailable so the operator gets Stop / Start back.
+const RECONNECT_ATTEMPT_CAP = 5;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The live session request failed.";
@@ -59,10 +71,13 @@ function statusCode(error: unknown): number | null {
 
 /**
  * Drives the single MQTT live broker session: checks occupancy on enable, opens
- * a session (start), streams the topic tree, and stops it (stop). The stream is
- * generation-guarded so a stale reconnect cannot write into a newer session, and
- * unmount aborts the stream WITHOUT disconnecting (a route change or StrictMode
- * remount must not flap the broker; the backend idle reaper reclaims the lease).
+ * a session (start), streams the topic tree, and stops it (stop). Stream
+ * callbacks are guarded by the session generation, so a stale reconnect cannot
+ * write into a newer session, and by a per-open stream token, so a replaced or
+ * disposed stream (the client still fires onClose after abort) cannot schedule a
+ * reconnect or overwrite the snapshot. Unmount aborts the stream WITHOUT
+ * disconnecting (a route change or StrictMode remount must not flap the broker;
+ * the backend idle reaper reclaims the lease).
  */
 export function useMqttLiveSession(
   enabled: boolean,
@@ -76,7 +91,16 @@ export function useMqttLiveSession(
     snapshot: MqttLiveSnapshot | null;
     lastActivity: { paths: string[]; at: number } | null;
     error: string | null;
-  }>({ phase: "idle", session: null, status: null, snapshot: null, lastActivity: null, error: null });
+    reconnectAttempts: number;
+  }>({
+    phase: "idle",
+    session: null,
+    status: null,
+    snapshot: null,
+    lastActivity: null,
+    error: null,
+    reconnectAttempts: 0,
+  });
 
   // Latest inputs, so start/stop/refresh stay stable callbacks.
   const inputRef = useRef(input);
@@ -85,6 +109,7 @@ export function useMqttLiveSession(
   apiClientRef.current = apiClient;
 
   const generationRef = useRef(0);
+  const streamIdRef = useRef(0);
   const streamDisposeRef = useRef<(() => void) | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryIndexRef = useRef(0);
@@ -109,6 +134,7 @@ export function useMqttLiveSession(
   }, []);
 
   const disposeStream = useCallback(() => {
+    streamIdRef.current += 1;
     streamDisposeRef.current?.();
     streamDisposeRef.current = null;
   }, []);
@@ -136,22 +162,35 @@ export function useMqttLiveSession(
   const openStream = useCallback(
     (sessionId: string, generation: number) => {
       disposeStream();
+      const streamId = ++streamIdRef.current;
+      const stale = () =>
+        generationRef.current !== generation || streamIdRef.current !== streamId || !mountedRef.current;
       streamDisposeRef.current = streamMqttLiveEvents(
         sessionId,
         {
           onFrame: (frame: MqttLiveFrame) => {
-            if (generationRef.current !== generation || !mountedRef.current) {
+            if (stale()) {
               return;
             }
             retryIndexRef.current = 0;
             if (frame.type === "snapshot") {
-              setState((current) => ({ ...current, phase: "live", snapshot: frame, error: null }));
+              setState((current) => ({
+                ...current,
+                phase: "live",
+                snapshot: frame,
+                error: null,
+                reconnectAttempts: 0,
+              }));
             } else {
-              setState((current) => ({ ...current, lastActivity: { paths: frame.paths, at: Date.now() } }));
+              setState((current) => ({
+                ...current,
+                lastActivity: { paths: frame.paths, at: Date.now() },
+                reconnectAttempts: 0,
+              }));
             }
           },
           onControl: (name: MqttLiveControlName) => {
-            if (generationRef.current !== generation || !mountedRef.current) {
+            if (stale()) {
               return;
             }
             if (name === "closed") {
@@ -165,7 +204,7 @@ export function useMqttLiveSession(
             // "timeout" (wall-clock cap): the onClose below reconnects silently.
           },
           onClose: () => {
-            if (generationRef.current !== generation || !mountedRef.current) {
+            if (stale()) {
               return;
             }
             // The stream ended (cap or upstream close) but the lease may still be
@@ -174,7 +213,7 @@ export function useMqttLiveSession(
             scheduleReconnectRef.current(sessionId, generation, "reconnecting");
           },
           onError: (error: unknown) => {
-            if (generationRef.current !== generation || !mountedRef.current) {
+            if (stale()) {
               return;
             }
             if (statusCode(error) === 409) {
@@ -197,9 +236,26 @@ export function useMqttLiveSession(
       if (generationRef.current !== generation || !mountedRef.current || retryTimerRef.current !== null) {
         return;
       }
-      setState((current) => ({ ...current, phase }));
+      const attempt = retryIndexRef.current + 1;
+      // Give up rather than retry a stream that has never delivered a frame.
+      // The lease is still held, so the operator needs Stop / Start, not a
+      // "reconnecting" label that never changes.
+      if (attempt > RECONNECT_ATTEMPT_CAP) {
+        disposeStream();
+        setState((current) => ({
+          ...current,
+          phase: "unavailable",
+          reconnectAttempts: retryIndexRef.current,
+          error:
+            `The sidecar reports session ${sessionId} as connected, but its event stream closed ` +
+            `${retryIndexRef.current} times without sending a topic snapshot. Nothing is being ` +
+            "received. Stop the live view and start it again, or check the sidecar.",
+        }));
+        return;
+      }
+      setState((current) => ({ ...current, phase, reconnectAttempts: attempt }));
       const delay = RETRY_DELAYS_MS[Math.min(retryIndexRef.current, RETRY_DELAYS_MS.length - 1)] ?? 15_000;
-      retryIndexRef.current += 1;
+      retryIndexRef.current = attempt;
       retryTimerRef.current = setTimeout(() => {
         retryTimerRef.current = null;
         if (generationRef.current === generation && mountedRef.current) {
@@ -207,7 +263,7 @@ export function useMqttLiveSession(
         }
       }, delay);
     },
-    [],
+    [disposeStream],
   );
 
   openStreamRef.current = openStream;
@@ -218,7 +274,7 @@ export function useMqttLiveSession(
       const generation = ++generationRef.current;
       clearRetry();
       retryIndexRef.current = 0;
-      setState((current) => ({ ...current, phase: "connecting", error: null }));
+      setState((current) => ({ ...current, phase: "connecting", error: null, reconnectAttempts: 0 }));
       try {
         const response = await connectMqttLiveSession({
           workspace: inputRef.current.workspace,
@@ -253,7 +309,15 @@ export function useMqttLiveSession(
     generationRef.current += 1; // invalidate any in-flight stream callbacks
     clearRetry();
     disposeStream();
-    setState((current) => ({ ...current, phase: "no_session", session: null, snapshot: null, lastActivity: null }));
+    setState((current) => ({
+      ...current,
+      phase: "no_session",
+      session: null,
+      snapshot: null,
+      lastActivity: null,
+      error: null,
+      reconnectAttempts: 0,
+    }));
     try {
       await disconnectMqttLiveSession({ sessionId, context: context() });
     } catch {
@@ -337,6 +401,7 @@ export function useMqttLiveSession(
     snapshot: state.snapshot,
     lastActivity: state.lastActivity,
     error: state.error,
+    reconnectAttempts: state.reconnectAttempts,
     start,
     stop,
     focus,

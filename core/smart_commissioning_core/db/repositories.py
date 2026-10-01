@@ -92,6 +92,7 @@ class UserRepository:
         self._session_factory = (
             query_session_factory(engine) if query_only else session_factory(engine)
         )
+        self._query_session_factory = query_session_factory(engine)
 
     def create_user(
         self,
@@ -165,7 +166,7 @@ class UserRepository:
         principal. The hash is internal here — it never reaches an API response.
         """
         statement = select(User).where(User.api_key_hash == api_key_hash)
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             user = session.scalars(statement).one_or_none()
             if user is None:
                 return None
@@ -181,20 +182,20 @@ class UserRepository:
 
     def get(self, user_id: str) -> dict[str, object] | None:
         """Return the serialized user (no key hash) by id, or None."""
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             user = session.get(User, user_id)
             return _user_to_dict(user) if user is not None else None
 
     def list_users(self) -> list[dict[str, object]]:
         """Return all users (no key hashes), newest first by created_at then id."""
         statement = select(User).order_by(User.created_at.desc(), User.id.desc())
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return [_user_to_dict(user) for user in session.scalars(statement).all()]
 
     def count(self) -> int:
         """Number of users (used for the bootstrap-admin check)."""
         statement = select(func.count()).select_from(User)
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return int(session.scalar(statement) or 0)
 
     def count_active_admins(self) -> int:
@@ -204,7 +205,7 @@ class UserRepository:
         table; the synthetic shared-key / local bootstrap admin is NOT a row and
         is therefore (correctly) not counted here.
         """
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return self._count_active_admins(session)
 
     @staticmethod
@@ -305,6 +306,8 @@ class ConfigurationRepository:
 
     def __init__(self, engine: Engine) -> None:
         self._session_factory = session_factory(engine)
+        # Pure reads use deferred BEGIN so they never queue behind a writer.
+        self._query_session_factory = query_session_factory(engine)
 
     def get_current(self, project_id: str, site_id: str) -> dict[str, object] | None:
         """Return the highest-version payload for the project+site, or None."""
@@ -317,7 +320,7 @@ class ConfigurationRepository:
             .order_by(ConfigurationSnapshot.version.desc())
             .limit(1)
         )
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             snapshot = session.scalars(statement).one_or_none()
             if snapshot is None:
                 return None
@@ -381,6 +384,8 @@ class ImportRepository:
 
     def __init__(self, engine: Engine) -> None:
         self._session_factory = session_factory(engine)
+        # Pure reads use deferred BEGIN so they never queue behind a writer.
+        self._query_session_factory = query_session_factory(engine)
 
     def create(
         self,
@@ -441,22 +446,22 @@ class ImportRepository:
             return _import_to_dict(record)
 
     def get(self, import_id: str) -> dict[str, object]:
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return _import_to_dict(self._load(session, import_id))
 
     def get_summary(self, import_id: str) -> dict[str, object]:
         """Return the stored ImportBatchSummary-shaped payload."""
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return dict(self._load(session, import_id).summary or {})
 
     def get_errors(self, import_id: str) -> dict[str, object]:
         """Return an ImportErrorReport-shaped payload: {import_id, errors}."""
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             record = self._load(session, import_id)
             return {"import_id": record.import_id, "errors": list(record.errors or [])}
 
     def get_accepted_rows(self, import_id: str) -> list[dict[str, object]]:
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return list(self._load(session, import_id).accepted_rows or [])
 
     def list(
@@ -481,7 +486,7 @@ class ImportRepository:
             statement = statement.offset(offset)
         if limit is not None:
             statement = statement.limit(limit)
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             records = session.scalars(statement).all()
             return [_import_to_dict(record) for record in records]
 
@@ -510,7 +515,7 @@ class ImportRepository:
             statement = statement.where(ImportRecord.project_id == project_id)
         if site_id is not None:
             statement = statement.where(ImportRecord.site_id == site_id)
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             for record in session.scalars(statement):
                 summary = dict(record.summary or {})
                 if not require_accepted or int(summary.get("accepted_rows", 0) or 0) > 0:
@@ -546,6 +551,8 @@ class UdmiSchemaSetRepository:
 
     def __init__(self, engine: Engine) -> None:
         self._session_factory = session_factory(engine)
+        # Pure reads use deferred BEGIN so they never queue behind a writer.
+        self._query_session_factory = query_session_factory(engine)
 
     def upsert_set(
         self,
@@ -574,12 +581,12 @@ class UdmiSchemaSetRepository:
     def list_sets(self) -> list[dict[str, object]]:
         """All stored set summaries, ordered by label."""
         statement = select(UdmiSchemaSet).order_by(UdmiSchemaSet.version_label.asc())
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return [_schema_set_summary(record) for record in session.scalars(statement).all()]
 
     def get_all_files(self) -> dict[str, dict[str, dict]]:
         """``{label: {filename: schema}}`` for embedding into run parameters."""
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return {
                 record.version_label: dict(record.files or {})
                 for record in session.scalars(select(UdmiSchemaSet)).all()
@@ -691,6 +698,8 @@ class DiscoveryRepository:
 
     def __init__(self, engine: Engine) -> None:
         self._session_factory = session_factory(engine)
+        # Pure reads use deferred BEGIN so they never queue behind a writer.
+        self._query_session_factory = query_session_factory(engine)
 
     # -- devices --------------------------------------------------------------
 
@@ -718,7 +727,7 @@ class DiscoveryRepository:
             .where(DiscoveredDevice.run_id == run_id)
             .order_by(DiscoveredDevice.position, DiscoveredDevice.id)
         )
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return [_device_to_dict(row) for row in session.scalars(statement).all()]
 
     # -- points ---------------------------------------------------------------
@@ -745,7 +754,7 @@ class DiscoveryRepository:
             .where(DiscoveredPoint.run_id == run_id)
             .order_by(DiscoveredPoint.position, DiscoveredPoint.id)
         )
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return [_point_to_dict(row) for row in session.scalars(statement).all()]
 
     # -- topics ---------------------------------------------------------------
@@ -772,7 +781,7 @@ class DiscoveryRepository:
             .where(DiscoveredTopic.run_id == run_id)
             .order_by(DiscoveredTopic.position, DiscoveredTopic.id)
         )
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return [_topic_to_dict(row) for row in session.scalars(statement).all()]
 
     # -- internals ------------------------------------------------------------
@@ -862,6 +871,8 @@ class SyncRepository:
 
     def __init__(self, engine: Engine) -> None:
         self._session_factory = session_factory(engine)
+        # Pure reads use deferred BEGIN so they never queue behind a writer.
+        self._query_session_factory = query_session_factory(engine)
         self._discovery = DiscoveryRepository(engine)
 
     # -- edge: watermark / unsynced listing ----------------------------------
@@ -888,7 +899,7 @@ class SyncRepository:
             statement = statement.where(Run.project_id == project_id)
         if site_id is not None:
             statement = statement.where(Run.site_id == site_id)
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return [row for row in session.scalars(statement).all()]
 
     def mark_synced(self, run_ids: list[str], *, now: datetime) -> int:
@@ -912,7 +923,7 @@ class SyncRepository:
 
     def run_exists(self, run_id: str) -> bool:
         """True if a run with this id already exists (hub idempotency check)."""
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             return session.get(Run, run_id) is not None
 
     def get_run_for_export(self, run_id: str) -> dict[str, object] | None:
@@ -926,7 +937,7 @@ class SyncRepository:
         """
         from smart_commissioning_core.db.db_run_store import _run_to_dict
 
-        with self._session_factory() as session:
+        with self._query_session_factory() as session:
             run = session.get(Run, run_id)
             if run is None:
                 return None

@@ -7,8 +7,50 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Fixed
+
+- `GET /runs`, `/imports/latest`, and `/udmi/schemas` no longer fail with
+  `database is locked` while a scan or report write is running. Every SQLite
+  session made by `session_factory` opens with `BEGIN IMMEDIATE`, so these
+  pure reads queued behind the writer and gave up after the 5 s busy timeout.
+  They now read through `query_session_factory` (deferred `BEGIN`, query-only),
+  which WAL never blocks. Covered: the read methods of the import, UDMI schema
+  set, configuration, discovery, sync, and user repositories; the run store's
+  `list_runs`, cancel poll, and sync accessors; the per-request scope-grant
+  and import/run ownership checks; and the run-store readiness probe and
+  runs-by-status metrics gauge.
+  Read-then-write transactions keep `BEGIN IMMEDIATE`. A named user's
+  `last_used_at` stamp (a real write) now runs on a read at most once a
+  minute per user; mutations still stamp every time.
+
+## [0.1.59] - 2026-09-29
+
+The three scanner screens (IP Discovery, BACnet Discovery, MQTT Discovery) were
+rebuilt as their own pages. Nothing moved on the engines, the run path or the
+evidence store: a scan still persists as a real `ip_scanner` / `bacnet_scanner` /
+`mqtt_scanner` run, Run History and Reports fill in as before, and there is no
+database migration in this release.
+
 ### Added
 
+- Each scanner is now its own page rather than a branch of the shared module
+  page. The layout is one scrolling screen: a Scan setup card showing the values
+  read from Configuration with a link back to edit them, the per-run inputs for
+  that protocol, Start and Stop, and a last-run line; then a results card whose
+  heading carries the six counters as pills (Expected, Reachable, Match,
+  Partial, Missing, Rogue), a row of RAG filter chips beside the text filter, and
+  the dense table; then the register import card; then the footer line naming the
+  saved run and linking Run History and Reports.
+- Clicking any row opens a sticky detail panel to the right of the table instead
+  of a dialog at the bottom of the page. It is resizable between 320px and 640px
+  and remembers the width; below 1100px it stacks under the table. The panel
+  shows what the vendored tools showed for that device: for IP, the overview,
+  live health with latency and found-via, the hostname check, the expected /
+  extra port diff and one line per observed service with its product, version and
+  certificate; for BACnet, the device identity, the BACnet and network details,
+  the name check, the object diff and a "Load objects" read that renders the live
+  object list inline; for MQTT, the topic, its message metadata, the register
+  verdict and the last payload with Copy and an "Explore JSON tree" walker.
 - The native IP and BACnet scanner results tables now show a row for every
   device the uploaded register expects, including the ones that never answered.
   An expected-but-silent device used to appear only in the issues list, so an
@@ -33,6 +75,21 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   button and its note now also say plainly that the register is stored here and
   applied automatically to the next scan for that project and site, with nothing
   to upload.
+- The MQTT Discovery screen opens live. When Configuration has a broker and
+  nobody else holds the session, the page connects on arrival and shows the live
+  topic tree in a mono rail with its counts, message rates, activity flash, copy
+  and sort controls, with the focused asset in the sticky side panel beside it
+  (Overview, Live payload, Points and Metadata tabs unchanged). The header
+  carries the Topics, Live assets, Messages and Issues counters, the live search
+  and "Registered assets only" toggle, "Apply subscription filter", "Save as
+  register" from the live session, and "Publish message...". Recording a capture
+  is a secondary action on the Broker and capture card above, and its results
+  stay the persisted-evidence view: a Captured topics card with the four capture
+  counters, a Topic, Ret, QoS, Bytes, Last value and Register Match table, the
+  matched / not-in-register chips, the capture archive and register CSV
+  downloads, and the run footer. A run that recorded no per-message metadata
+  reads "Not recorded" rather than a zero, and a non-JSON payload says the engine
+  kept a presence marker instead of the bytes.
 - The MQTT live explorer can save what it has discovered as a register without
   waiting for a capture run to finish. "Save as register" turns the live assets
   into an MQTT register, stores it for the next capture, and pushes it straight
@@ -42,9 +99,39 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   the import and tells you to reconnect rather than save a second copy. A
   register saved this way has no CSV download, because there is no scan run
   behind it to rebuild the file from; download one from a capture run instead.
+- The captured-topics table has an "Export to CSV" button beside "Export topics
+  (XLSX)". It writes the rows the table is currently showing (topic, asset, last
+  seen, message count, latest payload), so narrowing the RAG chips or the text
+  filter narrows the file to match what is on screen, and it needs no round trip.
+  "Export topics (XLSX)" beside it stays the whole run, rebuilt server-side.
 
 ### Changed
 
+- The captured-topics Ret column reports what the broker actually delivered.
+  Every row used to show "-" whether the payload was retained or not, because
+  nothing carried the flag through: the capture's export archive does not record
+  it at all. The capture now reads the sidecar's topic-tree snapshot just before
+  it exports, while the broker session is still open, and stamps the retained
+  flag per topic from it. A topic the snapshot does not list still reads "-":
+  the tree is capped, and an unlisted topic is unknown, not "not retained". If
+  the snapshot cannot be taken the capture still completes and every row reads
+  "-" rather than failing a finished capture over one column. Delivery QoS stays
+  "Not recorded" for this lane, honestly: the vendored tool records no
+  per-message QoS anywhere, and the run's subscription QoS is a different number
+  that must not be passed off as it.
+- "Write config" on a live MQTT asset now opens at QoS 1 with retain ticked, the
+  same defaults the vendored config editor uses, so a config written by following
+  that tool goes out the same way. A plain "Publish message..." still opens at
+  QoS 0, unretained.
+- The live run console shows only what a scan produces while an IP or BACnet scan
+  is running: status, elapsed, progress and open issues. The registered-asset
+  chart and the topic-observation breakdown are gone from those screens; they
+  belong to UDMI validation and could only ever read "Waiting for evidence" on a
+  scanner run. The UDMI workbench console is unchanged.
+- The MQTT capture table's payload-size column is named "JSON size" and measures
+  the stored JSON exactly as the "Last value" cell renders it. The engine records
+  no wire message length, so the column says what it is rather than implying it
+  is the size of the message on the broker.
 - Row colour on the native IP and BACnet results tables now comes from the
   register verdict the scan actually reached, instead of being guessed from the
   status text. A device that answered but is not in the register reads "Rogue
@@ -58,6 +145,9 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   run's stored summary and in the exported assets. The MQTT strip keeps its four
   counters; its "Matches" card is renamed "Match" so the same number is named the
   same way on all three scanner screens.
+- Filtering the results by verdict is a row of chips (All, Match, Partial,
+  Missing / Rogue) above the table rather than a dropdown, and it sits beside the
+  existing text filter rather than replacing it.
 - A BACnet or IP scan now records the register rows that answered nothing on the
   run summary, so the signed inventory report lists the same expected-but-silent
   devices the results screen shows. Before this, that report section only ever
@@ -66,16 +156,64 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   scan actually probed it: the sweep pings every address in the scanned range,
   so a register host outside that range is marked "not sent" rather than being
   reported as silent when it was never contacted at all.
-- The Verdict filter on the two native scanner screens is worded for what it
-  filters: Match, Partial, and Missing / Rogue.
 - Sending a config message to live equipment now asks for confirmation first.
   On builds that do not enforce the preview-and-approval path, "Send to live
   equipment" opens a confirm step showing the exact topic, QoS, retain flag and
   payload, with Cancel and "Send to device". Nothing is published until "Send to
   device" is pressed. Builds that enforce approval are unchanged.
 
+### Removed
+
+- The shared module page no longer carries the IP / BACnet / MQTT scanner
+  branches. They were dead the moment the routes moved to the dedicated pages,
+  and keeping them meant two implementations of the same screen. The built-in
+  discovery lanes (`ip-scanner-sct`, `bacnet-discovery-sct`,
+  `mqtt-discovery-sct`), UDMI validation, data validation and reports are
+  untouched, including their Setup / Run / Results wizard, the sealed dry-run
+  preview and the MQTT capture panel.
+- The MQTT results filter's "No verdict" option is gone. Within one capture a
+  register is either bound, so every topic carries a verdict, or it is not, so
+  none do; the option could never select a subset.
+
 ### Fixed
 
+- The MQTT live view now says what is actually happening when the broker session
+  is held but no topics are arriving. A sidecar that accepts the session and then
+  drops its event stream before the first snapshot used to be retried forever:
+  the status line read "reconnecting" while the page underneath said "Live view
+  not running", with no tree and nothing to press. The page now reports the real
+  state, counting the attempts, keeps the last snapshot on screen through a drop
+  and marks it stale rather than blanking the tree, and never claims the live
+  view is off while the sidecar is holding the broker. After five consecutive
+  reopens with no frame the session is reported unavailable, naming the session
+  and saying nothing is being received, so Stop and Start are the way out
+  instead of an endless retry.
+- An IP register host whose address falls outside the scanned Start/End range is
+  no longer reported as unreachable. The sweep pings every address between start
+  and end, so a register row outside that window was never contacted, and the
+  row used to read "Unreachable" with a panel saying it "did not answer this
+  scan" — turning "we did not look" into negative evidence about a device. The
+  row now reads "Not probed", the panel says the scan never reached the address
+  and suggests widening the range, and a run that did not record the answer says
+  so instead of guessing. The register verdict stays red in all three cases,
+  because the register still expects the host and it is still unaccounted for.
+- That "Not probed" wording now actually reaches the screen from a real scan.
+  The engine worked the answer out and recorded it only on the run summary the
+  signed report reads, not on the result row the table and the panel read, so
+  every silent host on screen fell back to "Probe sent: Not recorded for this
+  run" while the report beside it said otherwise. Both now carry the same value.
+- "Export topics (XLSX)" exports the whole run again. It was sending whatever
+  was currently typed in the setup card's topic filter, so lining up the next
+  capture while a finished one was still on screen silently narrowed, or
+  emptied, the workbook for the run being exported. The capture already applied
+  its own filter, so nothing on screen changes that download now; the CSV beside
+  it is the filtered view.
+- The scanner screens' detail panel now actually sticks as the results scroll
+  past it. Every card clipped its content with `overflow: hidden`, which makes
+  the card a scroll container, and a scroll-container ancestor disables
+  `position: sticky` on everything inside it, so the panel had been scrolling
+  away on all three screens. The cards clip with `overflow: clip` instead, which
+  trims to the same rounded corner without creating a scrollport.
 - The Reports tab opens fast with a large report archive, and bulk delete no
   longer fails with "Internal Server Error". Each stored UDMI report carries
   full source-run snapshots in its parameters, so listing 100 of them read a
@@ -95,10 +233,42 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
     header now reads "reports stored" (the archive total) and "newest shown".
   - The Home dashboard's evidence-pack count polls with `limit=1` and reads
     `total`, instead of pulling 100 verified reports every 15 s.
+- Reports older than the newest 100 are reachable again. "Show older reports"
+  now fetches the next 10 with `offset` and appends them, instead of re-asking
+  for a bigger `limit` that the API caps at 100. Each click still costs one
+  10-row page of server-side verification, whatever has already been loaded.
+  Deleting a report removes it from every loaded page straight away.
 - The "Register already imported" note now refreshes after an upload or a
   save-as-register instead of showing the previous register until the page is
   reloaded. The refresh was asking for a query key with an empty import-type
   slot, which matched nothing, so it had been doing nothing at all.
+- Status and register chips render as chips again. A table rule was making every
+  one of them a full-width block bar with a gap above it.
+- An empty results table no longer reads "No results yet / Start a scan to
+  populate this table" after a run that failed or was stopped. A failure now
+  echoes the engine's own diagnosis, a cancelled run says it was stopped, and a
+  dry run says it sent no packets.
+- The register CSV link is bound to the run that was saved. A save that resolved
+  after the operator switched runs used to show one run's file name beside
+  another run's download URL, and a register that had been saved from a scan
+  offered no CSV at all after a reload.
+- On a build that enforces scan authorization, moving to another project or site
+  now clears the authorization tick. It used to stay ticked, so the next request
+  carried `authorized: true` for a different network with no fresh consent.
+- A BACnet object-browse response that lands after another run has started is
+  discarded instead of filling the panel with the previous run's present values,
+  and a read started on one row no longer spins or reports failure on whatever
+  row is selected next.
+- A report confirmation no longer follows the operator across a run change, so
+  the card cannot show the previous run's report id under the current run.
+- Stop is no longer enabled for a just-restored run whose record has not loaded
+  yet, and "Generate All" checks the run owner before each format so a run
+  started partway through cannot be credited with the remaining reports.
+- Arriving at MQTT Discovery while a capture is still running no longer tries to
+  auto-connect the live view and then show a bare "Live view not running" with no
+  reason. The page waits until it knows whether a run is already in flight, and
+  when the broker session is refused it says why instead of leaving the operator
+  to guess.
 - UDMI validation now reports its observational outputs honestly when the
   secondary (observation-only) MQTT lane hits its distinct-topic or byte limit.
   Validation metrics were already correct in that case; three reporting paths
@@ -124,6 +294,24 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
     listed, the Results caption and the PDF/DOCX/XLSX/ZIP report note now say
     the count is a lower bound ("at least N") instead of calling the displayed
     count 0 or saying the devices were not measured.
+- The MQTT live view no longer treats the closing of a stream it has just
+  replaced as another drop. Replacing a still-open stream during a reconnect
+  made the old stream report itself closed, which scheduled a second reconnect
+  that in turn cut off the healthy replacement, so a single "unavailable" signal
+  from the sidecar could walk the view to "unavailable" against a working broker
+  session. Late frames from a replaced stream could also overwrite the current
+  snapshot, and the same stray close flipped a session that was taken over or
+  reclaimed by the backend from ended back to reconnecting. Callbacks are now
+  keyed to the stream that registered them.
+
+- `npm run dev` no longer shows every API call failing with "signal is aborted
+  without reason". React.StrictMode runs the session provider's effect cleanup
+  and then re-runs it with the same session client, and that cleanup aborted the
+  client for good. The provider now aborts a client only once it is no longer
+  the mounted one, so the dev double-run keeps it alive; sign-in, sign-out,
+  unmount and a key change still end it, and an aborted client stays aborted so
+  a delayed caller cannot reuse a signed-out key. Production builds never
+  double-run effects and were not affected.
 
 ## [0.1.58] - 2026-09-14
 

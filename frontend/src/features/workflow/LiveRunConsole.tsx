@@ -1,9 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type {
-  RunRecord,
-  UdmiAssetTopicDiscovery,
-  UdmiValidationSummaryV1,
-} from "../../api/client";
+import type { RunRecord, UdmiAssetTopicDiscovery, UdmiValidationSummaryV1 } from "../../api/client";
 import { formatRelativeTime, humanizeStage, toHealthState } from "./runFormat";
 
 type StateSample = Readonly<{ at: number; progress: number; issues: number; stage: string }>;
@@ -22,6 +18,16 @@ type LiveRunConsoleProps = Readonly<{
   status: RunRecord["status"];
   stage: string;
   validationSummary: UdmiValidationSummaryV1 | null;
+  /**
+   * Which run this console is describing. "udmi" (the default, so ModulePage is
+   * unchanged) keeps the registered-asset chart and the topic-observation
+   * breakdown. "scanner" drops both: an IP or BACnet scan has no registered-asset
+   * ledger and no topic discovery at all, so those panels sat there reading
+   * "Waiting for evidence" and "Expected-topic observed 0" for the whole run,
+   * which is not pending evidence, it is evidence that does not exist for this
+   * kind of run.
+   */
+  variant?: "udmi" | "scanner";
 }>;
 
 const MAX_ASSET_SAMPLES = 60;
@@ -45,10 +51,10 @@ function hasUsableTopicLedger(
 ): discovery is UdmiAssetTopicDiscovery {
   return Boolean(
     discovery &&
-      typeof discovery.scope === "string" &&
-      discovery.scope.trim() !== "" &&
-      discovery.scope_error === null &&
-      (discovery.scope_source === "register_common_ancestor" || discovery.scope_source === "all"),
+    typeof discovery.scope === "string" &&
+    discovery.scope.trim() !== "" &&
+    discovery.scope_error === null &&
+    (discovery.scope_source === "register_common_ancestor" || discovery.scope_source === "all"),
   );
 }
 
@@ -140,6 +146,7 @@ export function LiveRunConsole({
   status,
   stage,
   validationSummary,
+  variant = "udmi",
 }: LiveRunConsoleProps) {
   const [now, setNow] = useState(() => Date.now());
   const [stateSamples, setStateSamples] = useState<readonly StateSample[]>([]);
@@ -179,10 +186,9 @@ export function LiveRunConsole({
       if (last?.expected === assetExpected && last.observed === assetObserved) {
         return previous;
       }
-      return [
-        ...previous,
-        { expected: assetExpected, observed: assetObserved },
-      ].slice(-MAX_ASSET_SAMPLES);
+      return [...previous, { expected: assetExpected, observed: assetObserved }].slice(
+        -MAX_ASSET_SAMPLES,
+      );
     });
   }, [assetExpected, assetObserved, run.run_id]);
 
@@ -218,7 +224,8 @@ export function LiveRunConsole({
         assetTraceScale,
       )
     : null;
-  const expectedAssets = assetObservation?.expected ?? assetTopicDiscovery?.asset_results.length ?? null;
+  const expectedAssets =
+    assetObservation?.expected ?? assetTopicDiscovery?.asset_results.length ?? null;
   const topicLedgerUsable = hasUsableTopicLedger(assetTopicDiscovery);
   const topicStatusCounts = useMemo(
     () => buildTopicStatusCounts(assetTopicDiscovery),
@@ -277,51 +284,61 @@ export function LiveRunConsole({
         </div>
       </div>
       <div className="live-console-grid">
-        <article className="live-console-chart">
-          <div className="live-console-label">
-            <span>Registered assets observed</span>
-            <small>
-              {assetSamples.length
-                ? `${assetSamples.length} recent evidence snapshot${assetSamples.length === 1 ? "" : "s"}`
-                : "Waiting for evidence"}
-            </small>
-          </div>
-          {assetObservation === null ? (
-            <p className="live-console-empty">Waiting for evidence.</p>
-          ) : assetObservation.expected === 0 ? (
-            <p className="live-console-empty">No expected assets were recorded.</p>
-          ) : (
-            <>
-              <div className="live-console-evidence-count">
-                <strong>
-                  {assetObservation.observed} of {assetObservation.expected} expected
-                </strong>
-                <span>observed registered assets</span>
-              </div>
-              <svg
-                aria-label={`Registered assets observed: ${assetObservation.observed} of ${assetObservation.expected} expected.`}
-                role="img"
-                viewBox="0 0 100 100"
-                preserveAspectRatio="none"
-              >
-                <line x1="0" x2="100" y1="0" y2="0" />
-                <line x1="0" x2="100" y1="50" y2="50" />
-                <line x1="0" x2="100" y1="100" y2="100" />
-                <polyline className="live-console-expected-trace" fill="none" points={expectedAssetPoints} />
-                <polyline className="live-console-observed-trace" fill="none" points={observedAssetPoints} />
-                {latestObservedPoint && (
-                  <circle
-                    className="live-console-observed-point"
-                    cx={latestObservedPoint.x}
-                    cy={latestObservedPoint.y}
-                    r="2.5"
+        {variant === "udmi" && (
+          <article className="live-console-chart">
+            <div className="live-console-label">
+              <span>Registered assets observed</span>
+              <small>
+                {assetSamples.length
+                  ? `${assetSamples.length} recent evidence snapshot${assetSamples.length === 1 ? "" : "s"}`
+                  : "Waiting for evidence"}
+              </small>
+            </div>
+            {assetObservation === null ? (
+              <p className="live-console-empty">Waiting for evidence.</p>
+            ) : assetObservation.expected === 0 ? (
+              <p className="live-console-empty">No expected assets were recorded.</p>
+            ) : (
+              <>
+                <div className="live-console-evidence-count">
+                  <strong>
+                    {assetObservation.observed} of {assetObservation.expected} expected
+                  </strong>
+                  <span>observed registered assets</span>
+                </div>
+                <svg
+                  aria-label={`Registered assets observed: ${assetObservation.observed} of ${assetObservation.expected} expected.`}
+                  role="img"
+                  viewBox="0 0 100 100"
+                  preserveAspectRatio="none"
+                >
+                  <line x1="0" x2="100" y1="0" y2="0" />
+                  <line x1="0" x2="100" y1="50" y2="50" />
+                  <line x1="0" x2="100" y1="100" y2="100" />
+                  <polyline
+                    className="live-console-expected-trace"
+                    fill="none"
+                    points={expectedAssetPoints}
                   />
-                )}
-              </svg>
-              <small>Recent evidence snapshots, not a broker message rate.</small>
-            </>
-          )}
-        </article>
+                  <polyline
+                    className="live-console-observed-trace"
+                    fill="none"
+                    points={observedAssetPoints}
+                  />
+                  {latestObservedPoint && (
+                    <circle
+                      className="live-console-observed-point"
+                      cx={latestObservedPoint.x}
+                      cy={latestObservedPoint.y}
+                      r="2.5"
+                    />
+                  )}
+                </svg>
+                <small>Recent evidence snapshots, not a broker message rate.</small>
+              </>
+            )}
+          </article>
+        )}
         <article className="live-console-events" aria-live="polite">
           <div className="live-console-label">
             <span>UI/run-state sampling every second</span>
@@ -349,34 +366,36 @@ export function LiveRunConsole({
           )}
         </article>
       </div>
-      <section className="live-console-topic-evidence" aria-label="Topic observation breakdown">
-        <div className="live-console-label">
-          <span>Topic observation breakdown</span>
-          <small>
-            {topicLedgerUsable && assetTopicDiscovery?.capture_complete
-              ? "Capture outcome recorded"
-              : "Topic evidence pending"}
-          </small>
-        </div>
-        <dl className="live-console-topic-statuses">
-          <div className="topic-status-expected">
-            <dt>Expected-topic observed</dt>
-            <dd>{topicStatus.expected}</dd>
+      {variant === "udmi" && (
+        <section className="live-console-topic-evidence" aria-label="Topic observation breakdown">
+          <div className="live-console-label">
+            <span>Topic observation breakdown</span>
+            <small>
+              {topicLedgerUsable && assetTopicDiscovery?.capture_complete
+                ? "Capture outcome recorded"
+                : "Topic evidence pending"}
+            </small>
           </div>
-          <div className="topic-status-alternate">
-            <dt>Alternate-topic observed</dt>
-            <dd>{topicStatus.alternate}</dd>
-          </div>
-          <div className="topic-status-no-match">
-            <dt>No matching asset-ID topic observed</dt>
-            <dd>{topicStatus.noMatch}</dd>
-          </div>
-        </dl>
-        <p className="live-console-topic-note">
-          Topic placement comes only from the topic-discovery ledger; it is never inferred from
-          payload observation.
-        </p>
-      </section>
+          <dl className="live-console-topic-statuses">
+            <div className="topic-status-expected">
+              <dt>Expected-topic observed</dt>
+              <dd>{topicStatus.expected}</dd>
+            </div>
+            <div className="topic-status-alternate">
+              <dt>Alternate-topic observed</dt>
+              <dd>{topicStatus.alternate}</dd>
+            </div>
+            <div className="topic-status-no-match">
+              <dt>No matching asset-ID topic observed</dt>
+              <dd>{topicStatus.noMatch}</dd>
+            </div>
+          </dl>
+          <p className="live-console-topic-note">
+            Topic placement comes only from the topic-discovery ledger; it is never inferred from
+            payload observation.
+          </p>
+        </section>
+      )}
     </section>
   );
 }
