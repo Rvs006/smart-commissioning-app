@@ -87,7 +87,7 @@ def require_global_admin(
     if principal.user_id is not None:
         allowed = (
             principal.role is Role.ADMIN
-            and ScopeGrantRepository().is_active_admin(principal.user_id)
+            and ScopeGrantRepository(query_only=True).is_active_admin(principal.user_id)
         )
     else:
         allowed = has_global_scope(principal)
@@ -309,7 +309,7 @@ def effective_scopes(
     """Return the named user's active project/site pairs, or an empty global set."""
     if has_global_scope(principal) or principal.user_id is None:
         return []
-    return ScopeGrantRepository(engine).effective_scopes(principal.user_id)
+    return ScopeGrantRepository(engine, query_only=True).effective_scopes(principal.user_id)
 
 
 def allowed_scope_pairs(
@@ -318,7 +318,7 @@ def allowed_scope_pairs(
     engine: Engine | None = None,
 ) -> set[tuple[str, str]] | None:
     """Return ``None`` for global access or the principal's exact active scopes."""
-    repository = ScopeGrantRepository(engine)
+    repository = ScopeGrantRepository(engine, query_only=True)
     if principal.user_id is not None and principal.role is Role.ADMIN:
         return None if repository.is_active_admin(principal.user_id) else set()
     if principal.user_id is None and has_global_scope(principal):
@@ -335,9 +335,14 @@ def require_project_site_access(
     site_id: str,
     *,
     engine: Engine | None = None,
-    query_only: bool = False,
+    query_only: bool = True,
 ) -> ScopedResource:
-    """Authorize one scope or raise the same 404 used for a missing scope."""
+    """Authorize one scope or raise the same 404 used for a missing scope.
+
+    Reads through the query-only session by default: the lookup session closes
+    before the caller writes anything, so a write lock here would guard nothing
+    and only make the check wait behind (or block) real writers.
+    """
     repository = ScopeGrantRepository(engine, query_only=query_only)
     if principal.user_id is None:
         if has_global_scope(principal):
@@ -367,7 +372,7 @@ def _authorize_resource(
     kind: str,
     principal: AuthPrincipal,
     engine: Engine,
-    query_only: bool = False,
+    query_only: bool = True,
 ) -> ScopedResource:
     if not project_id or not site_id:
         raise HTTPException(status_code=404, detail=f"{kind} not found.")
@@ -391,7 +396,7 @@ def load_scoped_run(
     principal: AuthPrincipal,
     *,
     engine: Engine | None = None,
-    query_only: bool = False,
+    query_only: bool = True,
 ) -> ScopedResource:
     """Load a run's owner and authorize it without exposing foreign IDs."""
     resolved_engine = engine or get_engine()
@@ -425,7 +430,7 @@ def load_scoped_import(
 ) -> AuthorizedImportResource:
     """Load an import's owner and authorize it without exposing foreign IDs."""
     resolved_engine = engine or get_engine()
-    with session_factory(resolved_engine)() as session:
+    with query_session_factory(resolved_engine)() as session:
         row = session.execute(
             select(ImportRecord.project_id, ImportRecord.site_id).where(
                 ImportRecord.import_id == import_id

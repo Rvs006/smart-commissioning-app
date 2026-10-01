@@ -1761,8 +1761,8 @@ class RunService:
     def runtime_ready(self) -> tuple[bool, str]:
         try:
             ensure_runtime_directories()
-            with self._engine.connect() as connection:
-                connection.execute(text("SELECT 1"))
+            with query_session_factory(self._engine)() as session:
+                session.execute(text("SELECT 1"))
         except (OSError, SQLAlchemyError) as error:
             return False, str(error)
         return True, "run store database is reachable"
