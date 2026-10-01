@@ -3604,8 +3604,8 @@ class SecondaryLaneOverflowTests(unittest.TestCase):
             row["asset_id"]: row["observed"] for row in validation["asset_results"]
         }
         self.assertEqual(observed, {"AHU-1": True, "AHU-2": True, "AHU-3": False})
-        # The unexpected inventory still comes from retained traffic only.
-        self.assertFalse(summary["unexpected_devices_measured"])
+        # The pre-cap root inventory measures unexpected devices exactly.
+        self.assertTrue(summary["unexpected_devices_measured"])
         self.assertEqual(
             [device["topic_root"] for device in summary["unexpected_devices"]],
             ["site/noise/N-1", "site/noise/N-2"],
@@ -3717,6 +3717,62 @@ class SecondaryLaneOverflowTests(unittest.TestCase):
             [row["asset_id"] for row in summary["wrong_topic_assets"]],
             ["AHU-2"],
         )
+
+    def test_unexpected_devices_are_measured_past_the_secondary_payload_cap(self) -> None:
+        noise = [
+            MqttMessage(f"site/noise/N-{index}/state", self._STATE)
+            for index in range(5_000)
+        ]
+        summary = self._capture(
+            noise
+            + [
+                MqttMessage("site/noise/N-7/events/pointset", self._STATE),
+                MqttMessage("site/moved/AHU-2/state", self._STATE),
+                MqttMessage("site/hvac/AHU-1/state", self._STATE),
+            ]
+        )
+
+        retention = summary["capture_retention"]
+        self.assertTrue(retention["secondary_count_truncated"])
+        self.assertEqual(retention["secondary_retained_count"], 2)
+        self.assertFalse(retention["unexpected_root_inventory_truncated"])
+        self.assertTrue(summary["unexpected_devices_measured"])
+        self.assertEqual(summary["unexpected_device_count"], 5_000)
+        roots = {device["topic_root"] for device in summary["unexpected_devices"]}
+        self.assertEqual(roots, {f"site/noise/N-{index}" for index in range(5_000)})
+        self.assertEqual(
+            summary["validation_summary_v1"]["asset_metrics"]["unexpected"], 5_000
+        )
+        self.assertTrue(summary["validation_summary_v1"]["unexpected_devices_measured"])
+
+    def test_root_inventory_overflow_keeps_the_count_a_lower_bound(self) -> None:
+        with patch.object(udmi_validation, "MAX_UNEXPECTED_ROOT_INVENTORY", 3):
+            summary = self._capture(
+                [
+                    MqttMessage(f"site/noise/N-{index}/state", self._STATE)
+                    for index in range(5)
+                ]
+                + [MqttMessage("site/hvac/AHU-1/state", self._STATE)]
+            )
+
+        self.assertTrue(summary["capture_retention"]["unexpected_root_inventory_truncated"])
+        self.assertFalse(summary["unexpected_devices_measured"])
+        self.assertEqual(summary["unexpected_device_count"], 3)
+
+    def test_root_inventory_byte_budget_keeps_the_count_a_lower_bound(self) -> None:
+        # Room for exactly one root plus its topic name.
+        budget = len("site/noise/N-0") + len("site/noise/N-0/state")
+        with patch.object(udmi_validation, "MAX_UNEXPECTED_ROOT_INVENTORY_BYTES", budget):
+            summary = self._capture(
+                [
+                    MqttMessage(f"site/noise/N-{index}/state", self._STATE)
+                    for index in range(5)
+                ]
+                + [MqttMessage("site/hvac/AHU-1/state", self._STATE)]
+            )
+
+        self.assertTrue(summary["capture_retention"]["unexpected_root_inventory_truncated"])
+        self.assertFalse(summary["unexpected_devices_measured"])
 
 
 class PointsetTimestampDiagnosisTests(unittest.TestCase):

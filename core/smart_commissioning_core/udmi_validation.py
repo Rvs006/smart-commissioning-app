@@ -144,6 +144,15 @@ MAX_ASSET_TOPIC_DISCOVERY_LIMIT = 100
 # validated, so they get the transport's expected-payload byte allowance, not
 # the 2 MiB diagnostic lane budget that hid them.
 DEFAULT_WRONG_TOPIC_RETAINED_BYTES = DEFAULT_PRIMARY_RETAINED_BYTES
+# Distinct unexpected publisher roots counted from topic names before the
+# secondary lane's payload cap, so a large site's unexpected-device count is
+# measured even when payload retention overflows. One root string plus its
+# latest topic name per entry; no payload bodies.
+# Both a root count and a byte budget bound it: MQTT topics may be ~64 KiB.
+# ponytail: fixed ceilings. Past either the count is reported as a lower
+# bound; switch to a HyperLogLog estimate if a site ever exceeds them.
+MAX_UNEXPECTED_ROOT_INVENTORY = 100_000
+MAX_UNEXPECTED_ROOT_INVENTORY_BYTES = 32 * 1024 * 1024
 
 
 def validate_udmi_full_report(
@@ -2562,6 +2571,12 @@ def _capture_live_payloads_per_asset(
     pre_cap_wrong_topic_messages: dict[tuple[int, str], MqttMessage] = {}
     pre_cap_wrong_topic_bytes = 0
     pre_cap_wrong_topic_truncated = False
+    # Topic-name-only inventory of unexpected publisher roots: root -> (latest
+    # topic, received_at). See ``MAX_UNEXPECTED_ROOT_INVENTORY``.
+    pre_cap_unexpected_roots: dict[str, tuple[str, datetime]] = {}
+    pre_cap_unexpected_roots_bytes = 0
+    pre_cap_unexpected_roots_truncated = False
+    expected_root_set = {root for root in expected_publisher_roots if root}
 
     def retained_bytes(message: MqttMessage | None) -> int:
         # Same accounting as the transport's retention lanes.
@@ -2577,7 +2592,8 @@ def _capture_live_payloads_per_asset(
         """
 
         nonlocal observed_callback_count, pre_cap_wrong_topic_bytes
-        nonlocal pre_cap_wrong_topic_truncated
+        nonlocal pre_cap_wrong_topic_truncated, pre_cap_unexpected_roots_truncated
+        nonlocal pre_cap_unexpected_roots_bytes
         observed_callback_count += 1
         wrong_topic_entry = _registered_wrong_topic_entry_index(
             message.topic,
@@ -2585,6 +2601,31 @@ def _capture_live_payloads_per_asset(
             registered_asset_routes,
             lambda topic: bool(matching_validation_entries(topic, store=False)),
         )
+        # Same filters as ``_measure_unexpected_publishers``, on the topic name.
+        if (
+            wrong_topic_entry is None
+            and measurement_scope
+            and _topic_matches_filter(message.topic, measurement_scope)
+            and not _topic_under_any_root(message.topic, expected_root_set)
+        ):
+            root = _publisher_root_from_message_topic(message.topic)
+            current = pre_cap_unexpected_roots.get(root)
+            topic_bytes = len(message.topic.encode("utf-8"))
+            projected = pre_cap_unexpected_roots_bytes + (
+                topic_bytes - len(current[0].encode("utf-8"))
+                if current is not None
+                else topic_bytes + len(root.encode("utf-8"))
+            )
+            if projected <= MAX_UNEXPECTED_ROOT_INVENTORY_BYTES and (
+                current is not None
+                or len(pre_cap_unexpected_roots) < MAX_UNEXPECTED_ROOT_INVENTORY
+            ):
+                pre_cap_unexpected_roots[root] = (message.topic, message.received_at)
+                pre_cap_unexpected_roots_bytes = projected
+            elif current is None:
+                # A known root that cannot afford a longer topic keeps its
+                # older one; only an uncounted root makes the count a bound.
+                pre_cap_unexpected_roots_truncated = True
         # A candidate matches no validation filter, so under a confirmed ``#``
         # trace only the bounded measurement scope makes it normal evidence
         # (see ``matches_normal_capture_scope``).
@@ -2879,6 +2920,14 @@ def _capture_live_payloads_per_asset(
         if topic not in retained_topics
     ]
     transport_telemetry["wrong_topic_byte_truncated"] = pre_cap_wrong_topic_truncated
+    transport_telemetry["unexpected_root_inventory_truncated"] = (
+        pre_cap_unexpected_roots_truncated
+    )
+    # The pre-cap root inventory measures unexpected devices whatever the
+    # secondary lane retained; replayed retained evidence cannot.
+    unexpected_inventory_complete = (
+        observed_pre_cap and not pre_cap_unexpected_roots_truncated
+    )
 
     capture_observed_at = datetime.now(UTC).isoformat()
 
@@ -2927,15 +2976,21 @@ def _capture_live_payloads_per_asset(
             expected_publisher_roots,
             measurement_scope,
             registered_wrong_topic_routes=wrong_topic_routes,
+            pre_cap_roots=pre_cap_unexpected_roots if observed_pre_cap else None,
             measured=(
                 capture_error_status is None
                 and not capture_cancelled
                 and transport_window_completed
                 and expected_topic_count < max_messages
-                and observation_topic_count < unexpected_max_messages
                 and not transport_telemetry.get("primary_cap_reached", False)
                 and not transport_telemetry.get("primary_byte_cap_reached", False)
-                and not transport_telemetry.get("secondary_truncated", False)
+                and (
+                    unexpected_inventory_complete
+                    or (
+                        observation_topic_count < unexpected_max_messages
+                        and not transport_telemetry.get("secondary_truncated", False)
+                    )
+                )
             ),
         )
 
@@ -3574,45 +3629,49 @@ def _measure_unexpected_publishers(
     measurement_scope: str | None,
     *,
     registered_wrong_topic_routes: dict[str, int] | None = None,
+    pre_cap_roots: dict[str, tuple[str, datetime]] | None = None,
     measured: bool,
 ) -> None:
-    """Persist a deterministic, deduplicated inventory of unexpected siblings."""
+    """Persist a deterministic, deduplicated inventory of unexpected siblings.
+
+    ``pre_cap_roots`` adds publishers seen by topic name before the secondary
+    lane dropped their payloads; their row carries the latest topic only.
+    """
     parameters["unexpected_devices_measured"] = bool(measurement_scope and measured)
     parameters["unexpected_devices_measurement_scope"] = measurement_scope
     if not measurement_scope:
         parameters["unexpected_devices"] = []
         return
-    literal_expected_roots = [root for root in expected_roots if root]
+    literal_expected_roots = {root for root in expected_roots if root}
     registered_wrong_topic_routes = registered_wrong_topic_routes or {}
     registered_wrong_topic_roots = {
         _publisher_root_from_message_topic(topic)
         for topic in registered_wrong_topic_routes
     }
-    grouped: dict[str, list[MqttMessage]] = defaultdict(list)
-    for message in messages:
-        if not _topic_matches_filter(message.topic, measurement_scope):
+    grouped: dict[str, list[tuple[str, datetime]]] = defaultdict(list)
+    observations = [(message.topic, message.received_at) for message in messages]
+    observations.extend((pre_cap_roots or {}).values())
+    for topic, received_at in observations:
+        if not _topic_matches_filter(topic, measurement_scope):
             continue
-        if any(_topic_belongs_to_root(message.topic, root) for root in literal_expected_roots):
+        if _topic_under_any_root(topic, literal_expected_roots):
             continue
-        if any(
-            _topic_belongs_to_root(message.topic, root)
-            for root in registered_wrong_topic_roots
-        ):
+        if _topic_under_any_root(topic, registered_wrong_topic_roots):
             continue
-        publisher_root = _publisher_root_from_message_topic(message.topic)
-        grouped[publisher_root].append(message)
+        publisher_root = _publisher_root_from_message_topic(topic)
+        grouped[publisher_root].append((topic, received_at))
 
     unexpected: list[dict[str, object]] = []
     for topic_root in sorted(grouped):
         publisher_messages = grouped[topic_root]
-        latest = max(publisher_messages, key=lambda message: message.received_at.timestamp())
+        _, latest = max(publisher_messages, key=lambda item: item[1].timestamp())
         unexpected.append(
             {
                 "id": "unexpected-"
                 + hashlib.sha256(topic_root.encode("utf-8")).hexdigest()[:12],
                 "topic_root": topic_root,
-                "topics": sorted({message.topic for message in publisher_messages}),
-                "last_seen": latest.received_at.isoformat(),
+                "topics": sorted({topic for topic, _ in publisher_messages}),
+                "last_seen": latest.isoformat(),
             }
         )
     parameters["unexpected_devices"] = unexpected
@@ -3620,6 +3679,12 @@ def _measure_unexpected_publishers(
 
 def _topic_belongs_to_root(topic: str, root: str) -> bool:
     return topic == root or topic.startswith(root + "/")
+
+
+def _topic_under_any_root(topic: str, roots: set[str]) -> bool:
+    """``_topic_belongs_to_root`` against a set, in O(topic depth)."""
+    parts = topic.split("/")
+    return any("/".join(parts[:depth]) in roots for depth in range(1, len(parts) + 1))
 
 
 def _publisher_root_from_message_topic(topic: str) -> str:
