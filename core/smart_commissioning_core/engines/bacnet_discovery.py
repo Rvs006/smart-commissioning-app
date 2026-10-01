@@ -197,6 +197,10 @@ ISSUE_OBJECT_LIST_UNREADABLE = "bacnet_object_list_unreadable"
 #: remaining points. The points not attempted are ABSENT (never recorded as
 #: failures — absent != failed).
 ISSUE_POINT_READS_ABORTED = "bacnet_point_reads_aborted"
+#: The whole-array object-list read aborted, the index-by-index fallback started,
+#: and it stopped before the last entry. The objects read are kept; the rest are
+#: absent and counted, never faked as a complete list.
+ISSUE_OBJECT_LIST_PARTIAL = "bacnet_object_list_partial"
 
 #: After this many CONSECUTIVE per-point read failures on one device, stop reading
 #: its remaining points. A device that answered Who-Is but refuses reads (wrong
@@ -207,6 +211,43 @@ ISSUE_POINT_READS_ABORTED = "bacnet_point_reads_aborted"
 #: ponytail: fixed threshold; make it a run parameter if a real device legitimately
 #: leads with >5 unreadable points.
 _MAX_CONSECUTIVE_POINT_READ_FAILURES = 5
+
+#: Abort reasons that mean "the whole object-list does not fit in one APDU" (the
+#: device cannot segment the reply). Spelled without separators so bacpypes3's
+#: ``AbortPDU`` reason ("segmentation-not-supported") and its
+#: ``errors.AbortException.abortReason`` ("segmentationNotSupported") both match.
+_OBJECT_LIST_TOO_BIG_ABORTS = frozenset({"segmentationnotsupported", "bufferoverflow", "apdutoolong"})
+
+#: Most object-list entries the one-index-at-a-time fallback will read for one
+#: device. Bounds a garbage array length (it is a 32-bit Unsigned on the wire);
+#: entries past it are reported as not read, never dropped silently.
+#: ponytail: fixed cap; make it a run parameter if a real controller exceeds it.
+_MAX_OBJECT_LIST_INDEXED_ENTRIES = 10_000
+
+#: BACnet object types that define no present-value property (ASHRAE 135, and
+#: bacpypes3 0.0.106's object models agree), so the scan does not ask for one.
+#: Schedule and calendar are NOT here: both have a required present-value.
+#: ponytail: standard types only; a vendor type with no present-value still gets
+#: one failed read, recorded as a read_error as before.
+_NO_PRESENT_VALUE_TYPES = frozenset(
+    {
+        "audit-log",
+        "audit-reporter",
+        "averaging",
+        "device",
+        "event-enrollment",
+        "event-log",
+        "file",
+        "network-port",
+        "network-security",
+        "notification-class",
+        "notification-forwarder",
+        "program",
+        "structured-view",
+        "trend-log",
+        "trend-log-multiple",
+    }
+)
 
 #: bacpypes3's ErrorRejectAbortNack (Error/Reject/Abort PDUs) subclasses
 #: BaseException, NOT Exception (verified against pinned bacpypes3==0.0.106,
@@ -309,6 +350,37 @@ def _json_safe_value(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     return str(value)
+
+
+def _object_list_entry(raw: Any) -> dict[str, Any] | None:
+    """Map one object-list element to an object dict; ``None`` for the device itself.
+
+    VERIFIED against bacpypes3 (context7 /joelbender/bacpypes3): each element is
+    an ObjectIdentifier whose str() is the "object-type,instance" shorthand that
+    read_property also accepts (e.g. "analog-input,3").
+    """
+    object_identifier = str(raw)
+    if object_identifier.startswith("device,"):
+        return None
+    return {
+        "object_identifier": object_identifier,
+        "object_type": object_identifier.split(",", 1)[0],
+    }
+
+
+def _needs_indexed_object_list(exc: BaseException) -> bool:
+    """True when a whole-array object-list read failed because it was too big.
+
+    A timeout counts too: a device that cannot segment may just drop the reply.
+    Matched by attribute, not by importing bacpypes3, so core stays importable
+    without the optional extra.
+    """
+    if isinstance(exc, TimeoutError):
+        return True
+    reason = getattr(exc, "abortReason", None)  # bacpypes3.errors.AbortException
+    if reason is None and type(exc).__name__ == "AbortPDU":
+        reason = getattr(exc, "apduAbortRejectReason", None)
+    return reason is not None and str(reason).replace("-", "").casefold() in _OBJECT_LIST_TOO_BIG_ABORTS
 
 
 @runtime_checkable
@@ -1355,13 +1427,9 @@ class Bacpypes3Backend:
         # string shorthand for all three (e.g. "device,1001", "object-list").
         # Reading the whole "object-list" returns the full array (the docs read
         # an entire "priority-array" the same way).
-        # KNOWN LIMITATION (on-site validation / live_untested): on large devices
-        # the whole-array read can exceed the APDU size. The documented array
-        # indexing supports a chunked fallback — read the length with
-        #   read_property(address, "device,<n>", "object-list", instance=0)
-        # (the shell form is object-list[0]) then each element by index
-        # (object-list[i], instance=i). Wire that fallback up against real
-        # hardware if the single read aborts.
+        # On a device that cannot segment a large reply this read Aborts
+        # (segmentation-not-supported / buffer-overflow) or times out; the engine
+        # then falls back to read_object_list_index (length, then each entry).
         #
         # asyncio.wait_for is LOAD-BEARING, not belt-and-braces: bacpypes3's
         # own apduTimeout only governs a request it actually tracks. A future
@@ -1374,23 +1442,28 @@ class Bacpypes3Backend:
             app.read_property(address, device_object, self._object_list_property),
             timeout=self._timeout_s,
         )
-        objects: list[dict[str, Any]] = []
-        for raw in raw_objects or []:
-            # VERIFIED against bacpypes3 (context7 /joelbender/bacpypes3): each
-            # object-list entry is an ObjectIdentifier whose str() yields the
-            # "object-type,instance" shorthand (the same shorthand read_property
-            # accepts as an object_id, e.g. "analog-input,3"). Skip the device
-            # object itself.
-            object_identifier = str(raw)
-            if object_identifier.startswith("device,"):
-                continue
-            objects.append(
-                {
-                    "object_identifier": object_identifier,
-                    "object_type": object_identifier.split(",", 1)[0],
-                }
-            )
-        return objects
+        entries = (_object_list_entry(raw) for raw in raw_objects or [])
+        return [entry for entry in entries if entry is not None]
+
+    async def read_object_list_index(self, device: Mapping[str, Any], index: int) -> Any:
+        """REQUIRES ON-SITE VALIDATION. ReadProperty object-list[index].
+
+        Index 0 is the array length; 1..N are single ObjectIdentifiers. Each
+        reply fits one APDU, so a device that cannot segment still answers.
+        VERIFIED against bacpypes3 0.0.106 source (service/object.py):
+        ``read_property(address, objid, prop, array_index=None)``. Bounded by the
+        same per-request timeout as read_object_list.
+        """
+        app = self._ensure_app()
+        return await asyncio.wait_for(
+            app.read_property(
+                str(device.get("address") or ""),
+                f"device,{device.get('device_instance')}",
+                self._object_list_property,
+                array_index=index,
+            ),
+            timeout=self._timeout_s,
+        )
 
     async def read_present_value(
         self,
@@ -1403,9 +1476,9 @@ class Bacpypes3Backend:
         object_identifier = str(obj.get("object_identifier") or "")
         # VERIFIED against bacpypes3 (context7 /joelbender/bacpypes3): present-
         # value is read with await app.read_property(address, "<type>,<inst>",
-        # "present-value") — exactly the documented example. On failure
-        # read_property raises bacpypes3.apdu.ErrorRejectAbortNack (e.g. an
-        # object with no present-value such as structured-view); the engine's
+        # "present-value") — exactly the documented example. Types with no
+        # present-value (_NO_PRESENT_VALUE_TYPES) never reach here. On failure
+        # read_property raises bacpypes3.apdu.ErrorRejectAbortNack; the engine's
         # per-point `except Exception` records the read error and keeps scanning,
         # so one bad object does not abort the device.
         #
@@ -1759,6 +1832,52 @@ def _device_record(
     }
 
 
+async def _read_object_list_by_index(
+    ctx: EngineContext,
+    source: Any,
+    device: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Read object-list one element at a time after the whole-array read aborted.
+
+    Returns the objects read and ``{"entries_total", "entries_read", "stopped"}``
+    where ``stopped`` is None for a complete list, else ``"read_error"`` /
+    ``"cancelled"`` / ``"entry_cap"``. A failed length read (index 0) raises, so
+    the caller reports the device unenumerated exactly as before. Every later
+    stop keeps what was read and counts what was not: never a faked full list.
+
+    Runs inside the device unit's throttle slot like the present-value reads;
+    each request carries the backend's per-request timeout, and the run deadline
+    still cancels it (CancelledError is never swallowed here).
+    """
+    raw_length = await source.read_object_list_index(device, 0)
+    if isinstance(raw_length, bool) or not isinstance(raw_length, int) or raw_length < 0:
+        raise ValueError(f"object-list length is not a count: {raw_length!r}")
+    total = int(raw_length)
+    objects: list[dict[str, Any]] = []
+    entries_read = 0
+    stopped: str | None = None
+    for index in range(1, min(total, _MAX_OBJECT_LIST_INDEXED_ENTRIES) + 1):
+        if ctx.is_cancelled():
+            stopped = "cancelled"
+            break
+        try:
+            raw = await source.read_object_list_index(device, index)
+        except _OBJECT_LIST_PROPAGATE:
+            raise
+        except BaseException as exc:  # noqa: BLE001 - APDU errors subclass BaseException; keep what was read
+            if _is_worker_interrupt(exc):
+                raise
+            stopped = "read_error"
+            break
+        entries_read += 1
+        entry = _object_list_entry(raw)
+        if entry is not None:
+            objects.append(entry)
+    if stopped is None and entries_read < total:
+        stopped = "entry_cap"
+    return objects, {"entries_total": total, "entries_read": entries_read, "stopped": stopped}
+
+
 def _point_record(
     device: Mapping[str, Any],
     obj: Mapping[str, Any],
@@ -1784,11 +1903,14 @@ def _point_record(
     }
     if read_error is not None:
         attributes["read_error"] = read_error
+    # A type with no present-value gets an empty observed_value: nothing was read,
+    # and nothing failed, so it carries neither a value nor a read_error.
+    no_value = read_error is not None or obj.get("object_type") in _NO_PRESENT_VALUE_TYPES
     return {
         "device_ref": device_ref,
         "point_id": obj.get("object_identifier"),
         "point_name": obj.get("object_name") or obj.get("object_identifier"),
-        "observed_value": {} if read_error is not None else {"value": _json_safe_value(present_value)},
+        "observed_value": {} if no_value else {"value": _json_safe_value(present_value)},
         "units": obj.get("units"),
         "attributes": attributes,
     }
@@ -2452,8 +2574,24 @@ async def _run_bacnet_discovery(
                 except BaseException as exc:  # noqa: BLE001 - device heard, object-list unreadable
                     if _is_worker_interrupt(exc):
                         raise
-                    result["object_list_error"] = True
-                    return result
+                    # Too big for one APDU (or timed out): read it index by index
+                    # when the backend can. Simulated/scripted backends cannot.
+                    if not (
+                        _needs_indexed_object_list(exc)
+                        and callable(getattr(source, "read_object_list_index", None))
+                    ):
+                        result["object_list_error"] = True
+                        return result
+                    try:
+                        objects, indexed = await _read_object_list_by_index(ctx, source, device)
+                    except _OBJECT_LIST_PROPAGATE:
+                        raise
+                    except BaseException as fallback_exc:  # noqa: BLE001 - length unreadable too
+                        if _is_worker_interrupt(fallback_exc):
+                            raise
+                        result["object_list_error"] = True
+                        return result
+                    result["object_list_indexed"] = indexed
                 consecutive_failures = 0
                 for index, obj in enumerate(objects):
                     if ctx.is_cancelled():
@@ -2468,6 +2606,11 @@ async def _run_bacnet_discovery(
                             "points_not_attempted": len(objects) - len(points)
                         }
                         break
+                    if obj.get("object_type") in _NO_PRESENT_VALUE_TYPES:
+                        # No present-value to ask for: list the object, skip the
+                        # request (it could only fail). Leaves the failure run alone.
+                        points.append(_point_record(device, obj, None, device_ref=asset_id))
+                        continue
                     try:
                         value = await source.read_present_value(device, obj)
                         points.append(_point_record(device, obj, value, device_ref=asset_id))
@@ -2593,6 +2736,38 @@ async def _run_bacnet_discovery(
                 # 'cancelled'/'partial' already says the scan was stopped) so the
                 # row is reconstructible as "cut, not fully read" from the artifact.
                 record_row["attributes"]["point_reads_truncated"] = truncated
+            indexed = entry.get("object_list_indexed")
+            if indexed:
+                # Kept on every fallback, complete or not, so the artifact says
+                # this device needed the index-by-index read.
+                record_row["attributes"]["object_list_indexed_read"] = indexed
+                if indexed["stopped"] in {"read_error", "entry_cap"}:
+                    not_read = indexed["entries_total"] - indexed["entries_read"]
+                    reason = (
+                        "an entry read failed"
+                        if indexed["stopped"] == "read_error"
+                        else f"the scan reads at most {_MAX_OBJECT_LIST_INDEXED_ENTRIES} entries"
+                    )
+                    issues.append(
+                        _bacnet_issue(
+                            issues,
+                            asset_id=asset_id,
+                            issue_type=ISSUE_OBJECT_LIST_PARTIAL,
+                            severity="medium",
+                            description=(
+                                f"BACnet device instance {instance} ({device.get('address')}) "
+                                "could not return its whole object-list in one reply, so the "
+                                f"scan read it one entry at a time and stopped after "
+                                f"{indexed['entries_read']} of {indexed['entries_total']} "
+                                f"entries because {reason}. The {not_read} entries not read "
+                                "are absent from the results; this device is not fully scanned."
+                            ),
+                            suggested_action=(
+                                "Re-scan this device on its own. If it keeps stopping, check "
+                                "the device's reachability and BACnet configuration."
+                            ),
+                        )
+                    )
         if target is not None:
             # Register identity travels on the asset too, so the results table can
             # show the operator's own asset name next to what answered.
