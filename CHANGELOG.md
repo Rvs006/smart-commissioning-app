@@ -19,6 +19,21 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   name carry their latest topic in the device row. Past either ceiling the count
   stays an honest lower bound, flagged as
   `capture_retention.unexpected_root_inventory_truncated`.
+- BACnet discovery no longer returns zero objects for a device that cannot
+  segment its object-list reply. When the whole-array `object-list` read Aborts
+  (segmentation-not-supported, buffer-overflow, apdu-too-long) or times out, the
+  engine reads `object-list[0]` for the length and then each entry by index,
+  with the same per-request timeout, throttle slot and Stop checks as the point
+  reads, capped at 10,000 entries. The device row records
+  `object_list_indexed_read` (`entries_total`, `entries_read`, `stopped`); if an
+  entry read fails or the cap is hit, the objects already read are kept and a
+  `bacnet_object_list_partial` issue says how many entries were not read.
+- BACnet discovery skips the present-value read for object types that have no
+  present-value (file, network-port, structured-view, device, program,
+  notification-class, trend-log and the other standard types listed in
+  `_NO_PRESENT_VALUE_TYPES`). Those objects are still listed, with an empty
+  observed value and no read error. Schedule and calendar still get read: both
+  define present-value.
 
 ## [0.1.59] - 2026-09-29
 
