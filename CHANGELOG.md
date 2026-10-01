@@ -7,8 +7,47 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- UDMI validation warns before a run when the run time is shorter than the
+  largest Expected reporting interval in the imported MQTT register. Devices that
+  report less often than the window can come back as not publishing only because
+  the capture ended first. The warning does not block Execute capture.
+  `GET /imports/latest` now returns `max_expected_reporting_interval_seconds` for
+  an `mqtt_register` import.
+
 ### Fixed
 
+- UDMI validation now measures the unexpected-device count on large sites
+  instead of reporting "at least N". The secondary lane's distinct-topic cap
+  is register-sized, so a site with more unregistered publishers than that cap
+  overflowed it and the count became a lower bound. The pre-cap capture hook now
+  keeps a topic-name-only inventory of distinct unexpected publisher roots (no
+  payload bodies, up to 100,000 roots or 32 MiB of names), and the run is marked measured when that
+  inventory did not overflow, even if payload retention did. Roots seen only by
+  name carry their latest topic in the device row. Past either ceiling the count
+  stays an honest lower bound, flagged as
+  `capture_retention.unexpected_root_inventory_truncated`.
+- BACnet discovery no longer returns zero objects for a device that cannot
+  segment its object-list reply. When the whole-array `object-list` read Aborts
+  (segmentation-not-supported, buffer-overflow, apdu-too-long) or times out, the
+  engine reads `object-list[0]` for the length and then each entry by index,
+  with the same per-request timeout, throttle slot and Stop checks as the point
+  reads, capped at 10,000 entries. The device row records
+  `object_list_indexed_read` (`entries_total`, `entries_read`, `stopped`); if an
+  entry read fails or the cap is hit, the objects already read are kept and a
+  `bacnet_object_list_partial` issue says how many entries were not read.
+- BACnet discovery skips the present-value read for object types that have no
+  present-value (file, network-port, structured-view, device, program,
+  notification-class, trend-log and the other standard types listed in
+  `_NO_PRESENT_VALUE_TYPES`). Those objects are still listed, with an empty
+  observed value and no read error. Schedule and calendar still get read: both
+  define present-value.
+- Configuration: when the Source Interface shown in the dropdown is not the
+  saved value (for example the wired adapter the page pre-selects on a fresh
+  install), a "Not saved yet" note sits under the dropdown until Save
+  Configuration. Scans read the saved value, so an unsaved pick used to look set
+  while scans failed with "No Source Interface selected".
 - `GET /runs`, `/imports/latest`, and `/udmi/schemas` no longer fail with
   `database is locked` while a scan or report write is running. Every SQLite
   session made by `session_factory` opens with `BEGIN IMMEDIATE`, so these
@@ -22,6 +61,14 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   Read-then-write transactions keep `BEGIN IMMEDIATE`. A named user's
   `last_used_at` stamp (a real write) now runs on a read at most once a
   minute per user; mutations still stamp every time.
+
+### Removed
+
+- The informational BACnet "BBMD" Enabled/Disabled toggle. Discovery never read
+  it; Foreign Device is the switch that registers with a BBMD, and the BBMD
+  Address / BBMD UDP Port fields are unchanged. A saved configuration or an
+  imported JSON file that still carries the key loads and imports without error,
+  and the key is dropped on the next save.
 
 ## [0.1.59] - 2026-09-29
 

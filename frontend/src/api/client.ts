@@ -179,6 +179,9 @@ export type ImportBatchSummary = {
   warnings?: ImportWarningRecord[];
   stored_file_name: string;
   created_at: string;
+  // mqtt_register via GET /imports/latest only: largest Expected reporting
+  // interval (seconds) across the accepted rows.
+  max_expected_reporting_interval_seconds?: number | null;
 };
 
 export type JobType =

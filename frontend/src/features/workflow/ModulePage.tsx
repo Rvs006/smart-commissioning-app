@@ -1731,6 +1731,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       ),
     queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef, selectedImportType),
   });
+  // The UDMI register's largest Expected reporting interval, for the
+  // capture-window warning below. Independent of the Setup card's selected type.
+  const udmiRegisterQuery = useQuery({
+    enabled: module.route === "udmi-validation" && udmiUseRegister && udmiUseLiveBroker,
+    queryFn: ({ signal }) =>
+      getLatestImport("mqtt_register", workspaceRef.projectId, workspaceRef.siteId, {
+        client: apiClient,
+        signal,
+      }),
+    queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef, "mqtt_register"),
+  });
   // Run retention: the page state is wiped on every navigation, so arriving at a
   // head used to look like nothing had ever run there. Ask the run store for
   // this head's own runs and re-attach one, so the monitor and results survive
@@ -2865,6 +2876,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // 48h is the queued worker's hard time limit — a longer window would be
   // killed mid-run, so refuse it up front instead of failing after two days.
   const udmiCaptureOverCap = Number(udmiCaptureSecondsEffective) > 172_800;
+  // Non-blocking: a bounded window shorter than the slowest register device's
+  // Expected reporting interval can report that device as not publishing.
+  const udmiMaxReportingInterval =
+    udmiRegisterQuery.data?.max_expected_reporting_interval_seconds ?? null;
+  const udmiCaptureWindowSeconds = Number(udmiCaptureSecondsEffective);
+  const udmiCaptureShorterThanInterval =
+    udmiUseRegister &&
+    udmiUseLiveBroker &&
+    udmiMaxReportingInterval !== null &&
+    udmiCaptureSeconds.trim() !== "" &&
+    udmiCaptureWindowSeconds > 0 &&
+    udmiCaptureWindowSeconds < udmiMaxReportingInterval;
 
   // MQTT discovery capture duration carries the same unit + 48h cap (the
   // discover_mqtt actor runs at cap + 1h). Blank/non-numeric pass through
@@ -5856,6 +5879,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     Run time exceeds the 48-hour capture limit — shorten the window.
                   </span>
                 )}
+                {udmiCaptureShorterThanInterval && (
+                  <div className="state-panel warning" role="status">
+                    <strong>Run time is shorter than the register&apos;s reporting interval</strong>
+                    <span>
+                      The slowest device in the register reports every{" "}
+                      {formatCaptureInterval(udmiMaxReportingInterval ?? 0)}, but this run captures for{" "}
+                      {formatCaptureInterval(udmiCaptureWindowSeconds)}. Devices that report less
+                      often than the run time may be listed as not publishing only because the
+                      window closed first. You can still run it.
+                    </span>
+                  </div>
+                )}
                 <p className="section-copy">
                   Blank runs until every expected asset/topic has reported or you press Stop run —
                   on the portable exe as well as the hosted worker. Every capture still ends at the
@@ -8765,6 +8800,17 @@ function udmiResultsEmptyState(input: {
   };
 }
 
+
+// "86400" -> "24 hours", "90" -> "90 seconds": whole units only, else seconds.
+function formatCaptureInterval(seconds: number): string {
+  if (seconds >= 3600 && seconds % 3600 === 0) {
+    return `${seconds / 3600} hour${seconds === 3600 ? "" : "s"}`;
+  }
+  if (seconds >= 60 && seconds % 60 === 0) {
+    return `${seconds / 60} minute${seconds === 60 ? "" : "s"}`;
+  }
+  return `${seconds} second${seconds === 1 ? "" : "s"}`;
+}
 
 function buildUdmiValidationParameters(input: {
   captureSeconds: string;

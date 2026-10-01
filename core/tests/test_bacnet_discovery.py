@@ -661,6 +661,177 @@ class BacnetDiscoveryEngineTests(unittest.TestCase):
         truncated = device_row["attributes"]["point_reads_truncated"]
         self.assertEqual(truncated["points_not_attempted"], 4)
 
+    def _segmenting_backend(
+        self,
+        object_count: int,
+        *,
+        fail_at_index: int | None = None,
+        on_index: Any = None,
+    ) -> Any:
+        """A device whose whole object-list read Aborts segmentation-not-supported.
+
+        object-list[1] is the device object itself (as on real hardware), then
+        analog-input,1..N. Records every index read so tests can see exactly
+        which requests were sent.
+        """
+
+        class AbortPDU(BaseException):
+            """Stand-in for bacpypes3.apdu.AbortPDU (a BaseException, matched by name)."""
+
+            apduAbortRejectReason = "segmentation-not-supported"
+
+        class SegmentingBackend(SimulatedBacnetBackend):
+            def __init__(self, devices: Any) -> None:
+                super().__init__(devices)
+                self.index_reads: list[int] = []
+
+            async def read_object_list(self, device: Any) -> list[dict[str, Any]]:
+                raise AbortPDU()
+
+            async def read_object_list_index(self, device: Any, index: int) -> Any:
+                self.index_reads.append(index)
+                if on_index is not None:
+                    on_index(index)
+                if index == fail_at_index:
+                    raise TimeoutError("entry read timed out")
+                entries = ["device,1001"] + [f"analog-input,{i}" for i in range(1, object_count + 1)]
+                return len(entries) if index == 0 else entries[index - 1]
+
+        return SegmentingBackend(self._many_object_device(object_count))
+
+    def _one_device_params(self) -> dict[str, Any]:
+        params = dict(_AUTHORIZED)
+        params.update({"device_instance_low": 1001, "device_instance_high": 1001})
+        return params
+
+    def test_object_list_abort_falls_back_to_indexed_reads(self) -> None:
+        store = FakeRunStore()
+        backend = self._segmenting_backend(5)
+        result, persisted = self._run(store, _ctx(store, parameters=self._one_device_params()), backend)
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(backend.index_reads, [0, 1, 2, 3, 4, 5, 6])
+        _, records = persisted[0]
+        point_rows = [r for r in records if "point_id" in r]
+        self.assertEqual([r["point_id"] for r in point_rows], [f"analog-input,{i}" for i in range(1, 6)])
+        self.assertEqual(point_rows[0]["observed_value"], {"value": 1.0})
+        device_row = next(r for r in records if r.get("device_type") == "bacnet_device")
+        self.assertNotIn("object_list_read_failed", device_row["attributes"])
+        self.assertEqual(
+            device_row["attributes"]["object_list_indexed_read"],
+            {"entries_total": 6, "entries_read": 6, "stopped": None},
+        )
+        issue_types = {i.issue_type for i in store.issues_calls[-1]}
+        self.assertNotIn("bacnet_object_list_partial", issue_types)
+        self.assertNotIn("bacnet_object_list_unreadable", issue_types)
+
+    def test_indexed_fallback_failure_keeps_partial_objects_and_flags_it(self) -> None:
+        store = FakeRunStore()
+        # Index 1 is the device itself; 2 and 3 are AI1/AI2; index 4 fails.
+        backend = self._segmenting_backend(5, fail_at_index=4)
+        result, persisted = self._run(store, _ctx(store, parameters=self._one_device_params()), backend)
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(backend.index_reads, [0, 1, 2, 3, 4])
+        _, records = persisted[0]
+        point_rows = [r for r in records if "point_id" in r]
+        self.assertEqual([r["point_id"] for r in point_rows], ["analog-input,1", "analog-input,2"])
+        device_row = next(r for r in records if r.get("device_type") == "bacnet_device")
+        self.assertEqual(
+            device_row["attributes"]["object_list_indexed_read"],
+            {"entries_total": 6, "entries_read": 3, "stopped": "read_error"},
+        )
+        partial = [i for i in store.issues_calls[-1] if i.issue_type == "bacnet_object_list_partial"]
+        self.assertEqual(len(partial), 1)
+        self.assertIn("3 of 6", partial[0].description)
+
+    def test_stop_during_indexed_fallback_stops_promptly(self) -> None:
+        store = FakeRunStore()
+        cancel_state = {"cancel": False}
+
+        def cancel_at_three(index: int) -> None:
+            if index == 3:
+                cancel_state["cancel"] = True
+
+        backend = self._segmenting_backend(50, on_index=cancel_at_three)
+        ctx = _ctx(store, parameters=self._one_device_params(), is_cancelled=lambda: cancel_state["cancel"])
+        result, persisted = self._run(store, ctx, backend)
+
+        self.assertEqual(result["status"], "cancelled")
+        # No request after the one during which Stop arrived.
+        self.assertEqual(backend.index_reads, [0, 1, 2, 3])
+        _, records = persisted[0]
+        device_row = next(r for r in records if r.get("device_type") == "bacnet_device")
+        self.assertEqual(
+            device_row["attributes"]["object_list_indexed_read"],
+            {"entries_total": 51, "entries_read": 3, "stopped": "cancelled"},
+        )
+
+    def test_stop_during_the_aborted_whole_read_sends_no_index_request(self) -> None:
+        store = FakeRunStore()
+        cancel_state = {"cancel": False}
+        backend = self._segmenting_backend(5)
+        whole_read = type(backend).read_object_list
+
+        async def stop_then_abort(self: Any, device: Any) -> list[dict[str, Any]]:
+            cancel_state["cancel"] = True
+            return await whole_read(self, device)
+
+        type(backend).read_object_list = stop_then_abort  # type: ignore[method-assign]
+        ctx = _ctx(store, parameters=self._one_device_params(), is_cancelled=lambda: cancel_state["cancel"])
+        result, _ = self._run(store, ctx, backend)
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(backend.index_reads, [])
+        asset = store.summary_calls[-1]["discovered_assets"][0]
+        self.assertTrue(asset["heard_not_enriched"])
+
+    def test_indexed_fallback_only_for_too_big_aborts_and_timeouts(self) -> None:
+        from smart_commissioning_core.engines.bacnet_discovery import _needs_indexed_object_list
+
+        class AbortPDU(BaseException):
+            def __init__(self, reason: str) -> None:
+                self.apduAbortRejectReason = reason
+
+        class SegmentationNotSupported(Exception):
+            abortReason = "segmentationNotSupported"
+
+        class ErrorPDU(BaseException):
+            apduAbortRejectReason = "unknown-property"
+
+        self.assertTrue(_needs_indexed_object_list(AbortPDU("segmentation-not-supported")))
+        self.assertTrue(_needs_indexed_object_list(AbortPDU("buffer-overflow")))
+        self.assertTrue(_needs_indexed_object_list(SegmentationNotSupported()))
+        self.assertTrue(_needs_indexed_object_list(TimeoutError()))
+        self.assertFalse(_needs_indexed_object_list(AbortPDU("security-error")))
+        self.assertFalse(_needs_indexed_object_list(ErrorPDU()))
+        self.assertFalse(_needs_indexed_object_list(ValueError("x")))
+
+    def test_present_value_not_requested_for_types_without_one(self) -> None:
+        store = FakeRunStore()
+        requested: list[str] = []
+
+        class RecordingPv(SimulatedBacnetBackend):
+            async def read_present_value(self, device: Any, obj: Any) -> Any:
+                requested.append(obj["object_identifier"])
+                return await super().read_present_value(device, obj)
+
+        objects = [
+            {"object_identifier": oid, "object_type": oid.split(",")[0], "present_value": pv}
+            for oid, pv in (("file,1", None), ("network-port,1", None), ("analog-input,1", 21.5))
+        ]
+        backend = RecordingPv([{"device_instance": 1001, "address": "10.10.0.11:47808", "objects": objects}])
+        result, persisted = self._run(store, _ctx(store, parameters=self._one_device_params()), backend)
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(requested, ["analog-input,1"])
+        _, records = persisted[0]
+        rows = {r["point_id"]: r for r in records if "point_id" in r}
+        self.assertEqual(set(rows), {"file,1", "network-port,1", "analog-input,1"})
+        self.assertEqual(rows["file,1"]["observed_value"], {})
+        self.assertNotIn("read_error", rows["file,1"]["attributes"])
+        self.assertEqual(rows["analog-input,1"]["observed_value"], {"value": 21.5})
+
     def test_worker_time_limit_interrupt_is_not_swallowed_as_a_read_error(self) -> None:
         # A dramatiq Interrupt (e.g. TimeLimitExceeded) subclasses BaseException, so
         # the per-point guard catches it — but it must be RE-RAISED, never recorded
@@ -951,6 +1122,25 @@ class Bacpypes3BackendTimeoutTests(unittest.TestCase):
                     ),
                     timeout=0.2,
                 )
+
+        asyncio.run(main())
+
+    def test_object_list_index_read_sends_the_array_index(self) -> None:
+        class RecordingApp:
+            def __init__(self) -> None:
+                self.calls: list[tuple[Any, ...]] = []
+
+            async def read_property(self, *args: Any, **kwargs: Any) -> Any:
+                self.calls.append((*args, kwargs.get("array_index")))
+                return 7
+
+        async def main() -> None:
+            app = RecordingApp()
+            backend = Bacpypes3Backend(timeout_s=0.25)
+            backend._app = app
+            device = {"address": "192.0.2.1", "device_instance": 1}
+            self.assertEqual(await backend.read_object_list_index(device, 0), 7)
+            self.assertEqual(app.calls, [("192.0.2.1", "device,1", "object-list", 0)])
 
         asyncio.run(main())
 

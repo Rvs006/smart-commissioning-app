@@ -217,6 +217,17 @@ def _validate_positive_numeric(row: dict[str, str], row_number: int, field: str)
     return []
 
 
+def _max_reporting_interval_seconds(rows: list[dict[str, object]]) -> int | None:
+    """Largest "Expected reporting interval" (whole seconds) across register rows."""
+    intervals: list[int] = []
+    for row in rows:
+        try:
+            intervals.append(int(float(str(row.get("Expected reporting interval", "")).strip())))
+        except (ValueError, OverflowError):
+            continue
+    return max(intervals, default=None)
+
+
 # Recognised trailing payload suffixes of an asset topic; stripping one yields
 # the asset's topic root (its device prefix).
 _ASSET_TOPIC_SUFFIXES = ("/#", "/state", "/metadata", "/event/pointset", "/events/pointset")
@@ -1167,7 +1178,13 @@ class ImportService:
         )
         if summary is None:
             return None
-        return ImportBatchSummary.model_validate(summary)
+        latest = ImportBatchSummary.model_validate(summary)
+        if import_type == "mqtt_register":
+            rows = self._repository.get_accepted_rows(latest.import_id)
+            latest = latest.model_copy(
+                update={"max_expected_reporting_interval_seconds": _max_reporting_interval_seconds(rows)}
+            )
+        return latest
 
     def get_import_errors(self, import_id: str) -> ImportErrorReport:
         return ImportErrorReport.model_validate(self._repository.get_errors(import_id))

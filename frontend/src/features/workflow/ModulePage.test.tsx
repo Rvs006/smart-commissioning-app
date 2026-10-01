@@ -7397,6 +7397,94 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(parameters.capture_seconds).toBe(7200);
   });
 
+  it("warns, without blocking, when the run time is shorter than the register's reporting interval", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
+        }
+        if (url.includes("/api/v1/imports/latest")) {
+          return jsonResponse({
+            import_id: "import-register-1",
+            import_type: "mqtt_register",
+            file_name: "register.csv",
+            file_type: "csv",
+            project_id: "demo-project",
+            site_id: "demo-site",
+            total_rows: 2,
+            accepted_rows: 2,
+            rejected_rows: 0,
+            status: "accepted",
+            missing_columns: [],
+            stored_file_name: "register.csv",
+            created_at: "2026-10-01T00:00:00Z",
+            max_expected_reporting_interval_seconds: 86400,
+          });
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          postedBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          return jsonResponse(udmiAccepted);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          return jsonResponse(udmiIssuesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) {
+          return jsonResponse(udmiTerminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    fireEvent.click(await screen.findByLabelText(/Validate against the imported MQTT register/i));
+    fireEvent.click(
+      await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i),
+    );
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "1" } });
+    fireEvent.change(await screen.findByLabelText(/Run time unit/i), {
+      target: { value: "hours" },
+    });
+
+    const warning = await screen.findByText(
+      /Run time is shorter than the register's reporting interval/i,
+    );
+    expect(warning.closest("[role='status']")).toHaveTextContent(
+      /reports every 24 hours, but this run captures for 1 hour/i,
+    );
+
+    // A window that covers the slowest interval clears the warning.
+    fireEvent.change(screen.getByLabelText(/Run time \(blank/i), { target: { value: "24" } });
+    expect(
+      screen.queryByText(/Run time is shorter than the register's reporting interval/i),
+    ).not.toBeInTheDocument();
+
+    // Non-blocking: a short window still runs.
+    fireEvent.change(screen.getByLabelText(/Run time \(blank/i), { target: { value: "1" } });
+    expect(
+      await screen.findByText(/Run time is shorter than the register's reporting interval/i),
+    ).toBeInTheDocument();
+    const executeButton = screen.getByRole("button", { name: "Execute capture" });
+    expect(executeButton).toBeEnabled();
+    fireEvent.click(executeButton);
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    expect(
+      (postedBody as unknown as { parameters: Record<string, unknown> }).parameters.capture_seconds,
+    ).toBe(3600);
+  });
+
   it("refuses a run time over the 48-hour worker cap without posting", async () => {
     let posted = false;
     vi.stubGlobal(

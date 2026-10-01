@@ -58,6 +58,10 @@ class ImportBatchSummary(BaseModel):
     warnings: list[ImportErrorRecord] = Field(default_factory=list)
     stored_file_name: str
     created_at: datetime
+    # mqtt_register only, filled by GET /imports/latest from the accepted rows:
+    # the largest "Expected reporting interval" (seconds), so the UDMI page can
+    # warn when a capture window is shorter than a device's reporting interval.
+    max_expected_reporting_interval_seconds: int | None = None
 
 
 class ImportErrorReport(BaseModel):
