@@ -83,3 +83,20 @@ class ImportLatestApiTests(ApiTestCase):
         response = self._latest("mqtt_register", project_id=project, site_id=_SITE)
 
         self.assertEqual(response.status_code, 404, response.text)
+
+    def test_latest_mqtt_register_reports_the_largest_reporting_interval(self) -> None:
+        # The UDMI page warns when a capture window is shorter than the slowest
+        # device's Expected reporting interval; the max comes from accepted rows.
+        project = "import-latest-interval-project"
+        rows = [
+            _ROW,
+            "Site A,BMS,FCU-05,site/b1/fcu-05/#,1.5.2,supply_air_temp,degrees-celsius,86400,MQTT",
+            "Site A,BMS,FCU-06,site/b1/fcu-06/#,1.5.2,supply_air_temp,degrees-celsius,900.0,MQTT",
+        ]
+        upload = self._upload(("\n".join([_HEADER, *rows]) + "\n").encode(), project_id=project, site_id=_SITE)
+        self.assertEqual(upload.json()["accepted_rows"], 3, upload.text)
+
+        response = self._latest("mqtt_register", project_id=project, site_id=_SITE)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["max_expected_reporting_interval_seconds"], 86400)

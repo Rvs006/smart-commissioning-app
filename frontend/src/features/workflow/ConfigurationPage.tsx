@@ -65,7 +65,7 @@ const sectionLabels: Record<ConfigurationSectionKey, string> = {
 const sectionDescriptions: Record<ConfigurationSectionKey, string> = {
   backups: "Backup schedule, retention, encryption, storage location, and restore readiness.",
   bacnet:
-    "BACnet/IP identity and discovery settings including the site internetwork, BBMD, foreign device mode, UDP ports, and TTL.",
+    "BACnet/IP identity and discovery settings including the site internetwork, foreign device registration with a BBMD, UDP ports, and TTL.",
   certificates: "TLS trust and client authentication material. Paste content or select local files; only masked server references are saved.",
   device:
     "Planned network identity of the gateway device being commissioned — reference values used by validation, not this laptop's settings. The adapter this laptop scans from is chosen under Source Interface.",
@@ -151,7 +151,6 @@ const TIMEZONE_OPTIONS = [
 
 const fieldDefinitions: Partial<Record<ConfigurationSectionKey, Record<string, FieldDefinition>>> = {
   bacnet: {
-    BBMD: { kind: "select", options: ["Enabled", "Disabled"] },
     "Foreign Device": { kind: "select", options: ["Enabled", "Disabled"] },
   },
   backups: {
@@ -214,6 +213,12 @@ const ADAPTER_TYPE_SUFFIX: Record<string, string> = {
   virtual: "Virtual — pick only if this adapter carries the site network (e.g. Hyper-V vSwitch)",
   wifi: "Wi-Fi — not recommended for commissioning traffic",
 };
+
+// The wired-first default (and any pick) is draft-only until saved, but scans
+// read the SAVED snapshot, so an unsaved pick looks set while scans still fail
+// with "No Source Interface selected".
+const SOURCE_INTERFACE_UNSAVED_NOTE =
+  "Not saved yet. Press Save Configuration to use this interface for scans.";
 
 // Advisory hint shown while Source Interface is on Auto and more than one
 // eligible adapter is up. A saved Auto is respected — the wired-first default
@@ -349,12 +354,9 @@ export function ConfigurationPage() {
       .map((iface) => iface.name),
   ).size;
 
-  // The saved snapshot is loaded as-is. It used to be run through a
-  // "normalize for locks" pass that force-reset Foreign Device to Disabled
-  // whenever BBMD was Enabled — and since the seeded default is BBMD=Enabled,
-  // that silently un-set the one BACnet setting discovery depends on, on every
-  // load, on a default install. Foreign-device registration and the BBMD toggle
-  // are independent: this app is never itself a BBMD (v0.1.12).
+  // The saved snapshot is loaded as-is (no "normalize for locks" pass). The old
+  // informational BBMD toggle that pass keyed on is removed; Foreign Device is
+  // the only BBMD-related switch, since this app is never itself a BBMD.
   useEffect(() => {
     if (configurationQuery.data) {
       const previousSaved = savedSnapshotRef.current;
@@ -833,6 +835,14 @@ export function ConfigurationPage() {
                         hint={showAutoHint ? AUTO_MULTI_ADAPTER_HINT : fieldHint(section, field, draft)}
                         kind={isSourceInterface ? "select" : (fieldDefinitions[section]?.[field]?.kind ?? "text")}
                         key={field}
+                        note={
+                          isSourceInterface &&
+                          configurationQuery.data &&
+                          value.trim() !==
+                            (configurationQuery.data.device.values[SOURCE_INTERFACE_FIELD] ?? "").trim()
+                            ? SOURCE_INTERFACE_UNSAVED_NOTE
+                            : undefined
+                        }
                         onFileSelect={(file) => handleSecretFile(field, file)}
                         onSecretChange={(content) => setSecretDrafts((current) => ({ ...current, [field]: content }))}
                         onSecretStore={() => handleSecretStore(field)}
@@ -1019,8 +1029,6 @@ const FIELD_TOOLTIPS: Record<string, string> = {
   "BACnet Network Number": "Logical BACnet network this gateway lives on.",
   "UDP Port": "BACnet/IP UDP port (default 47808).",
   "Device Instance Range": "Range of BACnet device instance IDs to discover.",
-  BBMD:
-    "Informational note that a BBMD relays BACnet broadcasts across subnets. Discovery does not read this toggle — enable Foreign Device to actually register with a BBMD.",
   "BBMD Address":
     "IP of the BBMD that discovery registers with when Foreign Device is Enabled. Must be a real BBMD on the site network; the seeded value is demo data.",
   "BBMD UDP Port": "UDP port of the BBMD (default 47808).",
@@ -1075,6 +1083,9 @@ type FieldControlProps = {
   field: string;
   hint?: string;
   kind: FieldKind;
+  // Select kind only: a live status line under the control (role=status), e.g.
+  // "this pick is not saved yet".
+  note?: string;
   onFileSelect: (file: File | null) => void;
   onSecretChange: (content: string) => void;
   onSecretStore: () => void;
@@ -1100,6 +1111,7 @@ function FieldControl({
   field,
   hint,
   kind,
+  note,
   onFileSelect,
   onSecretChange,
   onSecretStore,
@@ -1200,10 +1212,17 @@ function FieldControl({
   }
 
   if (kind === "select") {
+    const noteId = note ? `${controlId}-note` : undefined;
+    const describedBy = [hintId, noteId].filter(Boolean).join(" ") || undefined;
     return (
       <label title={FIELD_TOOLTIPS[field]}>
         {field}
-        <select disabled={disabled} onChange={(event) => onValueChange(event.target.value)} value={value}>
+        <select
+          aria-describedby={describedBy}
+          disabled={disabled}
+          onChange={(event) => onValueChange(event.target.value)}
+          value={value}
+        >
           {!options.includes(value) && value !== "" && <option value={value}>{value}</option>}
           {options.map((option) => (
             <option key={option} value={option}>
@@ -1211,7 +1230,12 @@ function FieldControl({
             </option>
           ))}
         </select>
-        {hint && <small>{hint}</small>}
+        {hint && <small id={hintId}>{hint}</small>}
+        {note && (
+          <small id={noteId} role="status">
+            {note}
+          </small>
+        )}
       </label>
     );
   }

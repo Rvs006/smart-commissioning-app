@@ -133,8 +133,8 @@ class ConfigurationReviewTests(unittest.TestCase):
         self.assertIn("Encrypted Backups must be Enabled or Disabled.", result.errors)
 
     def test_bbmd_and_foreign_device_can_both_be_enabled(self) -> None:
-        # v0.1.12 removed the old mutual-exclusion lock. BBMD is now informational
-        # and Foreign Device is what discovery uses to register with a BBMD, so an
+        # v0.1.12 removed the old mutual-exclusion lock, and the informational BBMD
+        # toggle itself is now removed (a legacy key is dropped on load). Foreign Device is what discovery uses to register with a BBMD, so an
         # operator MUST be able to enable both — the former rule ("Foreign Device
         # must be Disabled when BBMD is Enabled") blocked exactly the configuration
         # the BACnet fix requires.

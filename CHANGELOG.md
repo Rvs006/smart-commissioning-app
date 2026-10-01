@@ -7,6 +7,31 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- UDMI validation warns before a run when the run time is shorter than the
+  largest Expected reporting interval in the imported MQTT register. Devices that
+  report less often than the window can come back as not publishing only because
+  the capture ended first. The warning does not block Execute capture.
+  `GET /imports/latest` now returns `max_expected_reporting_interval_seconds` for
+  an `mqtt_register` import.
+
+### Fixed
+
+- Configuration: when the Source Interface shown in the dropdown is not the
+  saved value (for example the wired adapter the page pre-selects on a fresh
+  install), a "Not saved yet" note sits under the dropdown until Save
+  Configuration. Scans read the saved value, so an unsaved pick used to look set
+  while scans failed with "No Source Interface selected".
+
+### Removed
+
+- The informational BACnet "BBMD" Enabled/Disabled toggle. Discovery never read
+  it; Foreign Device is the switch that registers with a BBMD, and the BBMD
+  Address / BBMD UDP Port fields are unchanged. A saved configuration or an
+  imported JSON file that still carries the key loads and imports without error,
+  and the key is dropped on the next save.
+
 ## [0.1.59] - 2026-09-29
 
 The three scanner screens (IP Discovery, BACnet Discovery, MQTT Discovery) were
