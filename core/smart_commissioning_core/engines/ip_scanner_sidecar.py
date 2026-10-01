@@ -311,6 +311,14 @@ def _map_result(
             # the same laundering register_rows_from_devices refuses. ip_address
             # IS kept: that address was genuinely probed.
             expected_hostname = row.get("expectedHostname") or row.get("hostname") or None
+            # True only when this address really sat inside the swept range;
+            # None when it cannot be told. Never a blanket claim. Computed once
+            # and stamped on BOTH the observation row and the report list: the
+            # results table and the detail panel read it off the observation (it
+            # is the row the operator clicks), the signed report reads the list,
+            # and the two must never disagree about whether a silent host was
+            # actually contacted.
+            probe_sent = _probed_directly(ip, scan_query)
             discovered_assets.append(
                 json_safe_value(
                     {
@@ -325,6 +333,11 @@ def _map_result(
                         "last_seen_at": None,
                         "rag": rag,
                         "register": register,
+                        # Extra field on DiscoveryAssetObservation (extra="allow").
+                        # Without it the screen fell back to "Not recorded for
+                        # this run" on every silent host, while the engine had
+                        # computed the answer and put it in the report.
+                        "directed_probe_sent": probe_sent,
                     }
                 )
             )
@@ -334,9 +347,7 @@ def _map_result(
                     "asset_name": expected_hostname,
                     "address": ip,
                     "expected_ports": list(row.get("expectedPorts") or []),
-                    # True only when this address really sat inside the swept
-                    # range; None when it cannot be told. Never a blanket claim.
-                    "directed_probe_sent": _probed_directly(ip, scan_query),
+                    "directed_probe_sent": probe_sent,
                 }
             )
 
@@ -753,25 +764,37 @@ def _demo() -> None:
     }, result.discovered_assets
     silent = result.result_summary_extra["expected_not_responding"]
     assert [entry["address"] for entry in silent] == ["192.0.2.12"], silent
-    # 192.0.2.12 sits inside the swept range, so it really was pinged.
+    # 192.0.2.12 sits inside the swept range, so it really was pinged. The SAME
+    # answer has to reach the observation row: the report list feeds the signed
+    # PDF, the observation feeds the screen, and a screen reading "not recorded"
+    # over a report reading "probed" is the bug this pair exists to stop.
     assert silent[0]["directed_probe_sent"] is True, silent
+    assert missing_asset["directed_probe_sent"] is True, missing_asset
     # A register host OUTSIDE the swept range was never touched; claiming it was
     # probed would be a fabrication, so the engine says so.
-    out_of_range = _map_result(
+    out_of_range_result = _map_result(
         [{"ip": "198.51.100.7", "register": "missing", "rag": "red",
           "status": "unreachable", "openPorts": []}],
         {},
         {"start_ip": "192.0.2.1", "end_ip": "192.0.2.99"},
-    ).result_summary_extra["expected_not_responding"]
+    )
+    out_of_range = out_of_range_result.result_summary_extra["expected_not_responding"]
     assert out_of_range[0]["directed_probe_sent"] is False, out_of_range
+    assert out_of_range_result.discovered_assets[0]["directed_probe_sent"] is False, (
+        out_of_range_result.discovered_assets
+    )
     # No recorded range -> unknowable, never a guess in either direction.
-    unknown = _map_result(
+    unknown_result = _map_result(
         [{"ip": "192.0.2.12", "register": "missing", "rag": "red",
           "status": "unreachable", "openPorts": []}],
         {},
         {},
-    ).result_summary_extra["expected_not_responding"]
+    )
+    unknown = unknown_result.result_summary_extra["expected_not_responding"]
     assert unknown[0]["directed_probe_sent"] is None, unknown
+    assert unknown_result.discovered_assets[0]["directed_probe_sent"] is None, (
+        unknown_result.discovered_assets
+    )
     # observed_ports must be {port, protocol} objects (readback schema shape),
     # never raw ints - the exact gap that shipped once. udp is tagged from openUdp.
     for asset in result.discovered_assets:

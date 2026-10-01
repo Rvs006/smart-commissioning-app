@@ -80,10 +80,16 @@ export function App() {
   const pageTitle = pageTitles[location.pathname] ?? "Workspace";
   const pageSubtitle = pageSubtitles[location.pathname] ?? "Commissioning workflow.";
   // The UDMI Workbench owns a compact title-and-metrics header inside its page
-  // content. Suppress the shell title there only, otherwise the same title is
-  // repeated above the restored metric cards and the first screen is split in
-  // two. Every other route keeps the shared shell title unchanged.
-  const pageOwnsTitle = location.pathname === "/udmi-validation";
+  // content, and the two native scanner screens own the mockup's eyebrow +
+  // title + one-line purpose. Suppress the shell title on those routes only,
+  // otherwise the same title is repeated above the page's own header and the
+  // first screen is split in two. Every other route keeps the shared shell
+  // title unchanged.
+  const pageOwnsTitle =
+    location.pathname === "/udmi-validation" ||
+    location.pathname === "/ip-scanner" ||
+    location.pathname === "/bacnet-scanner" ||
+    location.pathname === "/mqtt-scanner";
 
   // The Users entry is admin-only; everyone else never sees it (the route itself
   // stays admin-gated server-side, so this is a UX nicety, not security). It

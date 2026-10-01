@@ -1,0 +1,110 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
+import { clearApiKey, setApiKey } from "../api/client";
+import { SessionProvider } from "./session";
+import { useSession, type SessionContextValue } from "./sessionContext";
+
+// `npm run dev` wraps the app in React.StrictMode (main.tsx), which mounts the
+// tree, runs every effect cleanup, then remounts it with the SAME memoized
+// apiClient. The provider's cleanup aborts that client, so if the client stayed
+// aborted every request the remounted tree issued (the /me query included)
+// would reject with "signal is aborted without reason" and the whole dev
+// session would read as API-offline. The production build never double-mounts,
+// so only a StrictMode render catches the regression.
+
+function jsonResponse(payload: unknown): Response {
+  return {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => payload,
+  } as unknown as Response;
+}
+
+function RoleProbe() {
+  const { error, isLoading, role } = useSession();
+  return (
+    <output>
+      {isLoading
+        ? "loading"
+        : error instanceof Error
+          ? `error: ${error.message}`
+          : (role ?? "none")}
+    </output>
+  );
+}
+
+describe("SessionProvider under React.StrictMode", () => {
+  afterEach(() => {
+    clearApiKey();
+    vi.unstubAllGlobals();
+  });
+
+  it("still resolves /me after StrictMode's simulated unmount and remount", async () => {
+    setApiKey("strict-mode-key");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        // Real fetch rejects outright when handed an already-aborted signal.
+        if (init?.signal?.aborted) {
+          throw init.signal.reason;
+        }
+        return jsonResponse({ username: "engineer-1", role: "engineer", source: "user_key" });
+      }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    render(
+      <StrictMode>
+        <QueryClientProvider client={queryClient}>
+          <SessionProvider>
+            <RoleProbe />
+          </SessionProvider>
+        </QueryClientProvider>
+      </StrictMode>,
+    );
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("engineer"));
+  });
+
+  it("keeps the old client aborted after sign-out and after unmount", async () => {
+    setApiKey("strict-mode-key");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ username: "engineer-1", role: "engineer", source: "user_key" }),
+      ),
+    );
+    const seen: SessionContextValue[] = [];
+    const latest = () => seen[seen.length - 1];
+    function Capture() {
+      seen.push(useSession());
+      return null;
+    }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    const view = render(
+      <StrictMode>
+        <QueryClientProvider client={queryClient}>
+          <SessionProvider>
+            <Capture />
+          </SessionProvider>
+        </QueryClientProvider>
+      </StrictMode>,
+    );
+    await waitFor(() => expect(latest()?.role).toBe("engineer"));
+
+    const signedInClient = latest().apiClient;
+    expect(signedInClient.signal.aborted).toBe(false);
+    act(() => latest().signOut());
+    // A delayed poll holding the signed-in client must not reach the API again.
+    expect(signedInClient.signal.aborted).toBe(true);
+
+    const currentClient = latest().apiClient;
+    expect(currentClient).not.toBe(signedInClient);
+    view.unmount();
+    await Promise.resolve();
+    expect(currentClient.signal.aborted).toBe(true);
+  });
+});

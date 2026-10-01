@@ -229,6 +229,43 @@ class RegisterRowVisibilityTest(unittest.TestCase):
     def test_missing_asset_parses_against_the_readback_schema(self) -> None:
         DiscoveryAssetObservation(**self._assets()["10.0.0.3"])
 
+    def test_the_observation_row_carries_the_same_probe_claim_as_the_report(self) -> None:
+        # The screen reads directed_probe_sent off the OBSERVATION; the signed
+        # report reads it off result_summary.expected_not_responding. Stamping
+        # only the report left every silent host on screen saying "Probe sent:
+        # Not recorded for this run" while the engine had already worked it out.
+        result = _map_result(self.ROWS, {}, {"start_ip": "10.0.0.1", "end_ip": "10.0.0.50"})
+        missing = next(a for a in result.discovered_assets if a["register"] == "missing")
+        reported = result.result_summary_extra["expected_not_responding"][0]
+        self.assertIs(missing["directed_probe_sent"], True)
+        self.assertIs(missing["directed_probe_sent"], reported["directed_probe_sent"])
+        # extra="allow" has to carry it through the readback schema, or the field
+        # is dropped between the engine and the page.
+        parsed = DiscoveryAssetObservation(**missing)
+        self.assertIs(parsed.model_dump()["directed_probe_sent"], True)
+
+    def test_the_observation_row_reports_false_and_none_too(self) -> None:
+        # All three answers travel, not just the true one: False is "we swept a
+        # range and this address was not in it", None is "we cannot tell".
+        rows = [
+            {"ip": "10.0.0.3", "register": "missing", "rag": "red",
+             "status": "unreachable", "openPorts": []},
+            {"ip": "198.51.100.7", "register": "missing", "rag": "red",
+             "status": "unreachable", "openPorts": []},
+        ]
+        in_range = _map_result(rows, {}, {"start_ip": "10.0.0.1", "end_ip": "10.0.0.50"})
+        self.assertEqual(
+            [a["directed_probe_sent"] for a in in_range.discovered_assets],
+            [True, False],
+        )
+        no_range = _map_result(rows, {}, {})
+        self.assertEqual(
+            [a["directed_probe_sent"] for a in no_range.discovered_assets],
+            [None, None],
+        )
+        for asset in in_range.discovered_assets + no_range.discovered_assets:
+            DiscoveryAssetObservation(**asset)
+
     def test_summary_carries_all_six_register_counters(self) -> None:
         summary = {"expected": 3, "reachable": 3, "expectedReachable": 2,
                    "matches": 1, "partial": 1, "missing": 1, "rogue": 1}

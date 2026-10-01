@@ -24,6 +24,7 @@ from smart_commissioning_core.engines.mqtt_scanner_sidecar import (
     _map_manifest,
     _norm_point,
     _register_csv,
+    _retained_from_snapshot_tree,
     _root_filter,
     register_rows_from_topics,
 )
@@ -85,6 +86,131 @@ class ManifestContractTest(unittest.TestCase):
         self.assertEqual(record["topic"], "udmi/site/x/ahu/01/events/pointset")
         self.assertEqual(record["attributes"]["device_ref"], "AHU-01")
         self.assertEqual(record["attributes"]["schema"], "udmi-v2")
+
+
+class RetainedFlagContractTest(unittest.TestCase):
+    """The Ret column read "-" on every captured topic because nothing mapped the
+    retained flag. It is NOT in the export archive: the manifest's assets carry
+    only asset/matched/schema/site/room/gatewayId/topics/points. It reaches the
+    wire on the tree snapshot's leaves, so that is what the adapter reads."""
+
+    def test_the_export_manifest_carries_no_retained_flag(self) -> None:
+        # Pins the mistake this replaced: an earlier fix read a topicsDetail[]
+        # entry off the manifest. The manifest asset literal has no such key, so
+        # that lookup could never hit and the fixture that "proved" it was
+        # inventing the field. If the vendored tool ever does export per-topic
+        # detail, this fails and the adapter can read it directly.
+        literal = _SERVER_JS.split("manifestAssets.push({")[1].split("});")[0]
+        self.assertNotIn("topicsDetail", literal)
+        self.assertIn("topics: Array.from(a.topics)", literal)
+
+    def test_the_tree_snapshot_leaf_carries_it_as_an_absent_or_1_flag(self) -> None:
+        # ret is set ONLY when retained, so a leaf without the key is a real
+        # "not retained" and a topic with no leaf at all is unknown.
+        self.assertIn("if (k.retained) o.ret = 1", _SERVER_JS)
+        self.assertIn("node.retained = t.retained", _SERVER_JS)
+
+    def test_retained_and_not_retained_topics_map_to_json_booleans(self) -> None:
+        # The real snapshot shape: n/p/ch for structure, leaf/ret/c/sc on leaves.
+        snapshot_tree = [
+            {
+                "n": "site", "p": "site", "t": 2, "m": 5, "r": 0.4, "mt": 1,
+                "ch": [
+                    {
+                        "n": "x", "p": "site/x", "t": 2, "m": 5, "r": 0.4, "mt": 1,
+                        "ch": [
+                            {
+                                "n": "ahu", "p": "site/x/ahu", "t": 2, "m": 5, "r": 0.4, "mt": 1,
+                                "ch": [
+                                    {
+                                        "n": "01", "p": "site/x/ahu/01", "t": 2, "m": 5,
+                                        "r": 0.4, "mt": 1, "dev": 1, "a": "AHU-01",
+                                        "ch": [
+                                            # Retained: ret present.
+                                            {
+                                                "n": "state", "p": "site/x/ahu/01/state",
+                                                "t": 1, "m": 1, "r": 0.1, "mt": 1,
+                                                "leaf": 1, "sc": "state", "ret": 1, "c": 1,
+                                            },
+                                            # Not retained: ret simply absent.
+                                            {
+                                                "n": "pointset",
+                                                "p": "site/x/ahu/01/events/pointset",
+                                                "t": 1, "m": 4, "r": 0.3, "mt": 1,
+                                                "leaf": 1, "sc": "pointset", "c": 4,
+                                            },
+                                        ],
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+        ]
+        retained = _retained_from_snapshot_tree(snapshot_tree)
+        self.assertEqual(
+            retained,
+            {"site/x/ahu/01/state": True, "site/x/ahu/01/events/pointset": False},
+        )
+
+        manifest = {
+            "assetCount": 1, "topicCount": 2,
+            "assets": [{
+                "asset": "AHU-01", "matched": True,
+                "topics": ["site/x/ahu/01/state", "site/x/ahu/01/events/pointset"],
+            }],
+        }
+        payloads = {
+            "site/x/ahu/01/state": {"raw": '{"a":1}', "history_count": 1},
+            "site/x/ahu/01/events/pointset": {"raw": '{"b":2}', "history_count": 4},
+        }
+        result = _map_manifest(manifest, payloads, [], {}, retained_by_topic=retained)
+        by_topic = {record["topic"]: record["attributes"] for record in result.structured_records}
+        # Identity, not truthiness: the frontend distinguishes True / False /
+        # ABSENT, so "yes" / "no" / "-" stay three different answers.
+        self.assertIs(by_topic["site/x/ahu/01/state"]["last_retained"], True)
+        self.assertIs(by_topic["site/x/ahu/01/events/pointset"]["last_retained"], False)
+
+    def test_a_topic_missing_from_the_snapshot_leaves_the_key_absent(self) -> None:
+        # The tree is capped at TREE_NODE_CAP nodes, so a wide capture returns a
+        # partial tree. A topic it never listed is unknown, never "not retained".
+        manifest = {
+            "assets": [{
+                "asset": "AHU-01",
+                "topics": ["site/x/ahu/01/state", "site/x/ahu/02/state"],
+            }],
+        }
+        payloads = {
+            "site/x/ahu/01/state": {"raw": "{}", "history_count": 1},
+            "site/x/ahu/02/state": {"raw": "{}", "history_count": 1},
+        }
+        result = _map_manifest(
+            manifest, payloads, [], {},
+            retained_by_topic={"site/x/ahu/01/state": True},
+        )
+        by_topic = {record["topic"]: record["attributes"] for record in result.structured_records}
+        self.assertIs(by_topic["site/x/ahu/01/state"]["last_retained"], True)
+        self.assertNotIn("last_retained", by_topic["site/x/ahu/02/state"])
+
+    def test_no_snapshot_at_all_leaves_every_topic_unknown(self) -> None:
+        # A failed or timed-out snapshot must not fail a completed capture, and
+        # must not turn every topic into an asserted "not retained".
+        manifest = {"assets": [{"asset": "AHU-01", "topics": ["site/x/ahu/01/state"]}]}
+        payloads = {"site/x/ahu/01/state": {"raw": "{}", "history_count": 1}}
+        result = _map_manifest(manifest, payloads, [], {}, retained_by_topic=None)
+        self.assertNotIn("last_retained", result.structured_records[0]["attributes"])
+
+    def test_delivery_qos_is_never_fabricated(self) -> None:
+        # The vendored tool records no per-message QoS, so the adapter must not
+        # invent one from the run's subscription QoS parameter.
+        manifest = {"assets": [{"asset": "AHU-01", "topics": ["site/x/ahu/01/state"]}]}
+        payloads = {"site/x/ahu/01/state": {"raw": "{}", "history_count": 1}}
+        result = _map_manifest(
+            manifest, payloads, [], {"qos": 1},
+            retained_by_topic={"site/x/ahu/01/state": True},
+        )
+        self.assertNotIn("last_qos", result.structured_records[0]["attributes"])
 
 
 class LastPayloadDictContractTest(unittest.TestCase):
