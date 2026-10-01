@@ -7,6 +7,19 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Fixed
+
+- UDMI validation now measures the unexpected-device count on large sites
+  instead of reporting "at least N". The secondary lane's distinct-topic cap
+  is register-sized, so a site with more unregistered publishers than that cap
+  overflowed it and the count became a lower bound. The pre-cap capture hook now
+  keeps a topic-name-only inventory of distinct unexpected publisher roots (no
+  payload bodies, up to 100,000 roots), and the run is marked measured when that
+  inventory did not overflow, even if payload retention did. Roots seen only by
+  name carry their latest topic in the device row. Past 100,000 roots the count
+  stays an honest lower bound, flagged as
+  `capture_retention.unexpected_root_inventory_truncated`.
+
 ## [0.1.59] - 2026-09-29
 
 The three scanner screens (IP Discovery, BACnet Discovery, MQTT Discovery) were
