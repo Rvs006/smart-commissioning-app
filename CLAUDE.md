@@ -70,9 +70,23 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-09-29. The latest public release is
-  v0.1.59, and field acceptance for it stays open until recorded privately.
-  v0.1.59 ships #219 (register RAG rows, Missing rows, six
+- **Current handoff**: status as of 2026-10-01. The latest public release is
+  v0.1.60, and field acceptance for it stays open until recorded privately.
+  v0.1.60 ships #227/#232 (pure GET paths such as runs, imports/latest,
+  udmi/schemas and the scope checks read through the query-only session, so
+  they stop failing with `database is locked` behind a writer; read-then-write
+  paths keep `BEGIN IMMEDIATE`; a named user's `last_used_at` is stamped at most
+  once a minute on reads), #229 (BACnet object-list read by index when the
+  whole-array read Aborts or times out, capped at 10,000 entries, partial reads
+  flagged; present-value skipped on object types without it), #230 (UDMI
+  unexpected-device count measured past the secondary payload cap through a
+  topic-name-only pre-cap inventory, 100,000 roots / 32 MiB, else an honest
+  lower bound) and #231 (Configuration "Not saved yet" note for an unsaved
+  Source Interface, the informational BBMD toggle removed with old configs still
+  loading, and a UDMI warning when the run time is shorter than the largest
+  Expected reporting interval via `max_expected_reporting_interval_seconds` on
+  `GET /imports/latest`). No database migration; the Alembic head stays
+  a6b7c8d9e0f1. v0.1.59 shipped #219 (register RAG rows, Missing rows, six
   counters), #218 (register CSV download, MQTT live save-as-register, confirm
   before a direct config send), #220/#221/#222 (the scanner page rebuild below),
   #224 (Reports tab reads without the SQLite write lock; bulk delete fixed), #226

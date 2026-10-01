@@ -43,30 +43,30 @@ Status meanings:
 
 | Area | Status | Documents |
 | --- | --- | --- |
-| Internal portable release | v0.1.59 (latest) | [Release notes](release-notes-v0.1.59.md), [validation](release-validation-v0.1.59.md), and [rollback](migration-rollback-v0.1.59.md) |
-| Hosted Docker | v0.1.59 (latest) | [Docker deployment and rollback](docker-deployment-rollback-v0.1.59.md) |
+| Internal portable release | v0.1.60 (latest) | [Release notes](release-notes-v0.1.60.md), [validation](release-validation-v0.1.60.md), and [rollback](migration-rollback-v0.1.60.md) |
+| Hosted Docker | v0.1.60 (latest) | [Docker deployment and rollback](docker-deployment-rollback-v0.1.60.md) |
 | Portable rebuild | Current | [Portable bundle rebuild](portable-bundle-rebuild.md) |
 | MQTT identities and ACLs | Versioned for v0.1.26 | [MQTT client IDs and broker ACLs](mqtt-client-id-and-acl.md) |
 | Inline ownership | Versioned for v0.1.27 | [Inline heartbeat](inline-heartbeat-v0.1.27.md) |
 | Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md), [v0.1.31](migration-rollback-v0.1.31.md), [v0.1.36](migration-rollback-v0.1.36.md), [v0.1.37](migration-rollback-v0.1.37.md), [v0.1.38](migration-rollback-v0.1.38.md), [v0.1.39](migration-rollback-v0.1.39.md), [v0.1.40](migration-rollback-v0.1.40.md), [v0.1.41](migration-rollback-v0.1.41.md), and [v0.1.42](migration-rollback-v0.1.42.md) |
 | Sync design | Current | [Architecture](sync-architecture.md), [wire format](sync-v2-wire-format.md), [credential scope](sync-v2-credential-scope.md), [operations](sync-v2-operations.md) |
 
-## v0.1.59 release record
+## v0.1.60 release record
 
-v0.1.59 is the latest published release. It rebuilds the IP, BACnet, and MQTT
-scanner screens as dedicated pages with the register verdict on every row, a
-red Missing row for each silent register device, a `register.csv` download,
-and a live-first MQTT page. It also stops the Reports tab holding the SQLite
-write lock while it reads, and keeps UDMI validation reporting correct after
-the observation-only MQTT lane overflows. No engine, route, or run parameter
-moved for the scanners. It adds no database migration.
+v0.1.60 is the latest published release. Plain reads (runs, the latest import,
+UDMI schemas, scope checks) no longer fail with `database is locked` while a
+scan or report is writing. BACnet discovery reads the object list one entry at a
+time when a device cannot send it whole. UDMI validation measures the
+unexpected-device count on large sites, and warns when the run time is shorter
+than the largest expected reporting interval. Configuration flags a Source
+Interface that is shown but not saved. It adds no database migration.
 
-- [Release notes](release-notes-v0.1.59.md)
-- [Release validation record](release-validation-v0.1.59.md)
-- [Migration and rollback](migration-rollback-v0.1.59.md)
-- [Docker deployment and rollback](docker-deployment-rollback-v0.1.59.md)
-- [Field acceptance checklist](v0.1.59-field-acceptance-checklist.md)
-- [Evidence manifest](v0.1.59-evidence-manifest.md)
+- [Release notes](release-notes-v0.1.60.md)
+- [Release validation record](release-validation-v0.1.60.md)
+- [Migration and rollback](migration-rollback-v0.1.60.md)
+- [Docker deployment and rollback](docker-deployment-rollback-v0.1.60.md)
+- [Field acceptance checklist](v0.1.60-field-acceptance-checklist.md)
+- [Evidence manifest](v0.1.60-evidence-manifest.md)
 - [Nmap operator guide](nmap-one-click-operator-guide.md)
 
 ## v0.1.53 release record
