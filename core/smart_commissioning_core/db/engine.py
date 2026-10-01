@@ -175,10 +175,14 @@ def query_session_factory(engine: Engine) -> sessionmaker[Session]:
     that connection-local flag before the handle can serve a later writer.
     Other databases receive an ordinary read-oriented session with autoflush
     disabled; mutation sessions and their locking behavior remain unchanged.
+
+    Like ``session_factory``, building the factory never touches the engine, so
+    a repository constructed without one (``engine=None`` on DB-less paths)
+    fails only if it actually queries.
     """
     bind = (
         engine.execution_options(**{_SQLITE_QUERY_SESSION_OPTION: True})
-        if engine.dialect.name == "sqlite"
+        if engine is not None and engine.dialect.name == "sqlite"
         else engine
     )
     return sessionmaker(

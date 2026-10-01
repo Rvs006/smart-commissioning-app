@@ -57,6 +57,19 @@ this release.
   install), a "Not saved yet" note sits under the dropdown until Save
   Configuration. Scans read the saved value, so an unsaved pick used to look set
   while scans failed with "No Source Interface selected".
+- `GET /runs`, `/imports/latest`, and `/udmi/schemas` no longer fail with
+  `database is locked` while a scan or report write is running. Every SQLite
+  session made by `session_factory` opens with `BEGIN IMMEDIATE`, so these
+  pure reads queued behind the writer and gave up after the 5 s busy timeout.
+  They now read through `query_session_factory` (deferred `BEGIN`, query-only),
+  which WAL never blocks. Covered: the read methods of the import, UDMI schema
+  set, configuration, discovery, sync, and user repositories; the run store's
+  `list_runs`, cancel poll, and sync accessors; the per-request scope-grant
+  and import/run ownership checks; and the run-store readiness probe and
+  runs-by-status metrics gauge.
+  Read-then-write transactions keep `BEGIN IMMEDIATE`. A named user's
+  `last_used_at` stamp (a real write) now runs on a read at most once a
+  minute per user; mutations still stamp every time.
 
 ### Removed
 
