@@ -3348,29 +3348,52 @@ describe("ModulePage reports wiring", () => {
     await waitFor(() => expect(exportSelected).toBeEnabled());
   });
 
-  it("opens on the newest 10 reports and loads older ones on request", async () => {
-    const reportRequests: string[] = [];
+  it("opens on the newest 10 reports and pages older ones in by offset", async () => {
+    const stored = Array.from({ length: 12 }, (_, index) => ({
+      report_id: `rep-page-${index + 1}`,
+      report_type: "issue_report",
+      output_format: "xlsx",
+      status: "succeeded",
+      file_name: `paged_report_${index + 1}.xlsx`,
+      created_at: "2026-07-15T10:00:00Z",
+      source_run_ids: [],
+    }));
+    const reportRequests: URLSearchParams[] = [];
+    const deletionBodies: Array<{ report_ids: string[] }> = [];
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
-        if (url.includes("/api/v1/runs?")) {
-          return jsonResponse({ runs: [] });
-        }
-        if (url.endsWith("/api/v1/me")) {
-          return jsonResponse(mePayload);
-        }
-        if (url.endsWith("/api/v1/imports/profiles")) {
-          return jsonResponse(profilesPayload);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/reports/delete") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { report_ids: string[] };
+          deletionBodies.push(body);
+          for (const reportId of body.report_ids) {
+            stored.splice(
+              stored.findIndex((report) => report.report_id === reportId),
+              1,
+            );
+          }
+          return jsonResponse({
+            deleted_report_ids: body.report_ids,
+            deleted_count: body.report_ids.length,
+            artifact_cleanup_warnings: [],
+          });
         }
         if (url.split("?")[0].endsWith("/api/v1/reports")) {
-          reportRequests.push(url);
-          const expanded = url.includes("limit=20");
+          const params = new URLSearchParams(url.split("?")[1] ?? "");
+          reportRequests.push(params);
+          const limit = Number(params.get("limit"));
+          const offset = Number(params.get("offset"));
           return jsonResponse({
-            ...reportsPayload,
-            total: 25,
-            limit: expanded ? 20 : 10,
-            has_more: true,
+            reports: stored.slice(offset, offset + limit),
+            total: stored.length,
+            limit,
+            offset,
+            has_more: offset + limit < stored.length,
           });
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
@@ -3379,10 +3402,92 @@ describe("ModulePage reports wiring", () => {
 
     renderModule("reports");
 
-    const showOlder = await screen.findByRole("button", { name: /Show older reports/i });
-    expect(reportRequests[0]).toContain("limit=10");
+    const showOlder = await screen.findByRole("button", {
+      name: "Show older reports (2 more)",
+    });
+    expect(reportRequests.map((params) => params.toString())).toEqual(["limit=10&offset=0"]);
+    expect(screen.getByLabelText(/Select report paged_report_10.xlsx/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Select report paged_report_11.xlsx/i)).not.toBeInTheDocument();
+
     fireEvent.click(showOlder);
-    await waitFor(() => expect(reportRequests.some((url) => url.includes("limit=20"))).toBe(true));
+
+    expect(
+      await screen.findByLabelText(/Select report paged_report_12.xlsx/i),
+    ).toBeInTheDocument();
+    expect(reportRequests.map((params) => params.toString())).toEqual([
+      "limit=10&offset=0",
+      "limit=10&offset=10",
+    ]);
+    // The second page appends; the first page's rows stay.
+    expect(screen.getByLabelText(/Select report paged_report_1.xlsx/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Show older reports/i })).not.toBeInTheDocument();
+
+    // A row from the later page deletes out of the cache straight away.
+    fireEvent.click(screen.getByRole("button", { name: "Delete report paged_report_11.xlsx" }));
+    await waitFor(() => expect(deletionBodies).toEqual([{ report_ids: ["rep-page-11"] }]));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Delete report paged_report_11.xlsx" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Delete report paged_report_12.xlsx" })).toHaveFocus();
+    expect(screen.getByLabelText(/Select report paged_report_1.xlsx/i)).toBeInTheDocument();
+  });
+
+  it("re-reads loaded report pages when another session changes the list between clicks", async () => {
+    const stored = Array.from({ length: 12 }, (_, index) => ({
+      report_id: `rep-page-${index + 1}`,
+      report_type: "issue_report",
+      output_format: "xlsx",
+      status: "succeeded",
+      file_name: `paged_report_${index + 1}.xlsx`,
+      created_at: "2026-07-15T10:00:00Z",
+      source_run_ids: [],
+    }));
+    const reportRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
+          const params = new URLSearchParams(url.split("?")[1] ?? "");
+          reportRequests.push(params.toString());
+          const limit = Number(params.get("limit"));
+          const offset = Number(params.get("offset"));
+          return jsonResponse({
+            reports: stored.slice(offset, offset + limit),
+            total: stored.length,
+            limit,
+            offset,
+            has_more: offset + limit < stored.length,
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("reports");
+    const showOlder = await screen.findByRole("button", {
+      name: "Show older reports (2 more)",
+    });
+    // Another session deletes a first-page report: paged_report_11 moves to
+    // offset 9, so offset 10 alone would skip it.
+    stored.splice(0, 1);
+    fireEvent.click(showOlder);
+
+    expect(
+      await screen.findByLabelText(/Select report paged_report_11.xlsx/i),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/Select report paged_report_12.xlsx/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Select report paged_report_1.xlsx/i)).not.toBeInTheDocument();
+    expect(reportRequests.slice(0, 3)).toEqual([
+      "limit=10&offset=0",
+      "limit=10&offset=10",
+      "limit=10&offset=0",
+    ]);
   });
 
   function stubReports(onDownload?: (url: string) => void, payload: unknown = reportsPayload) {

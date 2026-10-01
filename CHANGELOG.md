@@ -217,6 +217,11 @@ database migration in this release.
     header now reads "reports stored" (the archive total) and "newest shown".
   - The Home dashboard's evidence-pack count polls with `limit=1` and reads
     `total`, instead of pulling 100 verified reports every 15 s.
+- Reports older than the newest 100 are reachable again. "Show older reports"
+  now fetches the next 10 with `offset` and appends them, instead of re-asking
+  for a bigger `limit` that the API caps at 100. Each click still costs one
+  10-row page of server-side verification, whatever has already been loaded.
+  Deleting a report removes it from every loaded page straight away.
 - The "Register already imported" note now refreshes after an upload or a
   save-as-register instead of showing the previous register until the page is
   reloaded. The refresh was asking for a query key with an empty import-type
