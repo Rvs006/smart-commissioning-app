@@ -75,7 +75,8 @@ collection order is alphabetical - keep it so.
   v0.1.59 ships #219 (register RAG rows, Missing rows, six
   counters), #218 (register CSV download, MQTT live save-as-register, confirm
   before a direct config send), #220/#221/#222 (the scanner page rebuild below),
-  #224 (Reports tab reads without the SQLite write lock; bulk delete fixed), #223
+  #224 (Reports tab reads without the SQLite write lock; bulk delete fixed), #226
+  (Reports tab pages older reports by offset, past the newest 100), #223
   (UDMI secondary-lane reporting after an overflow) and #225 (dev-only StrictMode
   session-client abort). v0.1.58 raised the built-in MQTT discovery cap to
   30,000 distinct topics (#216) and made the release secret scan fail closed

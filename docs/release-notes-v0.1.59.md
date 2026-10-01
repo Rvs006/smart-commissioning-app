@@ -31,7 +31,8 @@ its limit. No database migration (Alembic head `a6b7c8d9e0f1`, Sync v2 head
 - Reports tab (#224): the report list and run list no longer take the SQLite
   write lock to read, so they stop blocking other requests with
   `database is locked`, and bulk delete takes the lock once. The tab shows the
-  newest 10 reports with "Show older reports" up to the 100-row API page.
+  newest 10 reports, and "Show older reports" pages further back by offset
+  (#226), so reports older than the newest 100 are reachable again.
 - UDMI secondary-lane reporting (#223): wrong-topic detection, the asset
   topic-discovery ledger and the unexpected-device count stay correct after the
   observation-only lane overflows, and a count that could not be completed is
@@ -54,8 +55,7 @@ The native scanners run on the local inline executor and authenticate via the
 local principal, so they are available in the portable and local deployments.
 Built-in TCP connect remains the default; Nmap stays optional, locally
 installed, and unbundled. This release adds no BACnet write capability and no
-database migration. Reports older than the newest 100 are still stored but not
-reachable from the Reports tab.
+database migration.
 
 ## Validation boundary
 
