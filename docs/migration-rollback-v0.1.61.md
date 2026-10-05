@@ -1,10 +1,11 @@
 # v0.1.61 migration and rollback
 
 v0.1.61 retains the Alembic head `a6b7c8d9e0f1` and adds no database
-migration. It moves pure reads onto the query-only session, adds the BACnet
-object-list indexed read, measures the UDMI unexpected-device count past the
-secondary payload cap, and changes release identity. A saved configuration that
-still carries the removed BBMD toggle key loads unchanged. The
+migration. It changes how the Reports list reads stored reports (display
+fields only, through `page_report_summaries`; full verification stays on open,
+download, export and verify), relabels a completed capture whose non-register
+topic store filled, and changes release identity. Stored report rows, their
+seals and evidence contracts are read as before and are not rewritten. The
 retained Sync v2 immutable-evidence head `a7b8c9d0e1f2`, `sync_credentials`,
 and `sync_delivery_state` are unchanged. IP, BACnet, MQTT, UDMI, report,
 evidence, authorization, and Nmap policy data are unchanged.
