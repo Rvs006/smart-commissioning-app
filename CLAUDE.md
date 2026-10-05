@@ -70,9 +70,16 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-10-01. The latest public release is
-  v0.1.60, and field acceptance for it stays open until recorded privately.
-  v0.1.60 ships #227/#232 (pure GET paths such as runs, imports/latest,
+- **Current handoff**: status as of 2026-10-05. The latest public release is
+  v0.1.61, and field acceptance for it stays open until recorded privately.
+  v0.1.61 ships #234 (the Reports list reads through `page_report_summaries`:
+  structural result/seal/evidence-contract joins plus display fields from the
+  sealed snapshot by JSON path, no canonical re-hash per row; full verification
+  stays in `get_report_for_serving` for open, download, export and verify, so a
+  tampered report fails closed on open instead of 409ing the list; a completed
+  capture with a full non-register topic store is labelled "Completed
+  (non-register topic store full)"). No database migration. v0.1.60 shipped
+  #227/#232 (pure GET paths such as runs, imports/latest,
   udmi/schemas and the scope checks read through the query-only session, so
   they stop failing with `database is locked` behind a writer; read-then-write
   paths keep `BEGIN IMMEDIATE`; a named user's `last_used_at` is stamped at most
