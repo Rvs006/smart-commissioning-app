@@ -7,13 +7,21 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.61] - 2026-10-05
+
+A field-fix release. The Reports page opens in about a second on a large UDMI
+site instead of sitting on "Loading reports..." for minutes, and a completed
+capture whose non-register topic store filled no longer reads as a failure.
+There is no database migration in this release.
+
 ### Fixed
 
 - The Reports list opens in about a second instead of minutes on a large site.
   `GET /reports` canonically re-hashed every listed report's frozen evidence
-  snapshot (many MB per UDMI report) on each page load. The list now reads only
-  the fields it shows, from the sealed snapshot copy, while keeping the
-  result/seal/evidence-contract checks and contract scope. Full integrity
+  snapshot (many MB per UDMI report) on each page load. The list now reads
+  through `page_report_summaries`, which takes only the fields it shows from
+  the sealed snapshot copy while keeping the result/seal/evidence-contract
+  checks and contract scope. Full integrity
   verification still runs on open, download, export, and evidence verify. A
   tampered report now fails when it is opened instead of failing the whole list
   with 409.
