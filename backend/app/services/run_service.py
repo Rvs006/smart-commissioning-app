@@ -127,10 +127,6 @@ def _limit_report_contract_to_scopes(statement, scope_pairs: ScopePairs):
     )
 
 
-class ReportListIntegrityError(RuntimeError):
-    """A selected report page contains evidence that no longer verifies."""
-
-
 DISCOVERY_JOB_TYPES: set[JobType] = {
     "ip_discovery",
     "ip_scanner",
@@ -336,32 +332,6 @@ def _verify_report_manifest_provenance(run: Mapping[str, object]) -> None:
             "result",
             "signed report provenance does not match the frozen snapshot",
         )
-
-
-def _report_record_from_row(run: Run, issues: list[RunIssue]) -> RunRecord:
-    """Build the ordinary RunRecord projection without a lazy relationship query."""
-
-    return RunRecord.model_validate(
-        {
-            "run_id": run.id,
-            "project_id": run.project_id,
-            "site_id": run.site_id,
-            "job_type": run.job_type,
-            "status": run.status,
-            "stage": run.stage,
-            "progress_percent": run.progress_percent,
-            "created_at": run.created_at,
-            "updated_at": run.updated_at,
-            "execution_mode": run.execution_mode,
-            "edge_id": run.edge_id,
-            "parameters": dict(run.parameters) if isinstance(run.parameters, Mapping) else {},
-            "result_summary": (dict(run.result_summary) if isinstance(run.result_summary, Mapping) else {}),
-            "issues": [
-                {field: getattr(issue, field) for field in ValidationIssueRecord.model_fields} for issue in issues
-            ],
-            "error_message": run.error_message,
-        }
-    )
 
 
 # Operator-facing message stamped on a run the startup sweep found fossilized at
@@ -1535,228 +1505,108 @@ class RunService:
             )
         return projection
 
-    def list_report_records(
-        self,
-        *,
-        limit: int = 100,
-        offset: int = 0,
-        scope_pairs: ScopePairs = None,
-    ) -> list[RunRecord]:
-        """Return report runs with their persisted metadata in one query.
-
-        The Reports list needs the stored parameters to form names and source
-        run links.  Fetching summaries and then calling ``get_run`` for every
-        row turns a simple page load into an N+1 query pattern. The explicit
-        page bounds keep a large historical archive from becoming an unbounded
-        response or DOM render.
-        """
-        safe_limit = max(1, min(int(limit), 100))
-        safe_offset = max(0, int(offset))
-        statement = select(Run).where(Run.job_type == "report_generation")
-        statement = _limit_statement_to_scopes(statement, scope_pairs)
-        statement = statement.order_by(Run.created_at.desc(), Run.id.desc()).offset(safe_offset).limit(safe_limit)
-        with query_session_factory(self._engine)() as session:
-            rows = session.scalars(statement).all()
-            return [
-                RunRecord.model_validate(
-                    {
-                        "run_id": row.id,
-                        "project_id": row.project_id,
-                        "site_id": row.site_id,
-                        "job_type": row.job_type,
-                        "status": row.status,
-                        "stage": row.stage,
-                        "progress_percent": row.progress_percent,
-                        "created_at": row.created_at,
-                        "updated_at": row.updated_at,
-                        "edge_id": row.edge_id,
-                        "parameters": row.parameters if isinstance(row.parameters, dict) else {},
-                        "result_summary": {},
-                        "issues": [],
-                        "error_message": row.error_message,
-                    }
-                )
-                for row in rows
-            ]
-
-    def count_report_records(self, *, scope_pairs: ScopePairs = None) -> int:
-        statement = select(func.count()).select_from(Run).where(Run.job_type == "report_generation")
-        statement = _limit_statement_to_scopes(statement, scope_pairs)
-        with query_session_factory(self._engine)() as session:
-            return int(session.scalar(statement) or 0)
-
-    def page_verified_report_records(
+    def page_report_summaries(
         self,
         *,
         limit: int = 100,
         offset: int = 0,
         scope_pairs: ScopePairs = None,
     ) -> tuple[list[RunRecord], int]:
-        """Page by immutable contract scope, then verify only selected evidence.
+        """Page the Reports list from a few JSON fields, never the full evidence.
 
-        ``total`` counts structurally complete contract rows. Canonical evidence
-        corruption on the selected page is an integrity failure for the whole
-        response, never a reason to scan ahead and silently change page contents.
+        A UDMI report freezes whole source-run snapshots (many MB on a large
+        site), and canonically re-hashing them for every listed row made the
+        page take minutes. The list keeps the structural contract (result,
+        seal, and evidence-contract rows present, contract scope) and reads
+        only the fields it displays. Full verification runs where evidence
+        leaves the app: get_report_for_serving on open, download, and export.
         """
 
         safe_limit = max(1, min(int(limit), 100))
         safe_offset = max(0, int(offset))
-
-        eligible_contracts = ("legacy_pre_lifecycle", "sealed_v1")
-        structural_conditions = (
+        conditions = (
             Run.job_type == "report_generation",
-            ReportEvidenceContract.contract_version.in_(eligible_contracts),
+            ReportEvidenceContract.contract_version.in_(("legacy_pre_lifecycle", "sealed_v1")),
             Run.project_id == ReportEvidenceContract.project_id,
             Run.site_id == ReportEvidenceContract.site_id,
         )
-        count_statement = (
-            select(func.count())
-            .select_from(Run)
-            .join(RunResult, RunResult.run_id == Run.id)
-            .join(RunSeal, RunSeal.run_id == Run.id)
-            .join(ReportEvidenceContract, ReportEvidenceContract.run_id == Run.id)
-            .where(*structural_conditions)
-        )
-        count_statement = _limit_report_contract_to_scopes(
-            count_statement,
-            scope_pairs,
-        )
-        has_dispatch = (
-            select(RunDispatch.dispatch_id).where(RunDispatch.run_id == Run.id).exists().label("has_dispatch")
-        )
-        statement = (
-            select(
-                Run,
-                RunExecutionContext,
-                RunResult,
-                RunSeal,
-                ReportEvidenceContract,
-                SyncArtifact,
-                has_dispatch,
+
+        def contract_rows(*columns):
+            statement = (
+                select(*columns)
+                .select_from(Run)
+                .join(RunResult, RunResult.run_id == Run.id)
+                .join(RunSeal, RunSeal.run_id == Run.id)
+                .join(ReportEvidenceContract, ReportEvidenceContract.run_id == Run.id)
+                .where(*conditions)
             )
-            .join(RunResult, RunResult.run_id == Run.id)
-            .join(RunSeal, RunSeal.run_id == Run.id)
-            .join(ReportEvidenceContract, ReportEvidenceContract.run_id == Run.id)
-            .outerjoin(RunExecutionContext, RunExecutionContext.run_id == Run.id)
-            .outerjoin(SyncArtifact, SyncArtifact.run_id == Run.id)
-            .where(*structural_conditions)
+            return _limit_report_contract_to_scopes(statement, scope_pairs)
+
+        # Sealed reports serve these fields from the frozen snapshot (see
+        # _project_verified_report_record); legacy reports from the top level.
+        fields = (
+            ("output_format", ("output_format",), "as_string"),
+            ("report_type", ("report_type",), "as_string"),
+            ("evidence_set_id", ("evidence_set_id",), "as_string"),
+            ("source_run_ids", ("source_run_ids",), None),
+            ("report_title", ("report_metadata", "report_title"), "as_string"),
+            ("report_title_custom", ("report_metadata", "report_title_custom"), "as_boolean"),
+            ("udmi_report_variant", ("report_metadata", "udmi_report_variant"), "as_string"),
+        )
+
+        def json_field(path: tuple[str, ...], accessor: str | None):
+            expression = Run.parameters[path]
+            return getattr(expression, accessor)() if accessor else expression
+
+        page = (
+            contract_rows(
+                Run.id,
+                Run.status,
+                Run.stage,
+                Run.progress_percent,
+                Run.created_at,
+                Run.updated_at,
+                ReportEvidenceContract.contract_version,
+                ReportEvidenceContract.project_id,
+                ReportEvidenceContract.site_id,
+                *(json_field(("report_snapshot_v2", *path), accessor) for _name, path, accessor in fields),
+                *(json_field((name,), accessor) for name, _path, accessor in fields),
+            )
             .order_by(Run.created_at.desc(), Run.id.desc())
             .offset(safe_offset)
             .limit(safe_limit)
         )
-        statement = _limit_report_contract_to_scopes(
-            statement,
-            scope_pairs,
-        )
         with query_session_factory(self._engine)() as session:
-            total = int(session.scalar(count_statement) or 0)
-            candidates = session.execute(statement).all()
+            total = int(session.scalar(contract_rows(func.count())) or 0)
+            rows = session.execute(page).all()
 
-            projections: dict[str, dict[str, list[object]]] = {
-                "issues": {},
-                "devices": {},
-                "points": {},
-                "topics": {},
+        records: list[RunRecord] = []
+        for row in rows:
+            run_id, status, stage, progress_percent, created_at, updated_at, contract_version, project_id, site_id, *values = row
+            sealed, top_level = values[: len(fields)], values[len(fields) :]
+            chosen = sealed if contract_version == "sealed_v1" else top_level
+            parameters = {
+                name: value for (name, _path, _accessor), value in zip(fields, chosen, strict=True) if value is not None
             }
-            selected_ids = [run.id for run, *_rest in candidates]
-            if selected_ids:
-                for label, model in (
-                    ("issues", RunIssue),
-                    ("devices", DiscoveredDevice),
-                    ("points", DiscoveredPoint),
-                    ("topics", DiscoveredTopic),
-                ):
-                    projection_statement = (
-                        select(model)
-                        .where(model.run_id.in_(selected_ids))
-                        .order_by(model.run_id, model.position, model.id)
-                    )
-                    for row in session.scalars(projection_statement):
-                        projections[label].setdefault(row.run_id, []).append(row)
-
-        visible: list[RunRecord] = []
-        for run, context, result, seal, contract, sync_artifact, has_dispatch_row in candidates:
-            try:
-                projection_rows = {
-                    label: [dict(row.__dict__) for row in rows.get(run.id, [])] for label, rows in projections.items()
-                }
-                run_projection = {
-                    "job_type": run.job_type,
-                    "project_id": run.project_id,
-                    "site_id": run.site_id,
-                    "parameters": run.parameters,
-                    "status": run.status,
-                    "stage": run.stage,
-                    "result_summary": run.result_summary,
-                    "error_message": run.error_message,
-                    "result_sha256": run.result_sha256,
-                    "terminal_at": run.terminal_at,
-                    "owner_token": run.owner_token,
-                    "attempt": run.attempt,
-                    "claimed_at": run.claimed_at,
-                    "heartbeat_at": run.heartbeat_at,
-                    "lease_expires_at": run.lease_expires_at,
-                    "state_version": run.state_version,
-                    "execution_mode": run.execution_mode,
-                    "created_at": run.created_at,
-                    "updated_at": run.updated_at,
-                    "modern_lifecycle_component_present": bool(has_dispatch_row),
-                    "sync_artifact_present": sync_artifact is not None,
-                    "sync_artifact_manifest": (
-                        dict(sync_artifact.manifest_json) if sync_artifact is not None else None
-                    ),
-                }
-                verifier = (
-                    verify_report_evidence_run
-                    if contract.contract_version == "sealed_v1"
-                    else verify_legacy_report_evidence_run
+            records.append(
+                RunRecord.model_validate(
+                    {
+                        "run_id": run_id,
+                        "project_id": project_id,
+                        "site_id": site_id,
+                        "job_type": "report_generation",
+                        "status": status,
+                        "stage": stage,
+                        "progress_percent": progress_percent,
+                        "created_at": created_at,
+                        "updated_at": updated_at,
+                        "parameters": parameters,
+                        "result_summary": {},
+                        "issues": [],
+                    }
                 )
-                verified = verifier(
-                    run_id=run.id,
-                    run=run_projection,
-                    context=(
-                        {
-                            "context_json": context.context_json,
-                            "context_sha256": context.context_sha256,
-                        }
-                        if context is not None
-                        else None
-                    ),
-                    result={
-                        "schema_version": result.schema_version,
-                        "terminal_status": result.terminal_status,
-                        "terminal_stage": result.terminal_stage,
-                        "summary": result.summary,
-                        "result_payload": result.result_payload,
-                        "result_sha256": result.result_sha256,
-                    },
-                    seal={
-                        "terminal_status": seal.terminal_status,
-                        "context_sha256": seal.context_sha256,
-                        "result_sha256": seal.result_sha256,
-                        "sealed_at": seal.sealed_at,
-                    },
-                    **projection_rows,
-                )
-                _verify_report_manifest_provenance(run_projection)
-                issue_rows = projections["issues"].get(run.id, [])
-                report = _project_verified_report_record(
-                    _report_record_from_row(run, issue_rows),
-                    verified,
-                )
-            except (FileNotFoundError, RuntimeError, ValueError) as error:
-                raise ReportListIntegrityError("Stored report evidence failed integrity verification.") from error
-            if (
-                scope_pairs is not None
-                and (
-                    report.project_id,
-                    report.site_id,
-                )
-                not in scope_pairs
-            ):
-                raise ReportListIntegrityError("Stored report evidence failed integrity verification.")
-            visible.append(report)
-        return visible, total
+            )
+        return records, total
 
     def runtime_ready(self) -> tuple[bool, str]:
         try:

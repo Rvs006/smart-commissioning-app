@@ -8358,12 +8358,21 @@ function assetTopicDiscoveryScopeSourceLabel(
   }
 }
 
-function assetTopicDiscoveryCaptureStatusLabel(status: string): string {
+function assetTopicDiscoveryCaptureStatusLabel({
+  capture_complete: complete,
+  capture_status: status,
+}: UdmiAssetTopicDiscovery): string {
   if (status === "completed") return "Completed";
+  // Read as an error in the field; the note below explains the side store.
+  if (complete && isObservationalLaneLimit(status)) return "Completed (non-register topic store full)";
   if (status === "cancelled") return "Stopped";
   if (status === "primary_topic_limit_reached") return "Primary topic limit reached";
   if (status === "primary_byte_limit_reached") return "Primary byte limit reached";
   return status.replace(/_/g, " ");
+}
+
+function isObservationalLaneLimit(status: string): boolean {
+  return status === "secondary_topic_limit_reached" || status === "secondary_byte_limit_reached";
 }
 
 // The ledger sees every delivery before the observational lane's retention
@@ -8372,8 +8381,7 @@ function assetTopicDiscoveryCaptureNote({
   capture_complete: complete,
   capture_status: status,
 }: UdmiAssetTopicDiscovery): string | null {
-  const laneLimit =
-    status === "secondary_topic_limit_reached" || status === "secondary_byte_limit_reached";
+  const laneLimit = isObservationalLaneLimit(status);
   if (complete) {
     return laneLimit
       ? "The observational topic lane reached its retention limit, but topic matches are recorded before that limit applies, so they cover the whole capture window."
@@ -8455,7 +8463,7 @@ function AssetTopicDiscoveryPanel({
         </div>
         <div>
           <dt>Capture status</dt>
-          <dd>{assetTopicDiscoveryCaptureStatusLabel(discovery.capture_status)}</dd>
+          <dd>{assetTopicDiscoveryCaptureStatusLabel(discovery)}</dd>
         </div>
         <div>
           <dt>Topic limit per asset</dt>

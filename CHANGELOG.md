@@ -7,6 +7,20 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Fixed
+
+- The Reports list opens in about a second instead of minutes on a large site.
+  `GET /reports` canonically re-hashed every listed report's frozen evidence
+  snapshot (many MB per UDMI report) on each page load. The list now reads only
+  the fields it shows, from the sealed snapshot copy, while keeping the
+  result/seal/evidence-contract checks and contract scope. Full integrity
+  verification still runs on open, download, export, and evidence verify. A
+  tampered report now fails when it is opened instead of failing the whole list
+  with 409.
+- Asset topic discovery shows "Completed (non-register topic store full)" when a
+  completed capture filled the side store for non-register topics, instead of
+  "secondary byte/topic limit reached", which read as a failure.
+
 ## [0.1.60] - 2026-10-01
 
 A field-fix release. Plain reads stop failing with `database is locked` while a
