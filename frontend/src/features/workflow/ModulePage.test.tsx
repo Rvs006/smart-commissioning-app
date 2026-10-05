@@ -4473,7 +4473,7 @@ describe("ModulePage UDMI workbench live results", () => {
     const discovery = screen
       .getByRole("heading", { name: "Asset topic discovery" })
       .closest(".udmi-asset-topic-discovery") as HTMLElement;
-    expect(within(discovery).getByText("secondary topic limit reached")).toBeInTheDocument();
+    expect(within(discovery).getByText("Completed (non-register topic store full)")).toBeInTheDocument();
     expect(within(discovery).getByText(/recorded before that limit applies/i)).toBeInTheDocument();
     expect(within(discovery).queryByText(/capture is incomplete/i)).not.toBeInTheDocument();
   });

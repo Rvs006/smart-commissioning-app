@@ -43,7 +43,6 @@ from app.services.report_pdf import PdfDocument
 from app.services.run_service import (
     DISCOVERY_JOB_TYPES,
     VALIDATION_JOB_TYPES,
-    ReportListIntegrityError,
     RunService,
 )
 from app.services.udmi_report_model import (
@@ -219,14 +218,11 @@ def list_reports(
     principal: AuthPrincipal = Depends(get_principal),
 ) -> ReportListResponse:
     scopes = allowed_scope_pairs(principal, engine=service.engine)
-    try:
-        records, total = service.page_verified_report_records(
-            limit=limit,
-            offset=offset,
-            scope_pairs=scopes,
-        )
-    except ReportListIntegrityError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
+    records, total = service.page_report_summaries(
+        limit=limit,
+        offset=offset,
+        scope_pairs=scopes,
+    )
     return ReportListResponse(
         reports=[_to_report_summary(run) for run in records],
         total=total,

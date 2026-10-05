@@ -173,7 +173,9 @@ class ReportListProjectionTests(ApiTestCase):
         self.assertEqual(body["offset"], 1)
         self.assertEqual(body["has_more"], 1 + 2 < baseline_total + 3)
 
-    def test_report_list_integrity_queries_are_bounded_for_a_one_row_page(self) -> None:
+    def test_report_list_reads_fixed_queries_without_canonical_verification(self) -> None:
+        # Re-hashing each listed report's frozen snapshot took minutes on a
+        # large site. The list reads display fields only; serving verifies.
         from app.api.routes import reports as reports_route
         from app.services import run_service as run_service_module
         from sqlalchemy import event
@@ -214,14 +216,13 @@ class ReportListProjectionTests(ApiTestCase):
         self.assertEqual(body["total"], baseline_total + len(created))
         self.assertEqual(
             verify_report.call_count,
-            1,
-            "Deep canonical verification must be bounded by the requested page size.",
+            0,
+            "The list must not canonically re-verify report snapshots.",
         )
         self.assertLessEqual(
             len(select_statements),
-            7,
-            "A one-row page must use a fixed batch of integrity queries, not "
-            "one verifier query set per archived report.",
+            3,
+            "A page must be a scope lookup, one count and one row query, not per-report loads.",
         )
 
     def _capture_statements(self, engine):
@@ -245,7 +246,7 @@ class ReportListProjectionTests(ApiTestCase):
         service = reports_route.service
         statements, stop = self._capture_statements(service.engine)
         try:
-            records, total = service.page_verified_report_records(limit=10)
+            records, total = service.page_report_summaries(limit=10)
             service.list_runs(limit=5)
         finally:
             stop()
@@ -291,7 +292,7 @@ class ReportListProjectionTests(ApiTestCase):
             statements,
         )
 
-    def test_report_list_fails_closed_for_selected_tampered_metadata(self) -> None:
+    def test_report_list_shows_sealed_fields_and_serving_fails_closed_on_tamper(self) -> None:
         from app.core.db import get_engine
         from smart_commissioning_core.db.models import Run
         from sqlalchemy import select, update
@@ -299,37 +300,32 @@ class ReportListProjectionTests(ApiTestCase):
         self._create_report([])
         tampered = self._create_report([])
         self._create_report([])
+        report_id = tampered["report_id"]
 
         engine = get_engine()
         with engine.begin() as connection:
-            original_parameters = dict(
-                connection.scalar(
-                    select(Run.parameters).where(Run.id == tampered["report_id"])
-                )
-            )
-            parameters = dict(original_parameters)
-            parameters["report_title"] = "Mutable title must stay concealed"
-            connection.execute(
-                update(Run)
-                .where(Run.id == tampered["report_id"])
-                .values(parameters=parameters)
-            )
+            original_parameters = dict(connection.scalar(select(Run.parameters).where(Run.id == report_id)))
+        parameters = dict(original_parameters)
+        parameters["report_title"] = "Mutable title must stay concealed"
+        snapshot = dict(parameters["report_snapshot_v2"])
+        snapshot["report_metadata"] = {**snapshot["report_metadata"], "renderer_note": "tampered"}
+        parameters["report_snapshot_v2"] = snapshot
 
         try:
-            response = self.client.get("/api/v1/reports?limit=2")
+            with engine.begin() as connection:
+                connection.execute(update(Run).where(Run.id == report_id).values(parameters=parameters))
+            listed = self.client.get("/api/v1/reports?limit=2")
+            served = self.client.get(f"/api/v1/reports/{report_id}")
         finally:
             with engine.begin() as connection:
-                connection.execute(
-                    update(Run)
-                    .where(Run.id == tampered["report_id"])
-                    .values(parameters=original_parameters)
-                )
+                connection.execute(update(Run).where(Run.id == report_id).values(parameters=original_parameters))
 
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(
-            response.json(),
-            {"detail": "Stored report evidence failed integrity verification."},
-        )
+        # The list reads the sealed snapshot copy, so a mutable top-level edit
+        # never reaches it; a snapshot edit fails closed once the report is opened.
+        self.assertEqual(listed.status_code, 200, listed.text)
+        row = self._find(listed.json()["reports"], report_id)
+        self.assertEqual(row["report_title"], tampered["report_title"])
+        self.assertNotEqual(served.status_code, 200, served.text)
 
     def test_report_list_rejects_an_unbounded_limit(self) -> None:
         response = self.client.get("/api/v1/reports?limit=101")

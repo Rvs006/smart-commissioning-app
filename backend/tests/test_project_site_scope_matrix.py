@@ -695,11 +695,11 @@ class ProjectSiteScopeMatrixTests(ApiTestCase):
                             headers=self._headers(user),
                         )
                         if label == "metadata" and user == self.user_a:
-                            self.assertEqual(listing.status_code, 409, listing.text)
-                            self.assertEqual(
-                                listing.json(),
-                                {"detail": ("Stored report evidence failed integrity verification.")},
-                            )
+                            # The list reads the sealed snapshot copy, so the
+                            # mutated title never shows; serving fails closed above.
+                            self.assertEqual(listing.status_code, 200, listing.text)
+                            row = next(r for r in listing.json()["reports"] if r["report_id"] == report_id)
+                            self.assertNotEqual(row["report_title"], "Mutated after sealing")
                         else:
                             self.assertEqual(listing.status_code, 200, listing.text)
                             self.assertNotIn(
