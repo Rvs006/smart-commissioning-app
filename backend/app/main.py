@@ -1,4 +1,5 @@
 import logging
+import mimetypes
 import os
 import threading
 import time
@@ -315,6 +316,15 @@ FRONTEND_DIST = Path(
     ),
 )
 
+# Windows' mimetypes reads the registry, where a third-party install can map .js
+# to text/plain; browsers then refuse to run the module scripts. Pin both.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
+
+# index.html names the hashed entry chunk, so it must be revalidated on every
+# load or a browser keeps asking an upgraded server for the old build's chunks.
+_INDEX_HEADERS = {"Cache-Control": "no-cache"}
+
 if FRONTEND_DIST.exists():
     assets_dir = FRONTEND_DIST / "assets"
     if assets_dir.exists():
@@ -325,7 +335,7 @@ if FRONTEND_DIST.exists():
 def root():
     index_path = FRONTEND_DIST / "index.html"
     if index_path.exists():
-        return FileResponse(index_path)
+        return FileResponse(index_path, headers=_INDEX_HEADERS)
 
     return {
         "service": app.title,
@@ -374,4 +384,4 @@ def spa_fallback(spa_path: str):
     if static_file is not None:
         # No media_type: starlette infers it from the extension (.png -> image/png).
         return FileResponse(static_file)
-    return FileResponse(index_path)
+    return FileResponse(index_path, headers=_INDEX_HEADERS)

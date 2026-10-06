@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -188,6 +189,31 @@ def reserve_port(start: int = DEFAULT_PORT, attempts: int = 50) -> int:
     raise RuntimeError(f"No available local port found from {start} to {start + attempts - 1}.")
 
 
+def default_port_warning(port: int, timeout: float = 1.0) -> str | None:
+    """Explain why this copy is not on the default port, or None if it is.
+
+    A tab or bookmark on the default port keeps talking to whatever holds it. When
+    that is an older Smart Commissioning, its pages ask for chunk files this
+    release does not have and fail with "Failed to fetch dynamically imported
+    module", so say which version holds the port.
+    """
+    if port == DEFAULT_PORT:
+        return None
+    holder = "another program"
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{DEFAULT_PORT}/api/v1/health", timeout=timeout) as response:
+            health = json.loads(response.read().decode("utf-8"))
+        if health.get("service") == "smart-commissioning-api":
+            holder = f"another Smart Commissioning App ({health.get('version') or 'unknown version'})"
+    except Exception:  # noqa: BLE001 (diagnostic only, never block startup)
+        pass
+    return (
+        f"WARNING: port {DEFAULT_PORT} is already in use by {holder}, so this copy is starting on port {port}.\n"
+        f"Browser tabs on http://127.0.0.1:{DEFAULT_PORT}/ will NOT reach this copy. Close the older\n"
+        f"Smart Commissioning window and restart this one, or use the App URL below."
+    )
+
+
 def _set_env_default(name: str, value: str) -> None:
     """``os.environ.setdefault`` that surfaces a pre-existing override.
 
@@ -358,6 +384,9 @@ def main() -> int:
     url = f"http://127.0.0.1:{port}/"
 
     print(f"{APP_NAME} is starting.")
+    warning = default_port_warning(port)
+    if warning:
+        print(warning)
     print(f"App URL: {url}")
     print(f"App data (settings, certs, run history): {runtime_root}")
     print("Keep this window open while testing. Press Ctrl+C to stop the app.")

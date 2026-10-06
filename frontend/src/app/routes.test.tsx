@@ -7,10 +7,14 @@ describe("application routes", () => {
     const shellRoute = router.routes.find((route) => route.path === "/");
     expect(shellRoute).toBeDefined();
     expect(shellRoute?.lazy).toBeUndefined();
+    // A failed lazy import must land on our recovery page, not React Router's
+    // default "Unexpected Application Error!".
+    expect(shellRoute?.errorElement).toBeDefined();
 
     for (const path of ["brief", "learning"]) {
       const route = router.routes.find((candidate) => candidate.path === path);
       expect(route?.lazy).toEqual(expect.any(Function));
+      expect(route?.errorElement).toBeDefined();
     }
 
     const childRoutes = shellRoute?.children ?? [];

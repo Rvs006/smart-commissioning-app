@@ -7,6 +7,24 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Fixed
+
+- A page built by an older release no longer strands the scanner pages on
+  React Router's "Unexpected Application Error! Failed to fetch dynamically
+  imported module". Chunk names change every release, so a tab from an older
+  build (or an older copy still holding port 8000) asks for files the current
+  dist does not have. The app now reloads once to pick up the current
+  `index.html`, and if that still fails it shows a "This page did not load"
+  panel with a Reload button instead of the raw error.
+- `index.html` is served with `Cache-Control: no-cache`, so a browser always
+  revalidates the page that names the current build's chunks.
+- `.js` and `.css` are served as `text/javascript` and `text/css` regardless of
+  the Windows registry, which can map `.js` to `text/plain` and block module
+  scripts.
+- The portable launcher warns when port 8000 is already taken and names the
+  older Smart Commissioning version holding it, instead of silently starting on
+  the next free port while old tabs keep talking to the old copy.
+
 ## [0.1.61] - 2026-10-05
 
 A field-fix release. The Reports page opens in about a second on a large UDMI
