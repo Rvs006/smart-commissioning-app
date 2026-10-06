@@ -88,7 +88,7 @@ class StaticFrontendTests(ApiTestCase):
     def test_index_html_is_never_heuristically_cached(self) -> None:
         # A cached index.html keeps naming the previous build's hashed chunks
         # after an upgrade, so every lazy page 404s on its import.
-        for path in ("/", "/reports"):
+        for path in ("/", "/reports", "/index.html"):
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, response.text)
             self.assertIn("sct-index-sentinel", response.text)

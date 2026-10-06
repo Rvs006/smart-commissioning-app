@@ -381,7 +381,7 @@ def spa_fallback(spa_path: str):
         # answering 404; the api/ gate stays AHEAD of file resolution.
         raise HTTPException(status_code=404, detail="Route not found.")
     static_file = _resolve_frontend_file(spa_path)
-    if static_file is not None:
+    if static_file is not None and static_file != index_path.resolve():
         # No media_type: starlette infers it from the extension (.png -> image/png).
         return FileResponse(static_file)
     return FileResponse(index_path, headers=_INDEX_HEADERS)
