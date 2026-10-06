@@ -85,6 +85,27 @@ class StaticFrontendTests(ApiTestCase):
             response.headers.get("content-type"),
         )
 
+    def test_index_html_is_never_heuristically_cached(self) -> None:
+        # A cached index.html keeps naming the previous build's hashed chunks
+        # after an upgrade, so every lazy page 404s on its import.
+        for path in ("/", "/reports", "/index.html"):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertIn("sct-index-sentinel", response.text)
+            self.assertEqual(response.headers.get("cache-control"), "no-cache", path)
+
+        # Real public files keep default caching.
+        logo = self.client.get("/electracom-logo.png")
+        self.assertIsNone(logo.headers.get("cache-control"))
+
+    def test_module_script_types_pinned(self) -> None:
+        # Module scripts are refused unless served with a JavaScript MIME type;
+        # the Windows registry can say text/plain for .js.
+        import mimetypes
+
+        self.assertEqual(mimetypes.guess_type("app-x.js")[0], "text/javascript")
+        self.assertEqual(mimetypes.guess_type("app-x.css")[0], "text/css")
+
     def test_unknown_api_path_still_404(self) -> None:
         # Regression guard: the api/ gate must stay ahead of file resolution.
         response = self.client.get("/api/v1/route-that-does-not-exist")

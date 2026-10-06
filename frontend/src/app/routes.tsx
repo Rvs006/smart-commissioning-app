@@ -1,5 +1,6 @@
 import { createHashRouter } from "react-router";
 import { App } from "./App";
+import { RouteErrorPage } from "./RouteErrorPage";
 import { RouteLoadingFallback } from "./RouteLoadingFallback";
 
 async function loadBriefPage() {
@@ -69,16 +70,19 @@ export const router = createHashRouter([
     path: "brief",
     lazy: loadBriefPage,
     hydrateFallbackElement: <RouteLoadingFallback />,
+    errorElement: <RouteErrorPage />,
   },
   {
     path: "learning",
     lazy: loadLearningPage,
     hydrateFallbackElement: <RouteLoadingFallback />,
+    errorElement: <RouteErrorPage />,
   },
   {
     path: "/",
     element: <App />,
     hydrateFallbackElement: <RouteLoadingFallback />,
+    errorElement: <RouteErrorPage />,
     children: [
       { index: true, lazy: loadDashboardPage },
       { path: "configuration", lazy: loadConfigurationPage },

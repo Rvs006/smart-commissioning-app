@@ -340,5 +340,59 @@ class MigrateLegacyRuntimeTests(unittest.TestCase):
         self.assertEqual(buffer.getvalue(), "")
 
 
+class DefaultPortWarningTests(unittest.TestCase):
+    """An older copy holding :8000 must be named, not silently dodged.
+
+    Otherwise a tab on :8000 keeps loading the old build, whose lazy pages ask
+    the old server for chunks and fail with "Failed to fetch dynamically
+    imported module". The default port is pointed at a throwaway local server so
+    the test never depends on what really holds :8000.
+    """
+
+    def setUp(self) -> None:
+        self.launcher = _load_launcher()
+
+    def _serve(self, body: bytes) -> int:
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 (stdlib hook name)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def test_no_warning_on_the_default_port(self) -> None:
+        self.assertIsNone(self.launcher.default_port_warning(self.launcher.DEFAULT_PORT))
+
+    def test_names_the_older_copy_holding_the_default_port(self) -> None:
+        holder_port = self._serve(json.dumps({"service": "smart-commissioning-api", "version": "v0.1.60"}).encode())
+        self.launcher.DEFAULT_PORT = holder_port
+
+        warning = self.launcher.default_port_warning(holder_port + 1)
+
+        self.assertIn("another Smart Commissioning App (v0.1.60)", warning)
+        self.assertIn(f"starting on port {holder_port + 1}", warning)
+        self.assertIn(f"http://127.0.0.1:{holder_port}/ will NOT reach this copy", warning)
+
+    def test_unknown_holder_still_warns(self) -> None:
+        holder_port = self._serve(b"not json")
+        self.launcher.DEFAULT_PORT = holder_port
+
+        warning = self.launcher.default_port_warning(holder_port + 1)
+
+        self.assertIn("in use by another program", warning)
+
+
 if __name__ == "__main__":
     unittest.main()
