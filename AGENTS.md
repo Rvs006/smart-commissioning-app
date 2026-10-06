@@ -70,9 +70,16 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-10-05. The latest public release is
-  v0.1.61, and field acceptance for it stays open until recorded privately.
-  v0.1.61 ships #234 (the Reports list reads through `page_report_summaries`:
+- **Current handoff**: status as of 2026-10-06. The latest public release is
+  v0.1.62, and field acceptance for it stays open until recorded privately.
+  v0.1.62 ships #236 (a lazy route chunk that fails to load, typically a page
+  from an older release talking to a newer server, reloads once through
+  `frontend/src/app/staleBuild.ts` and then shows `RouteErrorPage` instead of
+  the router default; `index.html` is served `Cache-Control: no-cache` by
+  `backend/app/main.py` and `frontend/nginx.conf`; `.js`/`.css` media types are
+  pinned; the portable launcher's `default_port_warning` names the version
+  holding port 8000 when it has to start elsewhere). No database migration.
+  v0.1.61 shipped #234 (the Reports list reads through `page_report_summaries`:
   structural result/seal/evidence-contract joins plus display fields from the
   sealed snapshot by JSON path, no canonical re-hash per row; full verification
   stays in `get_report_for_serving` for open, download, export and verify, so a

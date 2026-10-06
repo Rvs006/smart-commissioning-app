@@ -7,6 +7,13 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.62] - 2026-10-06
+
+A field-fix release. The IP, BACnet and MQTT pages no longer get stuck on
+"Unexpected Application Error!" after an upgrade, and the portable launcher
+says when an older copy is still holding port 8000. There is no database
+migration in this release.
+
 ### Fixed
 
 - A page built by an older release no longer strands the scanner pages on
@@ -16,8 +23,10 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   dist does not have. The app now reloads once to pick up the current
   `index.html`, and if that still fails it shows a "This page did not load"
   panel with a Reload button instead of the raw error.
-- `index.html` is served with `Cache-Control: no-cache`, so a browser always
-  revalidates the page that names the current build's chunks.
+- `index.html` is served with `Cache-Control: no-cache` from the backend (`/`,
+  the SPA fallback and a direct `/index.html` request) and from the Docker
+  image's nginx, so a browser always revalidates the page that names the
+  current build's chunks.
 - `.js` and `.css` are served as `text/javascript` and `text/css` regardless of
   the Windows registry, which can map `.js` to `text/plain` and block module
   scripts.
