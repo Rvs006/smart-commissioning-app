@@ -33,6 +33,19 @@ migration in this release.
 - The portable launcher warns when port 8000 is already taken and names the
   older Smart Commissioning version holding it, instead of silently starting on
   the next free port while old tabs keep talking to the old copy.
+- The UDMI Workbench no longer drops everything below the Inspector (asset
+  topic discovery, wrong-topic assets, Generate Report) after a long capture.
+  `GET /validation/runs/{id}`, its `/issues` and `/export.json` loaded the whole
+  `result_summary` through a `BEGIN IMMEDIATE` session, so the page's parallel
+  run and issues requests queued on SQLite's writer slot and could hit the 5 s
+  `database is locked` timeout on a cold cache. They now read through the
+  query-only session like the other pure GET paths.
+
+### Changed
+
+- "Generate report from this run" offers a direct download for a single
+  format too (PDF, Word, Excel or evidence pack), not only for Generate All,
+  so the report no longer needs a trip to the Reports tab.
 
 ## [0.1.61] - 2026-10-05
 

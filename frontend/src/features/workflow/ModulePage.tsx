@@ -209,6 +209,13 @@ const ALL_REPORT_FORMATS = [
   "zip",
 ] as const satisfies readonly ReportFormat[];
 type ReportFormatSelection = ReportFormat | "all";
+const GENERATED_REPORTS_DOWNLOAD_KEY = "generated-reports";
+const SINGLE_REPORT_DOWNLOAD_LABELS: Record<ReportFormat, string> = {
+  docx: "Download Word report (.docx)",
+  pdf: "Download PDF report (.pdf)",
+  xlsx: "Download Excel report (.xlsx)",
+  zip: "Download evidence pack (.zip)",
+};
 
 type CopyFeedback = {
   message: string;
@@ -757,7 +764,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [selectedReportIds, setSelectedReportIds] = useState<Set<string>>(new Set());
   const [reportToast, setReportToast] = useState<string | null>(null);
   const [reportToastWarning, setReportToastWarning] = useState(false);
-  const [generatedAllReportIds, setGeneratedAllReportIds] = useState<readonly string[] | null>(
+  // Reports from the last fully successful "Generate report from this run", so
+  // the confirmation can offer them for download without a trip to Reports.
+  const [generatedReports, setGeneratedReports] = useState<readonly ReportSummary[] | null>(
     null,
   );
   const [reportDeleteNotice, setReportDeleteNotice] = useState<string | null>(null);
@@ -811,7 +820,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const reportDownload = useFileDownload(apiClient);
   const exportDownload = useFileDownload(apiClient);
   const captureExportDownload = useFileDownload(apiClient);
-  const generatedAllBundleDownload = useFileDownload(apiClient);
+  const generatedReportsDownload = useFileDownload(apiClient);
   const validationJsonDownload = useFileDownload(apiClient);
   const schemaTemplateDownload = useFileDownload(apiClient);
   const activeRunMatchesReservedLiveSubmission = Boolean(
@@ -1541,14 +1550,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setPropertyCancelling(false);
   }, [activeRun?.epoch, activeRun?.runId, detailRow?.Instance]);
 
-  const resetGeneratedAllBundleDownloadForActiveRun = generatedAllBundleDownload.reset;
+  const resetGeneratedReportsDownloadForActiveRun = generatedReportsDownload.reset;
   useEffect(() => {
     setSelectedResultId(null);
     setDetailRow(null);
     setReportToast(null);
     setReportToastWarning(false);
-    setGeneratedAllReportIds(null);
-    resetGeneratedAllBundleDownloadForActiveRun();
+    setGeneratedReports(null);
+    resetGeneratedReportsDownloadForActiveRun();
     setReportDialogOpen(false);
     setReportScopeSnapshot(null);
     setReportIntents(null);
@@ -1557,7 +1566,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     activeRun?.epoch,
     activeRun?.runId,
     canEngineer,
-    resetGeneratedAllBundleDownloadForActiveRun,
+    resetGeneratedReportsDownloadForActiveRun,
     runAccessClosed,
     sessionScopeId,
     workspaceRef.projectId,
@@ -1882,7 +1891,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const resetReportDownload = reportDownload.reset;
   const resetExportDownload = exportDownload.reset;
   const resetCaptureExportDownload = captureExportDownload.reset;
-  const resetGeneratedAllBundleDownload = generatedAllBundleDownload.reset;
+  const resetGeneratedReportsDownload = generatedReportsDownload.reset;
   const resetValidationJsonDownload = validationJsonDownload.reset;
 
   useEffect(() => {
@@ -1921,7 +1930,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     );
     setReportToast(null);
     setReportToastWarning(false);
-    setGeneratedAllReportIds(null);
+    setGeneratedReports(null);
     setReportDialogOpen(false);
     setReportTitle("");
     setReportScopeSnapshot(null);
@@ -1943,7 +1952,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetReportDownload();
     resetExportDownload();
     resetCaptureExportDownload();
-    resetGeneratedAllBundleDownload();
+    resetGeneratedReportsDownload();
     resetValidationJsonDownload();
   }, [
     module.route,
@@ -1952,7 +1961,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetReportDownload,
     resetExportDownload,
     resetCaptureExportDownload,
-    resetGeneratedAllBundleDownload,
+    resetGeneratedReportsDownload,
     resetRunAccessScope,
     resetValidationJsonDownload,
     queryClient,
@@ -2022,10 +2031,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     workspaceRef,
   ]);
 
-  // Auto-clear ordinary report confirmations after a few seconds. Keep the
-  // Generate All result available so its combined download is not easy to miss.
+  // Auto-clear ordinary report confirmations after a few seconds. Keep a
+  // successful generation's result available so its download is not easy to miss.
   useEffect(() => {
-    if (!reportToast || generatedAllReportIds) {
+    if (!reportToast || generatedReports) {
       return;
     }
     const timer = setTimeout(() => {
@@ -2033,7 +2042,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       setReportToastWarning(false);
     }, 8000);
     return () => clearTimeout(timer);
-  }, [generatedAllReportIds, reportToast]);
+  }, [generatedReports, reportToast]);
 
   // One native modal is shared by both report buttons. showModal supplies focus
   // containment and Escape handling in browsers; the open-attribute fallback
@@ -2470,7 +2479,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         }
       } else {
         setLastReport(result);
-        setGeneratedAllReportIds(null);
+        setGeneratedReports(null);
         setRunOutcome(
           `Report generated. Report ID: ${result.report_id}, file: ${result.file_name}`,
         );
@@ -2730,13 +2739,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       if (ownerLost || !canApplyReportOwner(owner)) {
         return;
       }
-      const allFormatsSucceeded =
-        requestedCount === ALL_REPORT_FORMATS.length &&
-        failedFormats.length === 0 &&
-        reports.length === ALL_REPORT_FORMATS.length;
-      setGeneratedAllReportIds(
-        allFormatsSucceeded ? reports.map((report) => report.report_id) : null,
-      );
+      const allRequestedSucceeded =
+        failedFormats.length === 0 && reports.length === requestedCount;
+      setGeneratedReports(allRequestedSucceeded ? reports : null);
       setReportDialogOpen(false);
       setReportScopeSnapshot(null);
       setReportIntents(null);
@@ -4053,24 +4058,33 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     });
   };
 
-  const handleDownloadGeneratedAllReports = () => {
+  // One generated report downloads as itself; Generate All bundles into one zip
+  // (same split as handleExportSelected on the Reports tab).
+  const handleDownloadGeneratedReports = () => {
     const owner = activeRunOwner;
-    if (
-      generatedAllReportIds?.length !== ALL_REPORT_FORMATS.length ||
-      !owner ||
-      !canApplyReportOwner(owner)
-    ) {
+    const reports = generatedReports;
+    if (!reports || reports.length === 0 || !owner || !canApplyReportOwner(owner)) {
       return;
     }
-    void generatedAllBundleDownload.download({
+    if (reports.length === 1) {
+      const [report] = reports;
+      void generatedReportsDownload.download({
+        fallbackFilename: report.file_name || `${report.report_id}.${report.output_format}`,
+        isCurrent: () => canApplyReportOwner(owner),
+        key: GENERATED_REPORTS_DOWNLOAD_KEY,
+        path: getReportDownloadPath(report.report_id),
+      });
+      return;
+    }
+    void generatedReportsDownload.download({
       fallbackFilename: "reports_export.zip",
       init: {
-        body: JSON.stringify({ report_ids: generatedAllReportIds }),
+        body: JSON.stringify({ report_ids: reports.map((report) => report.report_id) }),
         headers: { "Content-Type": "application/json" },
         method: "POST",
       },
       isCurrent: () => canApplyReportOwner(owner),
-      key: "generated-all-zip",
+      key: GENERATED_REPORTS_DOWNLOAD_KEY,
       path: REPORTS_EXPORT_PATH,
     });
   };
@@ -4107,8 +4121,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     setReportToast(null);
     setReportToastWarning(false);
-    setGeneratedAllReportIds(null);
-    generatedAllBundleDownload.reset();
+    setGeneratedReports(null);
+    generatedReportsDownload.reset();
     const reportType: ReportType =
       activeRun.kind === "discovery"
         ? ((module.route === "ip-scanner-sct"
@@ -4229,26 +4243,34 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     });
   };
 
-  const renderGeneratedAllReportDownload = () => {
-    if (generatedAllReportIds?.length !== ALL_REPORT_FORMATS.length) {
+  const renderGeneratedReportsDownload = () => {
+    if (!generatedReports || generatedReports.length === 0) {
       return null;
     }
+    const single = generatedReports.length === 1 ? generatedReports[0] : null;
+    const pending = generatedReportsDownload.pendingKey === GENERATED_REPORTS_DOWNLOAD_KEY;
     return (
       <div className="inline-actions">
         <button
           className="secondary-button compact"
-          disabled={generatedAllBundleDownload.pendingKey === "generated-all-zip"}
-          onClick={handleDownloadGeneratedAllReports}
-          title="Download the PDF, Word, Excel, and evidence pack together in one ZIP file."
+          disabled={pending}
+          onClick={handleDownloadGeneratedReports}
+          title={
+            single
+              ? `Download ${single.file_name || "this report"}.`
+              : "Download the generated reports together in one ZIP file."
+          }
           type="button"
         >
-          {generatedAllBundleDownload.pendingKey === "generated-all-zip"
+          {pending
             ? "Preparing download..."
-            : "Download all reports (.zip)"}
+            : single
+              ? (SINGLE_REPORT_DOWNLOAD_LABELS[single.output_format] ?? "Download report")
+              : "Download all reports (.zip)"}
         </button>
-        {generatedAllBundleDownload.error && (
+        {generatedReportsDownload.error && (
           <span className="error-text">
-            Combined report download failed: {generatedAllBundleDownload.error}
+            Report download failed: {generatedReportsDownload.error}
           </span>
         )}
       </div>
@@ -5120,7 +5142,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   {reportToast && (
                     <>
                       <span className="run-monitor-note">{reportToast}</span>
-                      {renderGeneratedAllReportDownload()}
+                      {renderGeneratedReportsDownload()}
                     </>
                   )}
                   {reportMutationError && (
@@ -6222,12 +6244,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <strong>
                   {reportToastWarning
                     ? "Report generation incomplete"
-                    : generatedAllReportIds
+                    : (generatedReports?.length ?? 0) > 1
                       ? "Reports ready"
                       : "Report generated"}
                 </strong>
                 <span>{reportToast}</span>
-                {renderGeneratedAllReportDownload()}
+                {renderGeneratedReportsDownload()}
               </div>
             )}
             {reportDeleteNotice && (
@@ -7421,12 +7443,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <strong>
                   {reportToastWarning
                     ? "Report generation incomplete"
-                    : generatedAllReportIds
+                    : (generatedReports?.length ?? 0) > 1
                       ? "Reports ready"
                       : "Report generated"}
                 </strong>
                 <span>{reportToast}</span>
-                {renderGeneratedAllReportDownload()}
+                {renderGeneratedReportsDownload()}
               </div>
             )}
             {reportMutationError && (

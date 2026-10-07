@@ -10588,6 +10588,7 @@ describe("ModulePage report controls placement", () => {
       reportBodies: Record<string, unknown>[];
       reportBody: Record<string, unknown> | null;
       exportBodies: Array<{ report_ids: string[] }>;
+      downloadUrls: string[];
       activeReportRequests: number;
       maxActiveReportRequests: number;
       discoveryResultsRequests: number;
@@ -10596,6 +10597,7 @@ describe("ModulePage report controls placement", () => {
       reportBodies: [],
       reportBody: null,
       exportBodies: [],
+      downloadUrls: [],
       activeReportRequests: 0,
       maxActiveReportRequests: 0,
       discoveryResultsRequests: 0,
@@ -10670,6 +10672,16 @@ describe("ModulePage report controls placement", () => {
           } finally {
             captured.activeReportRequests -= 1;
           }
+        }
+        if (/\/api\/v1\/reports\/[^/]+\/download$/.test(url)) {
+          captured.downloadUrls.push(url);
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            blob: async () => new Blob(["single report"]),
+            headers: { get: () => null },
+          } as unknown as Response;
         }
         if (url.endsWith("/api/v1/reports/export") && init?.method === "POST") {
           captured.exportBodies.push(JSON.parse(String(init.body)) as { report_ids: string[] });
@@ -10911,6 +10923,40 @@ describe("ModulePage report controls placement", () => {
     await waitFor(() =>
       expect(captured.exportBodies).toEqual([{ report_ids: ["rep-1", "rep-2", "rep-3", "rep-4"] }]),
     );
+    expect(URL.createObjectURL).toHaveBeenCalled();
+  });
+
+  it("offers a direct download after generating one report format", async () => {
+    const captured = stubTerminalRun();
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:mock"),
+      revokeObjectURL: vi.fn(),
+    });
+    renderModule("ip-scanner-sct");
+
+    const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
+    fireEvent.change(pickers[1], { target: { value: "xlsx" } });
+    const buttons = await screen.findAllByRole("button", {
+      name: /Generate report from this run/i,
+    });
+    await submitReportDialog(buttons[1], "Building A commissioning");
+
+    await waitFor(() => expect(captured.reportBodies).toHaveLength(1));
+    const downloadButtons = await screen.findAllByRole("button", {
+      name: "Download Excel report (.xlsx)",
+    });
+    expect(downloadButtons).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /Download all reports/i })).not.toBeInTheDocument();
+
+    fireEvent.click(downloadButtons[1]);
+
+    await waitFor(() =>
+      expect(captured.downloadUrls).toEqual([
+        expect.stringMatching(/\/api\/v1\/reports\/rep-1\/download$/),
+      ]),
+    );
+    expect(captured.exportBodies).toHaveLength(0);
     expect(URL.createObjectURL).toHaveBeenCalled();
   });
 

@@ -62,6 +62,20 @@ class ReadOnlyGetRouteTests(ApiTestCase):
             with self.subTest(path=path):
                 self.assertEqual(self._write_locks_taken(path, params), [])
 
+    def test_validation_run_detail_and_issues_read_without_the_write_lock(self) -> None:
+        # The UDMI page fetches the run and its issues together on open. Both
+        # load the whole result_summary, which is large after a long capture.
+        from app.core.db import get_engine
+        from smart_commissioning_core.db.db_run_store import DbRunStore
+
+        run = DbRunStore(get_engine()).create_run(
+            project_id="demo-project", site_id="demo-site", job_type="udmi_validation"
+        )
+        for suffix in ("", "/issues"):
+            path = f"/api/v1/validation/runs/{run['run_id']}{suffix}"
+            with self.subTest(path=path):
+                self.assertEqual(self._write_locks_taken(path, {}), [])
+
     def test_named_user_scope_checks_read_without_the_write_lock(self) -> None:
         # A named user's scope grants are resolved on every request, so a
         # write-session grant lookup would lock every scoped GET, not just one.
