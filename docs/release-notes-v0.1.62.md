@@ -1,11 +1,12 @@
-# v0.1.62 - Scanner pages recover after an upgrade
+# v0.1.62 - Field fixes: scanner pages, UDMI Workbench, units
 
 v0.1.62 fixes two problems seen in the field. After moving to v0.1.61, the IP,
 BACnet and MQTT pages showed "Unexpected Application Error! Failed to fetch
 dynamically imported module", and a hard refresh did not clear it. After a
 14-hour UDMI capture, the UDMI Workbench showed nothing below the Inspector on
 first open. It also lets a site declare units the Digital Buildings Ontology
-list lacks. No database migration (Alembic head `a6b7c8d9e0f1`, Sync v2 head
+list lacks, and lets a register mark an asset with no points as N/A. No
+database migration (Alembic head `a6b7c8d9e0f1`, Sync v2 head
 `a7b8c9d0e1f2`).
 
 ## What changed
@@ -49,6 +50,13 @@ list lacks. No database migration (Alembic head `a6b7c8d9e0f1`, Sync v2 head
 - DBO upstream check (#238): a weekly workflow compares the pinned
   `units.yaml` with Google's master copy and fails when they differ, so a
   re-pin ships in a reviewed release. The app never fetches units at run time.
+- N/A means no points (#240): a register's Expected points or Expected units
+  cell holding only N/A (any case) now reads as blank. Before, import rejected
+  N/A as an unknown unit, and UDMI validation treated it as a point called
+  "N/A", which failed the point-name pattern and was reported missing from
+  the metadata and pointset payloads. The schema finding for a missing
+  `points` field stays; drop `pointset` from Payload applicability for an
+  asset that publishes none.
 
 ## What did not change
 

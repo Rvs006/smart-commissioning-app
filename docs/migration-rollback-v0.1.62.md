@@ -26,7 +26,9 @@ temporary recovery work, not an accepted steady state. Do not run mixed
 v0.1.61 and v0.1.62 API or worker processes. v0.1.61 ignores the saved
 `validation` section, so its register imports and UDMI runs reject custom
 units again, and its next Configuration save drops the list. Note the Custom
-Units before rolling back.
+Units before rolling back. v0.1.61 also reads N/A in a register's Expected
+points or units as a value again, so re-import such registers with blank
+cells after rolling back.
 
 A rollback to v0.1.27 or earlier requires the documented downgrade to
 `f6a7b8c9d0e1` after exporting Sync v2 receipts and artifacts.

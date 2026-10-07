@@ -15,8 +15,9 @@ says when an older copy is still holding port 8000. The UDMI Workbench shows
 its topic discovery and report panels on first open after a long capture, and
 a single generated report can be downloaded straight from the confirmation.
 A site can now declare units the Digital Buildings Ontology list lacks, such
-as `milligrams_per_liter`, under Configuration > Validation Rules. There is no
-database migration in this release.
+as `milligrams_per_liter`, under Configuration > Validation Rules, and a
+register can mark an asset with no points as N/A. There is no database
+migration in this release.
 
 ### Added
 
@@ -45,7 +46,6 @@ database migration in this release.
   and UDMI validation read it as a point called "N/A", which then failed the
   point-name pattern and was reported missing from the metadata and pointset
   payloads. N/A (any case) now reads exactly like a blank cell.
-
 - A page built by an older release no longer strands the scanner pages on
   React Router's "Unexpected Application Error! Failed to fetch dynamically
   imported module". Chunk names change every release, so a tab from an older

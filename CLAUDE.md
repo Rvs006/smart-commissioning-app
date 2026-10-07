@@ -91,7 +91,11 @@ collection order is alphabetical - keep it so.
   the router default; `index.html` is served `Cache-Control: no-cache` by
   `backend/app/main.py` and `frontend/nginx.conf`; `.js`/`.css` media types are
   pinned; the portable launcher's `default_port_warning` names the version
-  holding port 8000 when it has to start elsewhere). No database migration.
+  holding port 8000 when it has to start elsewhere) and #240
+  (`register_list_cell` in `backend/app/services/import_service.py` reads a
+  whole-cell N/A in Expected points/units as blank for import unit checks and
+  `_expected_schedule_from_register_row` in UDMI validation). No database
+  migration.
   v0.1.61 shipped #234 (the Reports list reads through `page_report_summaries`:
   structural result/seal/evidence-contract joins plus display fields from the
   sealed snapshot by JSON path, no canonical re-hash per row; full verification
