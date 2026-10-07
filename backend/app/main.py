@@ -45,7 +45,7 @@ from app.versioning import (
 )
 
 logger = logging.getLogger(__name__)
-APP_VERSION = "0.1.61"
+APP_VERSION = "0.1.62"
 validate_packaged_application_version(APP_VERSION, source="backend.app.main.APP_VERSION")
 _RUNTIME_APP_VERSION = validate_runtime_application_version()
 

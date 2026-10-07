@@ -60,6 +60,7 @@ from app.services.engine_dispatch import (
     make_discovery_loader,
     make_import_loader,
 )
+from app.services.import_service import register_list_cell
 from app.services.job_queue import JobQueueService
 
 # Relocated to app.services.register_topics (shared with the MQTT discovery
@@ -207,12 +208,13 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
 
     Make/Model/GUID/Serial/Firmware/Site/Room feed the metadata/state identity
     checks; comma-separated Expected points apply to both metadata and pointset,
-    while Expected units apply only to metadata. Expected schema version drives
-    the payload version match and the per-version structural checks. Blank
-    fields are dropped so the matcher only checks what's set.
+    while Expected units apply only to metadata (N/A in either means none).
+    Expected schema version drives the payload version match and the
+    per-version structural checks. Blank fields are dropped so the matcher only
+    checks what's set.
     """
-    points = [p.strip() for p in str(row.get("Expected points", "")).split(",") if p.strip()]
-    units = [u.strip() for u in str(row.get("Expected units", "")).split(",")]
+    points = [p.strip() for p in register_list_cell(row, "Expected points").split(",") if p.strip()]
+    units = [u.strip() for u in register_list_cell(row, "Expected units").split(",")]
     fields = {
         "asset_id": row.get("Asset ID") or row.get("Asset name"),
         "project_site": row.get("Project/site"),
@@ -826,9 +828,13 @@ def get_validation_issues(
 
 
 def _load_validation_run(run_id: str, principal: AuthPrincipal) -> RunRecord:
+    # GET-only callers (run detail, issues, export.json). A long UDMI run's
+    # result_summary is large, so loading it under BEGIN IMMEDIATE held the
+    # SQLite writer slot long enough for the page's parallel run + issues
+    # requests to time out with "database is locked" on a cold cache.
     load_scoped_run(run_id, principal, engine=service.engine)
     try:
-        run = service.get_run(run_id)
+        run = service.get_run_read_only(run_id)
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' was not found.") from error
     if run.job_type not in VALIDATION_JOB_TYPES:

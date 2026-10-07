@@ -70,9 +70,33 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-10-05. The latest public release is
-  v0.1.61, and field acceptance for it stays open until recorded privately.
-  v0.1.61 ships #234 (the Reports list reads through `page_report_summaries`:
+- **Current handoff**: status as of 2026-10-06. The latest public release is
+  v0.1.62, and field acceptance for it stays open until recorded privately.
+  v0.1.62 ships #238 (Configuration gains a `validation` section whose
+  "Custom Units" list widens the pinned DBO unit vocabulary for register
+  import, through `ImportProfile.unit_checks` and a `known_units` set that
+  `create_import` reads from the site configuration, and for UDMI validation;
+  `build_run_context` freezes a UDMI run's `custom_units` from the same
+  configuration read as `configuration_snapshot`; a custom unit counts as
+  numeric for the present_value check; `.github/workflows/dbo-upstream.yml`
+  flags drift from the pinned `units.yaml` weekly), #239 (`_load_validation_run` in
+  `backend/app/api/routes/validation.py` reads the UDMI run detail, issues and
+  export.json through `get_run_read_only`, so a long capture's large
+  `result_summary` no longer holds the SQLite writer slot and times out the
+  page's parallel run + issues requests with `database is locked`; ModulePage
+  keeps the generated `ReportSummary[]` and offers a direct download for a
+  single generated format as well as the Generate All zip) and #236 (a lazy route chunk that fails to load, typically a page
+  from an older release talking to a newer server, reloads once through
+  `frontend/src/app/staleBuild.ts` and then shows `RouteErrorPage` instead of
+  the router default; `index.html` is served `Cache-Control: no-cache` by
+  `backend/app/main.py` and `frontend/nginx.conf`; `.js`/`.css` media types are
+  pinned; the portable launcher's `default_port_warning` names the version
+  holding port 8000 when it has to start elsewhere) and #240
+  (`register_list_cell` in `backend/app/services/import_service.py` reads a
+  whole-cell N/A in Expected points/units as blank for import unit checks and
+  `_expected_schedule_from_register_row` in UDMI validation). No database
+  migration.
+  v0.1.61 shipped #234 (the Reports list reads through `page_report_summaries`:
   structural result/seal/evidence-contract joins plus display fields from the
   sealed snapshot by JSON path, no canonical re-hash per row; full verification
   stays in `get_report_for_serving` for open, download, export and verify, so a

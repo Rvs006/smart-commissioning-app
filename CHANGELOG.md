@@ -7,6 +7,18 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.62] - 2026-10-06
+
+A field-fix release. The IP, BACnet and MQTT pages no longer get stuck on
+"Unexpected Application Error!" after an upgrade, and the portable launcher
+says when an older copy is still holding port 8000. The UDMI Workbench shows
+its topic discovery and report panels on first open after a long capture, and
+a single generated report can be downloaded straight from the confirmation.
+A site can now declare units the Digital Buildings Ontology list lacks, such
+as `milligrams_per_liter`, under Configuration > Validation Rules, and a
+register can mark an asset with no points as N/A. There is no database
+migration in this release.
+
 ### Added
 
 - **Site Custom Units.** Configuration has a new Validation Rules section with
@@ -28,6 +40,12 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Fixed
 
+- **N/A in a register's Expected points or Expected units means no points.**
+  An asset with no points (a gateway or DDC controller) can be marked N/A
+  instead of left blank. The import used to reject N/A as an unknown unit,
+  and UDMI validation read it as a point called "N/A", which then failed the
+  point-name pattern and was reported missing from the metadata and pointset
+  payloads. N/A (any case) now reads exactly like a blank cell.
 - A page built by an older release no longer strands the scanner pages on
   React Router's "Unexpected Application Error! Failed to fetch dynamically
   imported module". Chunk names change every release, so a tab from an older
@@ -35,14 +53,29 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   dist does not have. The app now reloads once to pick up the current
   `index.html`, and if that still fails it shows a "This page did not load"
   panel with a Reload button instead of the raw error.
-- `index.html` is served with `Cache-Control: no-cache`, so a browser always
-  revalidates the page that names the current build's chunks.
+- `index.html` is served with `Cache-Control: no-cache` from the backend (`/`,
+  the SPA fallback and a direct `/index.html` request) and from the Docker
+  image's nginx, so a browser always revalidates the page that names the
+  current build's chunks.
 - `.js` and `.css` are served as `text/javascript` and `text/css` regardless of
   the Windows registry, which can map `.js` to `text/plain` and block module
   scripts.
 - The portable launcher warns when port 8000 is already taken and names the
   older Smart Commissioning version holding it, instead of silently starting on
   the next free port while old tabs keep talking to the old copy.
+- The UDMI Workbench no longer drops everything below the Inspector (asset
+  topic discovery, wrong-topic assets, Generate Report) after a long capture.
+  `GET /validation/runs/{id}`, its `/issues` and `/export.json` loaded the whole
+  `result_summary` through a `BEGIN IMMEDIATE` session, so the page's parallel
+  run and issues requests queued on SQLite's writer slot and could hit the 5 s
+  `database is locked` timeout on a cold cache. They now read through the
+  query-only session like the other pure GET paths.
+
+### Changed
+
+- "Generate report from this run" offers a direct download for a single
+  format too (PDF, Word, Excel or evidence pack), not only for Generate All,
+  so the report no longer needs a trip to the Reports tab.
 
 ## [0.1.61] - 2026-10-05
 

@@ -372,9 +372,19 @@ def _validate_payload_applicability(
     ]
 
 
+def register_list_cell(row: dict, column: str) -> str:
+    """An Expected points/units cell, with an explicit "N/A" read as blank.
+
+    Registers mark assets that carry no points (gateways, DDC controllers) with
+    N/A; it means "no points expected", never a point or unit named "N/A".
+    """
+    value = str(row.get(column) or "").strip()
+    return "" if value.casefold() == "n/a" else value
+
+
 def _validate_mqtt_point_unit_pairs(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
-    points_value = row.get("Expected points", "").strip()
-    units_value = row.get("Expected units", "").strip()
+    points_value = register_list_cell(row, "Expected points")
+    units_value = register_list_cell(row, "Expected units")
     if not units_value:
         return []  # Blank points + units is valid for gateway/DDC assets.
     if not points_value:
@@ -409,7 +419,7 @@ def _validate_mqtt_units(
     """Validate each populated comma-separated unit slot against pinned DBO
     plus the site's Custom Units."""
     invalid_units: list[str] = []
-    for value in row.get("Expected units", "").split(","):
+    for value in register_list_cell(row, "Expected units").split(","):
         unit = value.strip()
         if not unit:
             continue
