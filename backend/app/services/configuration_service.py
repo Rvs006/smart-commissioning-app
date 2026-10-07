@@ -406,9 +406,9 @@ class ConfigurationService:
     ) -> list[str]:
         """The site's saved Custom Units, in the operator's order.
 
-        Register import reads these at upload time. The UDMI run route freezes
-        them into run parameters, so the verdict and the run context's frozen
-        configuration snapshot always name the same list.
+        Register import reads these at upload time. A UDMI run does not call
+        this: build_run_context derives its list from the same configuration
+        read it freezes into the run context.
         """
         return custom_unit_names(
             self.load(project_id, site_id).validation.values.get("Custom Units", "")

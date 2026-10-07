@@ -565,12 +565,8 @@ def create_udmi_validation_run(
     nonpub_schema_sets = UdmiSchemaSetRepository(service.engine).get_all_files()
     if nonpub_schema_sets:
         parameters["nonpub_schema_sets"] = nonpub_schema_sets
-    # Same rule for the site's Custom Units: the saved configuration is the sole
-    # source, so the unit verdict matches the frozen configuration snapshot.
-    parameters.pop("custom_units", None)
-    custom_units = config_service.custom_units(request.project_id, request.site_id)
-    if custom_units:
-        parameters["custom_units"] = custom_units
+    # Custom Units are not embedded here: build_run_context derives them from
+    # the same configuration read it freezes into the run context.
     run = _create_run(
         request.model_copy(update={"parameters": parameters}), "udmi_validation", principal
     )

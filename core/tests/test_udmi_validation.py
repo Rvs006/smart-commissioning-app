@@ -1035,6 +1035,29 @@ class UnitMatchTests(unittest.TestCase):
         self.assertIn("does not match the expected register unit", mismatched)
         self.assertIn("Metadata unit 'mg/L'", mismatched)
 
+    def test_custom_unit_values_must_be_numeric(self) -> None:
+        def numeric_findings(unit: str, present_value: object) -> list:
+            issues = _issues(
+                {
+                    "expected_schedule": _schedule(units={"probe_sensor": unit}),
+                    "metadata_payload": _metadata(
+                        pointset={"points": {"probe_sensor": {"units": unit}}}
+                    ),
+                    "pointset_payload": _pointset(
+                        points={"probe_sensor": {"present_value": present_value}}
+                    ),
+                    "custom_units": ["milligrams_per_liter", "boolean"],
+                }
+            )
+            return [issue for issue in issues if "should be numeric" in issue.description]
+
+        findings = numeric_findings("milligrams_per_liter", "not-a-number")
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, "critical")
+        self.assertEqual(numeric_findings("milligrams_per_liter", 7.9), [])
+        # A custom entry that is already a known non-numeric name keeps its meaning.
+        self.assertEqual(numeric_findings("boolean", "on"), [])
+
     def test_run_level_custom_units_reach_every_register_asset(self) -> None:
         entry = {
             "expected_schedule": _schedule(units={"oxygen_concentration_sensor": "milligrams_per_liter"}),

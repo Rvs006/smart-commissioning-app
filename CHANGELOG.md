@@ -14,9 +14,11 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   Buildings Ontology list lacks, such as `milligrams_per_liter`. Register
   imports (MQTT register, BACnet points, MQTT points, mapping) accept them, and
   UDMI validation stops raising "not a recognized DBO unit" for them. The
-  register unit must still match the unit the device publishes. Each UDMI run
-  freezes the saved list into its parameters next to the frozen configuration
-  snapshot, so a later edit never changes an old verdict. The import rejection
+  register unit must still match the unit the device publishes, and a custom
+  unit counts as a measurement unit, so a non-numeric `present_value` is still
+  flagged. Each UDMI run takes the list from the same configuration read it
+  freezes into its run context, so a later edit never changes an old verdict
+  and a concurrent save cannot split the two. The import rejection
   for an unknown unit now says where to add it, and configuration files
   exported by older releases still import.
 - **Weekly DBO upstream check.** A scheduled workflow compares the pinned

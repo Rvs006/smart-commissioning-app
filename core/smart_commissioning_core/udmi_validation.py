@@ -820,6 +820,10 @@ def _review_payload_issues(
         return []
     if custom_units is None:
         custom_units = custom_canonical_units(parameters.get("custom_units"))
+    # A site's custom units are measurement units (mg/L, NTU), so their values
+    # must be numeric like any DBO measurement unit. A custom entry that is
+    # already a known name (boolean, enum, no_units) keeps that name's meaning.
+    numeric_units = _NUMERIC_CANONICAL_UNITS | (custom_units - _KNOWN_CANONICAL_UNITS)
 
     issues = [*existing_issues]
     first_new_issue = len(issues)
@@ -1242,7 +1246,7 @@ def _review_payload_issues(
         # A blank-but-present value routes to the empty-value pass below (the
         # accurate "never linked" fact), not to this numeric-type complaint.
         if (
-            observed_canonical in _NUMERIC_CANONICAL_UNITS
+            observed_canonical in numeric_units
             and present_value is not None
             and not _is_blank_value(present_value)
             and not isinstance(present_value, int | float)
