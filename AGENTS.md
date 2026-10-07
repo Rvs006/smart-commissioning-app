@@ -72,7 +72,14 @@ collection order is alphabetical - keep it so.
   or delegate implementation subagents with `model: claude-opus-4-8`.
 - **Current handoff**: status as of 2026-10-06. The latest public release is
   v0.1.62, and field acceptance for it stays open until recorded privately.
-  v0.1.62 ships #239 (`_load_validation_run` in
+  v0.1.62 ships #238 (Configuration gains a `validation` section whose
+  "Custom Units" list widens the pinned DBO unit vocabulary for register
+  import, through `ImportProfile.unit_checks` and a `known_units` set that
+  `create_import` reads from the site configuration, and for UDMI validation;
+  `build_run_context` freezes a UDMI run's `custom_units` from the same
+  configuration read as `configuration_snapshot`; a custom unit counts as
+  numeric for the present_value check; `.github/workflows/dbo-upstream.yml`
+  flags drift from the pinned `units.yaml` weekly), #239 (`_load_validation_run` in
   `backend/app/api/routes/validation.py` reads the UDMI run detail, issues and
   export.json through `get_run_read_only`, so a long capture's large
   `result_summary` no longer holds the SQLite writer slot and times out the

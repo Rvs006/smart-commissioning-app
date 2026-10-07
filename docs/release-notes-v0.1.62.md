@@ -4,7 +4,8 @@ v0.1.62 fixes two problems seen in the field. After moving to v0.1.61, the IP,
 BACnet and MQTT pages showed "Unexpected Application Error! Failed to fetch
 dynamically imported module", and a hard refresh did not clear it. After a
 14-hour UDMI capture, the UDMI Workbench showed nothing below the Inspector on
-first open. No database migration (Alembic head `a6b7c8d9e0f1`, Sync v2 head
+first open. It also lets a site declare units the Digital Buildings Ontology
+list lacks. No database migration (Alembic head `a6b7c8d9e0f1`, Sync v2 head
 `a7b8c9d0e1f2`).
 
 ## What changed
@@ -35,11 +36,29 @@ first open. No database migration (Alembic head `a6b7c8d9e0f1`, Sync v2 head
 - Single report download (#239): "Generate report from this run" now offers a
   direct download for one format (PDF, Word, Excel or evidence pack), as
   Generate All already did with its combined ZIP.
+- Site Custom Units (#238): Configuration has a new Validation Rules section
+  with a Custom Units list, for units a site uses on purpose that the pinned
+  Digital Buildings Ontology list lacks. The field case was a dissolved-oxygen
+  point in `milligrams_per_liter`. Register imports accept these units, and
+  UDMI validation stops raising "not a recognized DBO unit" for them. The
+  register unit must still match what the device publishes, and a
+  non-numeric `present_value` under a custom unit is still flagged. Each UDMI
+  run takes the list from the same configuration read it freezes as its
+  configuration snapshot. An unknown unit's import rejection now names the
+  setting.
+- DBO upstream check (#238): a weekly workflow compares the pinned
+  `units.yaml` with Google's master copy and fails when they differ, so a
+  re-pin ships in a reviewed release. The app never fetches units at run time.
 
 ## What did not change
 
-- No engine, run parameter or API shape changed. Scans, UDMI validation and
-  reports persist the same runs and evidence as v0.1.61.
+- No engine or discovery logic changed. The only API additions are the
+  optional `validation` configuration section and the `custom_units` parameter
+  a UDMI run freezes when the site has Custom Units (#238). Scans, UDMI
+  validation and reports otherwise persist the same runs and evidence as
+  v0.1.61.
+- The pinned DBO unit vocabulary is unchanged (191 names). It still matches
+  Google's master `units.yaml` byte for byte.
 - The launcher still starts on the next free port when 8000 is taken; it now
   says so.
 
