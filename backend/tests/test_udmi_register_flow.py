@@ -208,6 +208,32 @@ class UdmiRegisterFlowTests(ApiTestCase):
             2340,
         )
 
+    def test_na_points_and_units_mean_no_points_expected(self) -> None:
+        # A gateway with no points is marked N/A in the register. It must
+        # import cleanly and expect nothing, rather than a point named "N/A"
+        # that fails the point-name pattern and is then reported missing.
+        project_id = "udmi-na-points-project"
+        site_id = "udmi-na-points-site"
+        csv_text = (
+            "Project/site,System,Asset ID,Expected topic,Expected schema version,"
+            "Expected points,Expected units,Expected reporting interval,Source protocol\n"
+            "Site A,PMS,CGW-001,site/pms/CGW-001/#,1.5.2,N/A,n/a,60,MQTT\n"
+        )
+        upload = self.client.post(
+            "/api/v1/imports",
+            data={"import_type": "mqtt_register", "project_id": project_id, "site_id": site_id},
+            files={"file": ("na.csv", io.BytesIO(csv_text.encode()), "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 200, upload.text)
+        self.assertEqual(upload.json()["status"], "accepted", upload.text)
+
+        response = self._post_run(project_id, site_id)
+        self.assertEqual(response.status_code, 200, response.text)
+        run = self.client.get(f"/api/v1/validation/runs/{response.json()['run_id']}").json()
+        schedule = run["parameters"]["assets"][0]["expected_schedule"]
+        self.assertNotIn("points", schedule)
+        self.assertNotIn("units", schedule)
+
     def test_floor_column_is_optional_metadata_and_does_not_change_asset_selection(self) -> None:
         variants = {
             "with-floor": _REGISTER_CSV.replace(

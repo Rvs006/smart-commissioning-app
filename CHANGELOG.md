@@ -39,6 +39,13 @@ database migration in this release.
 
 ### Fixed
 
+- **N/A in a register's Expected points or Expected units means no points.**
+  An asset with no points (a gateway or DDC controller) can be marked N/A
+  instead of left blank. The import used to reject N/A as an unknown unit,
+  and UDMI validation read it as a point called "N/A", which then failed the
+  point-name pattern and was reported missing from the metadata and pointset
+  payloads. N/A (any case) now reads exactly like a blank cell.
+
 - A page built by an older release no longer strands the scanner pages on
   React Router's "Unexpected Application Error! Failed to fetch dynamically
   imported module". Chunk names change every release, so a tab from an older
