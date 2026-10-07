@@ -72,7 +72,13 @@ collection order is alphabetical - keep it so.
   or delegate implementation subagents with `model: claude-opus-4-8`.
 - **Current handoff**: status as of 2026-10-06. The latest public release is
   v0.1.62, and field acceptance for it stays open until recorded privately.
-  v0.1.62 ships #236 (a lazy route chunk that fails to load, typically a page
+  v0.1.62 ships #239 (`_load_validation_run` in
+  `backend/app/api/routes/validation.py` reads the UDMI run detail, issues and
+  export.json through `get_run_read_only`, so a long capture's large
+  `result_summary` no longer holds the SQLite writer slot and times out the
+  page's parallel run + issues requests with `database is locked`; ModulePage
+  keeps the generated `ReportSummary[]` and offers a direct download for a
+  single generated format as well as the Generate All zip) and #236 (a lazy route chunk that fails to load, typically a page
   from an older release talking to a newer server, reloads once through
   `frontend/src/app/staleBuild.ts` and then shows `RouteErrorPage` instead of
   the router default; `index.html` is served `Cache-Control: no-cache` by

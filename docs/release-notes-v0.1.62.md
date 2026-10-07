@@ -1,9 +1,11 @@
 # v0.1.62 - Scanner pages recover after an upgrade
 
-v0.1.62 fixes one problem seen in the field: after moving to v0.1.61, the IP,
+v0.1.62 fixes two problems seen in the field. After moving to v0.1.61, the IP,
 BACnet and MQTT pages showed "Unexpected Application Error! Failed to fetch
-dynamically imported module", and a hard refresh did not clear it. No database
-migration (Alembic head `a6b7c8d9e0f1`, Sync v2 head `a7b8c9d0e1f2`).
+dynamically imported module", and a hard refresh did not clear it. After a
+14-hour UDMI capture, the UDMI Workbench showed nothing below the Inspector on
+first open. No database migration (Alembic head `a6b7c8d9e0f1`, Sync v2 head
+`a7b8c9d0e1f2`).
 
 ## What changed
 
@@ -23,10 +25,20 @@ migration (Alembic head `a6b7c8d9e0f1`, Sync v2 head `a7b8c9d0e1f2`).
   the Smart Commissioning version holding it (or "another program") and says
   that tabs on port 8000 will not reach the new copy. Before, it moved to the
   next free port without saying so. The warning never blocks startup.
+- UDMI run detail reads without the writer lock (#239): `GET
+  /validation/runs/{id}`, `/issues` and `/export.json` loaded the whole
+  `result_summary` through a `BEGIN IMMEDIATE` session. The UDMI page asks for
+  the run and its issues together, so after a long capture one request could
+  wait out SQLite's 5 s busy timeout and fail with `database is locked`,
+  leaving out the asset topic discovery panel, the wrong-topic assets table and
+  the Generate Report card. They now read through the query-only session.
+- Single report download (#239): "Generate report from this run" now offers a
+  direct download for one format (PDF, Word, Excel or evidence pack), as
+  Generate All already did with its combined ZIP.
 
 ## What did not change
 
-- No engine, route or run parameter changed. Scans, UDMI validation and
+- No engine, run parameter or API shape changed. Scans, UDMI validation and
   reports persist the same runs and evidence as v0.1.61.
 - The launcher still starts on the next free port when 8000 is taken; it now
   says so.

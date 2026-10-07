@@ -11,8 +11,10 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 A field-fix release. The IP, BACnet and MQTT pages no longer get stuck on
 "Unexpected Application Error!" after an upgrade, and the portable launcher
-says when an older copy is still holding port 8000. There is no database
-migration in this release.
+says when an older copy is still holding port 8000. The UDMI Workbench shows
+its topic discovery and report panels on first open after a long capture, and
+a single generated report can be downloaded straight from the confirmation.
+There is no database migration in this release.
 
 ### Fixed
 
