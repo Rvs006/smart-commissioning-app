@@ -17,6 +17,7 @@ from smart_commissioning_core.dbo_units import (
     NUMERIC_CANONICAL_UNITS,
     NUMERIC_UNIT_NAMES,
     canonical_unit,
+    custom_canonical_units,
 )
 from smart_commissioning_core.engines.comparison_common import make_issue
 from smart_commissioning_core.mqtt_settings import (
@@ -764,6 +765,8 @@ def _review_all_payload_issues(
     resolved here and passed down to every reviewer call.
     """
     uploaded_schemas = _nonpub_schema_sets(parameters)
+    # Site custom units are embedded at the same run level for the same reason.
+    custom_units = custom_canonical_units(parameters.get("custom_units"))
     assets = parameters.get("assets")
     if isinstance(assets, list) and assets:
         issues = [*existing_issues]
@@ -771,9 +774,21 @@ def _review_all_payload_issues(
         for entry in assets:
             if not isinstance(entry, dict):
                 continue
-            issues.extend(_review_payload_issues(entry, issues, uploaded_schemas=uploaded_schemas))
+            issues.extend(
+                _review_payload_issues(
+                    entry,
+                    issues,
+                    uploaded_schemas=uploaded_schemas,
+                    custom_units=custom_units,
+                )
+            )
         return issues[first_new_issue:]
-    return _review_payload_issues(parameters, existing_issues, uploaded_schemas=uploaded_schemas)
+    return _review_payload_issues(
+        parameters,
+        existing_issues,
+        uploaded_schemas=uploaded_schemas,
+        custom_units=custom_units,
+    )
 
 
 def _applicable_payload_types(expected: dict[str, Any]) -> set[str]:
@@ -798,10 +813,13 @@ def _review_payload_issues(
     existing_issues: list[ValidationIssueRecord],
     *,
     uploaded_schemas: dict[str, dict[str, dict]] | None = None,
+    custom_units: frozenset[str] | None = None,
 ) -> list[ValidationIssueRecord]:
     expected = _dict_or_empty(parameters.get("expected_schedule"))
     if not expected:
         return []
+    if custom_units is None:
+        custom_units = custom_canonical_units(parameters.get("custom_units"))
 
     issues = [*existing_issues]
     first_new_issue = len(issues)
@@ -1193,21 +1211,28 @@ def _review_payload_issues(
             )
         unit_to_check = metadata_unit or expected_unit
         canonical_to_check = observed_canonical or expected_canonical
-        if canonical_to_check and canonical_to_check not in _KNOWN_CANONICAL_UNITS:
+        if (
+            canonical_to_check
+            and canonical_to_check not in _KNOWN_CANONICAL_UNITS
+            and canonical_to_check not in custom_units
+        ):
             issues.append(
                 _issue(
                     issues,
                     asset_id=asset_id,
                     issue_type="metadata_validation",
                     severity="high",
-                    description=f"Metadata unit '{unit_to_check}' for {point_name} is not a recognized DBO unit.",
+                    description=(
+                        f"Metadata unit '{unit_to_check}' for {point_name} is not a recognized "
+                        "DBO unit or a site custom unit."
+                    ),
                     point_name=str(point_name),
                     expected_value="recognized DBO unit",
                     observed_value=str(unit_to_check),
                     match_basis="units",
                     suggested_action=(
-                        "Correct the unit spelling or add the intended unit to the pinned "
-                        "Digital Buildings Ontology vocabulary after review."
+                        "Correct the unit spelling, or add it under Configuration > Validation "
+                        "Rules > Custom Units if the site uses it on purpose."
                     ),
                     raw_evidence_uri=raw_evidence_uri,
                 )

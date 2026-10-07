@@ -34,6 +34,7 @@ const sectionOrder: ConfigurationSectionKey[] = [
   "bacnet",
   "mqtt",
   "certificates",
+  "validation",
   "time",
   "backups",
   "logging",
@@ -50,6 +51,7 @@ const defaultExpandedSections: Record<ConfigurationSectionKey, boolean> = {
   logging: false,
   mqtt: true,
   time: false,
+  validation: false,
 };
 
 const sectionLabels: Record<ConfigurationSectionKey, string> = {
@@ -60,6 +62,7 @@ const sectionLabels: Record<ConfigurationSectionKey, string> = {
   logging: "Logging & Diagnostics",
   mqtt: "MQTT Settings",
   time: "Time & NTP",
+  validation: "Validation Rules",
 };
 
 const sectionDescriptions: Record<ConfigurationSectionKey, string> = {
@@ -73,6 +76,7 @@ const sectionDescriptions: Record<ConfigurationSectionKey, string> = {
     "Runtime logging to a local rotating file (logs/app.log under the app runtime directory), retention of rotated files, and optional upload of a masked log bundle to a URL.",
   mqtt: "Broker, client identity, QoS, keep-alive, and optional Mosquitto-style credentials.",
   time: "Timezone and NTP settings used to timestamp evidence and validate stale data.",
+  validation: "Site rules applied when registers are imported and UDMI payloads are validated.",
 };
 
 // A representative, comprehensive list of IANA timezones spanning every UTC
@@ -180,6 +184,9 @@ const fieldDefinitions: Partial<Record<ConfigurationSectionKey, Record<string, F
   },
   time: {
     Timezone: { kind: "select", options: TIMEZONE_OPTIONS },
+  },
+  validation: {
+    "Custom Units": { kind: "textarea" },
   },
 };
 
@@ -996,6 +1003,9 @@ function fieldHint(
     }
     return hint;
   }
+  if (section === "validation" && field === "Custom Units") {
+    return "One per line or comma-separated, for example milligrams_per_liter. Register imports and UDMI validation accept these alongside the DBO units, and the spelling must still match what the device publishes. Save, then import the register again.";
+  }
   if (section === "certificates" && field === CERT_EXPIRY_FIELD) {
     const value = draft.certificates.values[field] ?? "";
     if (isExpired(value)) {
@@ -1074,6 +1084,9 @@ const FIELD_TOOLTIPS: Record<string, string> = {
     "HTTPS endpoint that receives the masked log bundle when you press Upload logs now. Leave blank to keep logs local-only.",
   "Log Upload Token":
     "Optional bearer token sent as an Authorization header with the upload (stored masked, never shown again).",
+  // Validation Rules
+  "Custom Units":
+    "Units this site uses on purpose that are not in the Digital Buildings Ontology unit list.",
 };
 
 type FieldControlProps = {
@@ -1244,8 +1257,14 @@ function FieldControl({
     return (
       <label title={FIELD_TOOLTIPS[field]}>
         {field}
-        <textarea disabled={disabled} onChange={(event) => onValueChange(event.target.value)} rows={4} value={value} />
-        {hint && <small>{hint}</small>}
+        <textarea
+          aria-describedby={hintId}
+          disabled={disabled}
+          onChange={(event) => onValueChange(event.target.value)}
+          rows={4}
+          value={value}
+        />
+        {hint && <small id={hintId}>{hint}</small>}
       </label>
     );
   }
@@ -1394,6 +1413,10 @@ type ParsedConfiguration =
 
 const configurationSectionKeys: ConfigurationSectionKey[] = [...sectionOrder];
 
+// Sections newer than some exported files. A file without one still imports;
+// the server fills that section's defaults.
+const OPTIONAL_IMPORT_SECTIONS = new Set<ConfigurationSectionKey>(["validation"]);
+
 // Parses and shape-checks an imported JSON file. Accepts either the exported
 // envelope ({kind, configuration, ...}) or a bare snapshot, and verifies every
 // section is present with a values object before handing it to the API, so an
@@ -1417,6 +1440,9 @@ function parseConfigurationFile(raw: string): ParsedConfiguration {
 
   for (const section of configurationSectionKeys) {
     const sectionValue = candidate[section];
+    if (sectionValue === undefined && OPTIONAL_IMPORT_SECTIONS.has(section)) {
+      continue;
+    }
     if (!sectionValue || typeof sectionValue !== "object") {
       return { error: `Configuration file is missing the "${section}" section.`, ok: false };
     }

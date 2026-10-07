@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from cryptography import x509
 from cryptography.fernet import Fernet, InvalidToken
 from smart_commissioning_core.db.repositories import ConfigurationRepository
+from smart_commissioning_core.dbo_units import custom_unit_names
 from smart_commissioning_core.engines.bacnet_params import (
     MODE_FOREIGN_DEVICE,
     PARAM_BACNET_MODE,
@@ -169,6 +170,15 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
         },
         # Honest: a fresh install logs to the local rotating file only.
         status="Local file",
+    ),
+    validation=ConfigurationSection(
+        values={
+            # Units this site uses on purpose that the pinned Digital Buildings
+            # Ontology list lacks (comma, semicolon or newline separated).
+            # Register import and UDMI validation accept them beside DBO.
+            "Custom Units": "",
+        },
+        status="Optional",
     ),
 )
 
@@ -390,6 +400,19 @@ class ConfigurationService:
         except (ValueError, IndexError):
             qos = 0
         return {"qos": qos}
+
+    def custom_units(
+        self, project_id: str = DEFAULT_PROJECT_ID, site_id: str = DEFAULT_SITE_ID
+    ) -> list[str]:
+        """The site's saved Custom Units, in the operator's order.
+
+        Register import reads these at upload time. The UDMI run route freezes
+        them into run parameters, so the verdict and the run context's frozen
+        configuration snapshot always name the same list.
+        """
+        return custom_unit_names(
+            self.load(project_id, site_id).validation.values.get("Custom Units", "")
+        )
 
     def bacnet_transport_defaults(
         self, project_id: str = DEFAULT_PROJECT_ID, site_id: str = DEFAULT_SITE_ID
@@ -749,6 +772,7 @@ class ConfigurationService:
             errors, "Diagnostics Mode", configuration.logging.values.get("Diagnostics Mode", "")
         )
         self._validate_log_upload_url(errors, configuration.logging.values.get("Log Upload URL", ""))
+        self._validate_custom_units(errors, configuration.validation.values.get("Custom Units", ""))
 
         return ConfigurationValidationResult(valid=not errors, errors=errors)
 
@@ -1011,6 +1035,21 @@ class ConfigurationService:
         allowed = {choice.casefold() for choice in choices}
         if value.strip().casefold() not in allowed:
             errors.append(f"{label} must be one of: {', '.join(choices)}.")
+
+    _MAX_CUSTOM_UNITS = 100
+    _MAX_CUSTOM_UNIT_LENGTH = 64
+
+    def _validate_custom_units(self, errors: list[str], value: str) -> None:
+        names = custom_unit_names(value)
+        if len(names) > self._MAX_CUSTOM_UNITS:
+            errors.append(f"Custom Units allows at most {self._MAX_CUSTOM_UNITS} entries.")
+        for name in names:
+            if len(name) > self._MAX_CUSTOM_UNIT_LENGTH or not name.isprintable():
+                errors.append(
+                    f"Custom Units entry '{name[: self._MAX_CUSTOM_UNIT_LENGTH]}' must be printable "
+                    f"text of at most {self._MAX_CUSTOM_UNIT_LENGTH} characters."
+                )
+                break
 
     def _validate_log_upload_url(self, errors: list[str], value: str) -> None:
         """Empty (local-only) is valid; otherwise require an http(s) URL with a

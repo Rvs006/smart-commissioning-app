@@ -83,6 +83,10 @@ function configurationPayload() {
       values: { "Log Level": "Info" },
       status: "Healthy",
     },
+    validation: {
+      values: { "Custom Units": "" },
+      status: "Optional",
+    },
   };
 }
 
@@ -240,6 +244,34 @@ describe("ConfigurationPage", () => {
     fireEvent.click(timeToggle);
     expect(timeToggle).toHaveAttribute("aria-expanded", "true");
     expect(await screen.findByText("Timezone")).toBeInTheDocument();
+  });
+
+  it("saves site Custom Units from the collapsed Validation Rules section", async () => {
+    let saved: ReturnType<typeof configurationPayload> = configurationPayload();
+    stubFetch((url, init) => {
+      if (url.endsWith("/api/v1/configuration") && init?.method === "PUT") {
+        saved = JSON.parse(String(init.body));
+        return jsonResponse(saved);
+      }
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(saved);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const toggle = await screen.findByRole("button", { name: /Validation Rules/i });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+
+    const textarea = screen.getByRole("textbox", { name: /Custom Units/i });
+    expect(textarea).toHaveAccessibleDescription(/milligrams_per_liter/);
+    fireEvent.change(textarea, { target: { value: "milligrams_per_liter" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Configuration" }));
+
+    await screen.findByText("Configuration saved");
+    expect(saved.validation.values["Custom Units"]).toBe("milligrams_per_liter");
   });
 
   it("renders the timezone as a select including UTC and non-Europe zones", async () => {
@@ -1214,6 +1246,35 @@ describe("ConfigurationPage", () => {
     expect(putBody).not.toBeNull();
     expect(JSON.parse(putBody as unknown as string)).toHaveProperty("device");
     expect(JSON.parse(putBody as unknown as string)).not.toHaveProperty("kind");
+  });
+
+  it("imports an older configuration file that predates the Validation Rules section", async () => {
+    let putBody: string | null = null;
+    stubFetch((url, init) => {
+      if (url.endsWith("/api/v1/configuration") && init?.method === "PUT") {
+        putBody = String(init?.body);
+        return jsonResponse(configurationPayload());
+      }
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    await screen.findByRole("button", { name: /Import JSON/i });
+    const older: Partial<ReturnType<typeof configurationPayload>> = configurationPayload();
+    delete older.validation;
+    const file = new File([JSON.stringify({ configuration: older })], "old.json", {
+      type: "application/json",
+    });
+    fireEvent.change(screen.getByLabelText(/Import configuration JSON file/i), {
+      target: { files: [file] },
+    });
+
+    expect(await screen.findByText(/Imported configuration was validated/i)).toBeInTheDocument();
+    expect(JSON.parse(putBody as unknown as string)).not.toHaveProperty("validation");
   });
 
   it("rejects a malformed import file client-side without calling the API", async () => {
