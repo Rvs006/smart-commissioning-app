@@ -824,9 +824,13 @@ def get_validation_issues(
 
 
 def _load_validation_run(run_id: str, principal: AuthPrincipal) -> RunRecord:
+    # GET-only callers (run detail, issues, export.json). A long UDMI run's
+    # result_summary is large, so loading it under BEGIN IMMEDIATE held the
+    # SQLite writer slot long enough for the page's parallel run + issues
+    # requests to time out with "database is locked" on a cold cache.
     load_scoped_run(run_id, principal, engine=service.engine)
     try:
-        run = service.get_run(run_id)
+        run = service.get_run_read_only(run_id)
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' was not found.") from error
     if run.job_type not in VALIDATION_JOB_TYPES:
