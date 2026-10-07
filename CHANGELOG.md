@@ -7,6 +7,13 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.63] - 2026-10-07
+
+A site setting asked for in the field. A UDMI asset whose register row limits
+its Payload applicability (for example `state, metadata`) no longer has to be
+flagged when the device also publishes another payload type: the site can
+choose to ignore it. There is no database migration in this release.
+
 ### Added
 
 - **Ignore payloads outside Payload applicability.** Configuration >

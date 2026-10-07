@@ -70,9 +70,16 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-10-06. The latest public release is
-  v0.1.62, and field acceptance for it stays open until recorded privately.
-  v0.1.62 ships #238 (Configuration gains a `validation` section whose
+- **Current handoff**: status as of 2026-10-07. The latest public release is
+  v0.1.63, and field acceptance for it stays open until recorded privately.
+  v0.1.63 ships #241 (Configuration `validation` gains "Ignore Payloads Outside Applicability"; `build_run_context` freezes
+  `ignore_unapproved_payloads` from the same configuration read as
+  `configuration_snapshot`, only when Enabled; `_review_payload_issues` drops a
+  payload type outside the asset's applicability from a local copy of its
+  parameters so it raises no `payload_not_applicable` or content findings,
+  while the payload view keeps it as received evidence and `udmi_results`
+  never counts it as `successfully_validated`). No database migration.
+  v0.1.62 shipped #238 (Configuration gains a `validation` section whose
   "Custom Units" list widens the pinned DBO unit vocabulary for register
   import, through `ImportProfile.unit_checks` and a `known_units` set that
   `create_import` reads from the site configuration, and for UDMI validation;
