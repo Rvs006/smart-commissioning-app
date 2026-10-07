@@ -14,7 +14,28 @@ A field-fix release. The IP, BACnet and MQTT pages no longer get stuck on
 says when an older copy is still holding port 8000. The UDMI Workbench shows
 its topic discovery and report panels on first open after a long capture, and
 a single generated report can be downloaded straight from the confirmation.
-There is no database migration in this release.
+A site can now declare units the Digital Buildings Ontology list lacks, such
+as `milligrams_per_liter`, under Configuration > Validation Rules. There is no
+database migration in this release.
+
+### Added
+
+- **Site Custom Units.** Configuration has a new Validation Rules section with
+  a Custom Units list for units a site uses on purpose that the pinned Digital
+  Buildings Ontology list lacks, such as `milligrams_per_liter`. Register
+  imports (MQTT register, BACnet points, MQTT points, mapping) accept them, and
+  UDMI validation stops raising "not a recognized DBO unit" for them. The
+  register unit must still match the unit the device publishes, and a custom
+  unit counts as a measurement unit, so a non-numeric `present_value` is still
+  flagged. Each UDMI run takes the list from the same configuration read it
+  freezes into its run context, so a later edit never changes an old verdict
+  and a concurrent save cannot split the two. The import rejection
+  for an unknown unit now says where to add it, and configuration files
+  exported by older releases still import.
+- **Weekly DBO upstream check.** A scheduled workflow compares the pinned
+  `units.yaml` bytes with Google's master copy and fails when they differ, so a
+  re-pin ships in a reviewed release instead of the app fetching units at run
+  time.
 
 ### Fixed
 

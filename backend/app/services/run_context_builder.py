@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from smart_commissioning_core.db.repositories import ImportRepository
+from smart_commissioning_core.dbo_units import custom_unit_names
 from smart_commissioning_core.engines.bacnet_params import PARAM_BACNET_PORT
 from smart_commissioning_core.run_context import (
     ContextResourceV1,
@@ -113,6 +114,17 @@ def build_run_context(
     }:
         frozen_parameters.pop(parameter_name, None)
     frozen_parameters.update(runtime_provenance)
+    # A UDMI run's Custom Units come from THIS configuration read, never from
+    # the client or a second read, so a concurrent Configuration save cannot
+    # leave the unit verdict and the frozen snapshot naming different lists.
+    if job_type == "udmi_validation":
+        frozen_parameters.pop("custom_units", None)
+        validation_section = frozen_configuration.get("validation") or {}
+        custom_units = custom_unit_names(
+            (validation_section.get("values") or {}).get("Custom Units", "")
+        )
+        if custom_units:
+            frozen_parameters["custom_units"] = custom_units
     configuration_digest = hashlib.sha256(
         canonical_json_bytes(frozen_configuration)
     ).hexdigest()

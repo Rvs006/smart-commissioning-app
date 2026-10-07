@@ -178,6 +178,7 @@ const configurationFixture: ConfigurationSnapshot = {
   logging: sectionFixture,
   mqtt: sectionFixture,
   time: sectionFixture,
+  validation: sectionFixture,
 };
 
 function jsonResponse(payload: unknown): Response {

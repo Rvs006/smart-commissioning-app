@@ -565,6 +565,8 @@ def create_udmi_validation_run(
     nonpub_schema_sets = UdmiSchemaSetRepository(service.engine).get_all_files()
     if nonpub_schema_sets:
         parameters["nonpub_schema_sets"] = nonpub_schema_sets
+    # Custom Units are not embedded here: build_run_context derives them from
+    # the same configuration read it freezes into the run context.
     run = _create_run(
         request.model_copy(update={"parameters": parameters}), "udmi_validation", principal
     )

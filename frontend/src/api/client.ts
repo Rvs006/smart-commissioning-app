@@ -98,6 +98,7 @@ export type ConfigurationSnapshot = {
   time: ConfigurationSection;
   backups: ConfigurationSection;
   logging: ConfigurationSection;
+  validation: ConfigurationSection;
 };
 
 export type ConfigurationSectionKey = keyof ConfigurationSnapshot;

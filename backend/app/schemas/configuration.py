@@ -14,6 +14,11 @@ class ConfigurationSnapshot(BaseModel):
     time: ConfigurationSection
     backups: ConfigurationSection
     logging: ConfigurationSection
+    # Older snapshots and exported files predate this section; a blank status
+    # lets ConfigurationService._merge_with_defaults fill the default.
+    validation: ConfigurationSection = Field(
+        default_factory=lambda: ConfigurationSection(status="")
+    )
 
 
 class ConfigurationValidationResult(BaseModel):

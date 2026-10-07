@@ -12,6 +12,7 @@ these under stdlib ``unittest``, which does not load ``conftest.py``).
 import unittest
 
 from app.services.import_service import EXAMPLE_ROWS, PROFILES
+from smart_commissioning_core.dbo_units import KNOWN_CANONICAL_UNITS, custom_canonical_units
 from smart_commissioning_core.engines.comparison_common import parse_tolerance
 
 
@@ -152,6 +153,23 @@ class UnitVocabularyTests(unittest.TestCase):
             self._mqtt_errors("ppb, parts-per-trillion-ish"),
             [("Expected units", "invalid_unit")],
         )
+
+    def test_known_units_argument_widens_every_unit_column(self) -> None:
+        known = KNOWN_CANONICAL_UNITS | custom_canonical_units("milligrams_per_liter")
+        mqtt_row = dict(EXAMPLE_ROWS["mqtt_register"])
+        mqtt_row["Expected points"] = "oxygen_concentration_sensor"
+        mqtt_row["Expected units"] = "milligrams_per_liter"
+        mapping_row = dict(EXAMPLE_ROWS["mapping"])
+        mapping_row["BACnet units"] = "milligrams-per-liter"
+        mapping_row["MQTT units"] = "milligrams_per_liter"
+        for import_type, row in (("mqtt_register", mqtt_row), ("mapping", mapping_row)):
+            with self.subTest(import_type=import_type):
+                profile = PROFILES[import_type]
+                default_errors = profile.validate_row(dict(row), row_number=2)
+                self.assertTrue(default_errors)
+                self.assertTrue(all(error.code == "invalid_unit" for error in default_errors))
+                self.assertIn("Custom Units", default_errors[0].message)
+                self.assertEqual(profile.validate_row(dict(row), row_number=2, known_units=known), [])
 
 
 if __name__ == "__main__":
