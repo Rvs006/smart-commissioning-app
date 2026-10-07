@@ -562,7 +562,8 @@ def build_validation_summary_v1(
                     "has_issues": bool(payload_issues),
                     "blocking_issue_count": payload_blocking,
                     "successfully_validated": (
-                        received
+                        is_expected
+                        and received
                         and payload_blocking == 0
                         and cadence_status in {"passed", "not_required"}
                     ),

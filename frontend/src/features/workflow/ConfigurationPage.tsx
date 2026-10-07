@@ -187,6 +187,7 @@ const fieldDefinitions: Partial<Record<ConfigurationSectionKey, Record<string, F
   },
   validation: {
     "Custom Units": { kind: "textarea" },
+    "Ignore Payloads Outside Applicability": { kind: "select", options: ["Enabled", "Disabled"] },
   },
 };
 
@@ -1006,6 +1007,9 @@ function fieldHint(
   if (section === "validation" && field === "Custom Units") {
     return "One per line or comma-separated, for example milligrams_per_liter. Register imports and UDMI validation accept these alongside the DBO units, and the spelling must still match what the device publishes. Save, then import the register again.";
   }
+  if (section === "validation" && field === "Ignore Payloads Outside Applicability") {
+    return "Enabled: a payload type left out of a register row's Payload applicability (for example pointset on a state, metadata row) is kept as capture evidence but raises no finding. Disabled: it is flagged as not approved for the asset. Applies to UDMI runs started after you save.";
+  }
   if (section === "certificates" && field === CERT_EXPIRY_FIELD) {
     const value = draft.certificates.values[field] ?? "";
     if (isExpired(value)) {
@@ -1087,6 +1091,8 @@ const FIELD_TOOLTIPS: Record<string, string> = {
   // Validation Rules
   "Custom Units":
     "Units this site uses on purpose that are not in the Digital Buildings Ontology unit list.",
+  "Ignore Payloads Outside Applicability":
+    "Skip payload types a register row's Payload applicability leaves out instead of flagging them.",
 };
 
 type FieldControlProps = {

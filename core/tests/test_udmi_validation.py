@@ -2003,6 +2003,40 @@ class PayloadApplicabilityTests(unittest.TestCase):
         )
         self.assertTrue(any(issue.issue_type == "payload_not_applicable" for issue in result.issues))
 
+    def test_ignore_toggle_drops_findings_for_unapproved_facets(self) -> None:
+        entry = {
+            "expected_schedule": _schedule(
+                payload_types=["state"],
+                payload_applicability_status="approved",
+            ),
+            "state_payload": _state(),
+            # Wrong unit on purpose: an ignored facet must raise nothing at all.
+            "metadata_payload": _metadata(
+                pointset={"points": {"phase_1_line_current_sensor": {"units": "volts"}}}
+            ),
+        }
+        flagged = validate_udmi_full_report(dict(entry), live_capture=None)
+        self.assertTrue(any(issue.issue_type == "payload_not_applicable" for issue in flagged.issues))
+
+        for parameters in (
+            {**entry, "ignore_unapproved_payloads": True},
+            {"assets": [dict(entry)], "ignore_unapproved_payloads": True},
+        ):
+            result = validate_udmi_full_report(parameters, live_capture=None)
+            self.assertFalse(
+                [issue for issue in result.issues if issue.issue_type == "payload_not_applicable"]
+            )
+            self.assertNotIn(
+                "volts",
+                " ".join(issue.description for issue in result.issues),
+            )
+            asset = result.result_summary["validation_summary_v1"]["asset_results"][0]
+            rows = {row["payload_type"]: row for row in asset["payload_results"]}
+            # Still visible as received evidence, never as a validated facet.
+            self.assertFalse(rows["metadata"]["expected"])
+            self.assertTrue(rows["metadata"]["received"])
+            self.assertFalse(rows["metadata"]["successfully_validated"])
+
     def test_blank_applicability_is_a_blocker_and_does_not_infer_all_facets(self) -> None:
         result = validate_udmi_full_report(
             {

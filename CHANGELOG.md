@@ -7,6 +7,17 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- **Ignore payloads outside Payload applicability.** Configuration >
+  Validation Rules has a new "Ignore Payloads Outside Applicability" setting,
+  Disabled by default. When Enabled, a payload type that a register row's
+  Payload applicability leaves out (for example pointset on a
+  `state, metadata` row) is kept as raw capture evidence but raises no finding,
+  instead of the high "not approved for this asset" issue plus every check on
+  its contents. Each UDMI run freezes the setting from the same configuration
+  read as its snapshot, so a later change never alters an old verdict.
+
 ## [0.1.62] - 2026-10-06
 
 A field-fix release. The IP, BACnet and MQTT pages no longer get stuck on

@@ -51,7 +51,10 @@ class SiteCustomUnitsTests(ApiTestCase):
 
     def test_custom_unit_flows_from_configuration_to_import_and_run(self) -> None:
         defaults = self.client.get("/api/v1/configuration", params=_SCOPE).json()
-        self.assertEqual(defaults["validation"]["values"], {"Custom Units": ""})
+        self.assertEqual(
+            defaults["validation"]["values"],
+            {"Custom Units": "", "Ignore Payloads Outside Applicability": "Disabled"},
+        )
         self.assertEqual(defaults["validation"]["status"], "Optional")
 
         rejected = self._upload_register()
@@ -84,11 +87,16 @@ class SiteCustomUnitsTests(ApiTestCase):
             self._descriptions(run),
         )
 
-    def _run(self, client_custom_units: list[str] | None = None) -> dict:
+    def _run(
+        self,
+        client_custom_units: list[str] | None = None,
+        **extra: object,
+    ) -> dict:
         parameters: dict[str, object] = {
             "use_register": True,
             "capture_seconds": 1,
             "use_live_broker": False,
+            **extra,
         }
         if client_custom_units is not None:
             parameters["custom_units"] = client_custom_units
@@ -108,8 +116,34 @@ class SiteCustomUnitsTests(ApiTestCase):
         configuration.pop("validation")
         response = self.client.put("/api/v1/configuration", params=_SCOPE, json=configuration)
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["validation"]["values"], {"Custom Units": ""})
+        self.assertEqual(
+            response.json()["validation"]["values"],
+            {"Custom Units": "", "Ignore Payloads Outside Applicability": "Disabled"},
+        )
         self.assertEqual(response.json()["validation"]["status"], "Optional")
+
+    def _save_ignore_toggle(self, value: str) -> object:
+        configuration = self.client.get("/api/v1/configuration", params=_SCOPE).json()
+        configuration["validation"]["values"]["Ignore Payloads Outside Applicability"] = value
+        return self.client.put("/api/v1/configuration", params=_SCOPE, json=configuration)
+
+    def test_ignore_toggle_is_frozen_from_saved_configuration(self) -> None:
+        self.assertEqual(self._save_custom_units("milligrams_per_liter").status_code, 200)
+        self.assertEqual(self._upload_register()["status"], "accepted")
+
+        saved = self._save_ignore_toggle("Enabled")
+        self.assertEqual(saved.status_code, 200, saved.text)
+        # The client copy is discarded: the saved configuration is the only source.
+        run = self._run(ignore_unapproved_payloads=False)
+        self.assertIs(run["parameters"]["ignore_unapproved_payloads"], True)
+
+        self.assertEqual(self._save_ignore_toggle("Disabled").status_code, 200)
+        run = self._run(ignore_unapproved_payloads=True)
+        self.assertNotIn("ignore_unapproved_payloads", run["parameters"])
+
+        invalid = self._save_ignore_toggle("maybe")
+        self.assertEqual(invalid.status_code, 400, invalid.text)
+        self.assertIn("Ignore Payloads Outside Applicability must be Enabled or Disabled", invalid.text)
 
     def test_custom_units_entries_are_bounded(self) -> None:
         too_many = self._save_custom_units(",".join(f"unit_{index}" for index in range(101)))

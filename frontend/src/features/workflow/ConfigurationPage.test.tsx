@@ -84,7 +84,7 @@ function configurationPayload() {
       status: "Healthy",
     },
     validation: {
-      values: { "Custom Units": "" },
+      values: { "Custom Units": "", "Ignore Payloads Outside Applicability": "Disabled" },
       status: "Optional",
     },
   };
@@ -272,6 +272,32 @@ describe("ConfigurationPage", () => {
 
     await screen.findByText("Configuration saved");
     expect(saved.validation.values["Custom Units"]).toBe("milligrams_per_liter");
+  });
+
+  it("saves the ignore-payloads toggle from Validation Rules", async () => {
+    let saved: ReturnType<typeof configurationPayload> = configurationPayload();
+    stubFetch((url, init) => {
+      if (url.endsWith("/api/v1/configuration") && init?.method === "PUT") {
+        saved = JSON.parse(String(init.body));
+        return jsonResponse(saved);
+      }
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(saved);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Validation Rules/i }));
+    const select = screen.getByRole("combobox", { name: /Ignore Payloads Outside Applicability/i });
+    expect(select).toHaveValue("Disabled");
+    expect(select).toHaveAccessibleDescription(/raises no finding/);
+    fireEvent.change(select, { target: { value: "Enabled" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Configuration" }));
+
+    await screen.findByText("Configuration saved");
+    expect(saved.validation.values["Ignore Payloads Outside Applicability"]).toBe("Enabled");
   });
 
   it("renders the timezone as a select including UTC and non-Europe zones", async () => {

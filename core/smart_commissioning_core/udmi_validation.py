@@ -767,6 +767,7 @@ def _review_all_payload_issues(
     uploaded_schemas = _nonpub_schema_sets(parameters)
     # Site custom units are embedded at the same run level for the same reason.
     custom_units = custom_canonical_units(parameters.get("custom_units"))
+    ignore_unapproved = parameters.get("ignore_unapproved_payloads") is True
     assets = parameters.get("assets")
     if isinstance(assets, list) and assets:
         issues = [*existing_issues]
@@ -780,6 +781,7 @@ def _review_all_payload_issues(
                     issues,
                     uploaded_schemas=uploaded_schemas,
                     custom_units=custom_units,
+                    ignore_unapproved_payloads=ignore_unapproved,
                 )
             )
         return issues[first_new_issue:]
@@ -788,6 +790,7 @@ def _review_all_payload_issues(
         existing_issues,
         uploaded_schemas=uploaded_schemas,
         custom_units=custom_units,
+        ignore_unapproved_payloads=ignore_unapproved,
     )
 
 
@@ -814,6 +817,7 @@ def _review_payload_issues(
     *,
     uploaded_schemas: dict[str, dict[str, dict]] | None = None,
     custom_units: frozenset[str] | None = None,
+    ignore_unapproved_payloads: bool = False,
 ) -> list[ValidationIssueRecord]:
     expected = _dict_or_empty(parameters.get("expected_schedule"))
     if not expected:
@@ -829,6 +833,17 @@ def _review_payload_issues(
     first_new_issue = len(issues)
     asset_id = str(expected.get("asset_id") or "UDMI asset")
     applicable_payload_types = _applicable_payload_types(expected)
+    if ignore_unapproved_payloads:
+        # The site asked to ignore payload types outside this asset's
+        # applicability: review as if they never arrived. A local copy keeps
+        # the caller's entry intact, so the payload view still shows the
+        # capture as received evidence.
+        ignored = {
+            f"{payload_type}_payload{suffix}"
+            for payload_type in set(_PAYLOAD_ISSUE_TYPES) - applicable_payload_types
+            for suffix in ("", "_topic", "_retained", "_received_at")
+        }
+        parameters = {key: value for key, value in parameters.items() if key not in ignored}
     state_payload = _dict_or_empty(parameters.get("state_payload"))
     metadata_payload = _dict_or_empty(parameters.get("metadata_payload"))
     pointset_payload = _dict_or_empty(parameters.get("pointset_payload"))

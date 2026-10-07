@@ -177,6 +177,10 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             # Ontology list lacks (comma, semicolon or newline separated).
             # Register import and UDMI validation accept them beside DBO.
             "Custom Units": "",
+            # Enabled: a payload type the register row's Payload applicability
+            # leaves out (e.g. pointset on a state, metadata row) stays as raw
+            # capture evidence but raises no finding.
+            "Ignore Payloads Outside Applicability": "Disabled",
         },
         status="Optional",
     ),
@@ -773,6 +777,11 @@ class ConfigurationService:
         )
         self._validate_log_upload_url(errors, configuration.logging.values.get("Log Upload URL", ""))
         self._validate_custom_units(errors, configuration.validation.values.get("Custom Units", ""))
+        self._validate_enabled_disabled(
+            errors,
+            "Ignore Payloads Outside Applicability",
+            configuration.validation.values.get("Ignore Payloads Outside Applicability", "Disabled"),
+        )
 
         return ConfigurationValidationResult(valid=not errors, errors=errors)
 

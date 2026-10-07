@@ -125,6 +125,12 @@ def build_run_context(
         )
         if custom_units:
             frozen_parameters["custom_units"] = custom_units
+        # Same frozen read for the ignore toggle; the key is only present when
+        # Enabled, so a default run's parameters are unchanged.
+        frozen_parameters.pop("ignore_unapproved_payloads", None)
+        ignore_value = (validation_section.get("values") or {}).get("Ignore Payloads Outside Applicability", "")
+        if str(ignore_value).strip().casefold() == "enabled":
+            frozen_parameters["ignore_unapproved_payloads"] = True
     configuration_digest = hashlib.sha256(
         canonical_json_bytes(frozen_configuration)
     ).hexdigest()
