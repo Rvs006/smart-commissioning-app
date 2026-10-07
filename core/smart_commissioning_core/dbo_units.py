@@ -264,3 +264,37 @@ def is_known_unit(value: object, *, allow_blank: bool = False) -> bool:
     """Whether ``value`` resolves to the pinned DBO/app unit vocabulary."""
     canonical = canonical_unit(value)
     return allow_blank if canonical is None else canonical in KNOWN_CANONICAL_UNITS
+
+
+_CUSTOM_UNIT_SEPARATORS = re.compile(r"[,;\r\n]+")
+
+
+def custom_unit_names(value: object) -> list[str]:
+    """Site-declared custom units, stripped and de-duplicated in order.
+
+    Accepts the Configuration "Custom Units" text (comma, semicolon or newline
+    separated) or the already-split list frozen into run parameters. These are
+    units a site uses on purpose that the pinned DBO list lacks; they widen the
+    accepted vocabulary but never alias or convert an existing unit.
+    """
+    if isinstance(value, str):
+        parts: list[object] = list(_CUSTOM_UNIT_SEPARATORS.split(value))
+    elif isinstance(value, list | tuple):
+        parts = list(value)
+    else:
+        return []
+    names: list[str] = []
+    for part in parts:
+        name = str(part).strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def custom_canonical_units(value: object) -> frozenset[str]:
+    """Canonical forms of :func:`custom_unit_names`, for vocabulary checks."""
+    return frozenset(
+        canonical
+        for canonical in (canonical_unit(name) for name in custom_unit_names(value))
+        if canonical
+    )

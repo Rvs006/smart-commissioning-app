@@ -13,7 +13,11 @@ from secrets import token_hex
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from smart_commissioning_core.db.repositories import ImportRepository
-from smart_commissioning_core.dbo_units import KNOWN_CANONICAL_UNITS, canonical_unit
+from smart_commissioning_core.dbo_units import (
+    KNOWN_CANONICAL_UNITS,
+    canonical_unit,
+    custom_canonical_units,
+)
 from smart_commissioning_core.engines.comparison_common import parse_tolerance
 from smart_commissioning_core.run_context import canonical_sha256
 from sqlalchemy.engine import Engine
@@ -27,6 +31,7 @@ from app.schemas.imports import (
     ImportProfileSummary,
     ImportType,
 )
+from app.services.configuration_service import ConfigurationService
 from app.services.register_topics import normalise_payload_applicability
 
 # Back-compatible export for callers that inspect the profile vocabulary. Row
@@ -52,11 +57,23 @@ class ImportProfile:
     # Informational row checks: their records surface as ImportBatchSummary
     # warnings and never affect acceptance (unlike extra_checks).
     warning_checks: tuple[Callable[[dict[str, str], int], list[ImportErrorRecord]], ...] = ()
+    # Unit vocabulary checks. They take the accepted unit set as a third
+    # argument because a site's Custom Units widen the pinned DBO list.
+    unit_checks: tuple[
+        Callable[[dict[str, str], int, frozenset[str]], list[ImportErrorRecord]], ...
+    ] = ()
 
-    def validate_row(self, row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
+    def validate_row(
+        self,
+        row: dict[str, str],
+        row_number: int,
+        known_units: frozenset[str] = KNOWN_CANONICAL_UNITS,
+    ) -> list[ImportErrorRecord]:
         errors = _base_row_validation(self.required_columns, row, row_number)
         for check in self.extra_checks:
             errors.extend(check(row, row_number))
+        for unit_check in self.unit_checks:
+            errors.extend(unit_check(row, row_number, known_units))
         return errors
 
     def collect_warnings(self, row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
@@ -152,12 +169,27 @@ def _validate_tolerance(row: dict[str, str], row_number: int, field: str) -> lis
     return []
 
 
-def _validate_units(row: dict[str, str], row_number: int, field: str) -> list[ImportErrorRecord]:
+_CUSTOM_UNITS_HINT = (
+    "Fix the spelling, or add the unit under Configuration > Validation Rules > "
+    "Custom Units, save, and import again."
+)
+
+
+def _validate_units(
+    row: dict[str, str], row_number: int, field: str, known_units: frozenset[str]
+) -> list[ImportErrorRecord]:
     value = row.get(field, "").strip()
     canonical = canonical_unit(value)
-    if canonical is None or canonical in KNOWN_CANONICAL_UNITS:
+    if canonical is None or canonical in known_units:
         return []
-    return [ImportErrorRecord(row_number=row_number, field=field, code="invalid_unit", message=f"{field} is not a recognized unit.")]
+    return [
+        ImportErrorRecord(
+            row_number=row_number,
+            field=field,
+            code="invalid_unit",
+            message=f"{field} is not a recognized unit. {_CUSTOM_UNITS_HINT}",
+        )
+    ]
 
 
 def _validate_topic(row: dict[str, str], row_number: int, field: str) -> list[ImportErrorRecord]:
@@ -371,15 +403,18 @@ def _validate_mqtt_point_unit_pairs(row: dict[str, str], row_number: int) -> lis
     ]
 
 
-def _validate_mqtt_units(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
-    """Validate each populated comma-separated unit slot against pinned DBO."""
+def _validate_mqtt_units(
+    row: dict[str, str], row_number: int, known_units: frozenset[str]
+) -> list[ImportErrorRecord]:
+    """Validate each populated comma-separated unit slot against pinned DBO
+    plus the site's Custom Units."""
     invalid_units: list[str] = []
     for value in row.get("Expected units", "").split(","):
         unit = value.strip()
         if not unit:
             continue
         canonical = canonical_unit(unit)
-        if canonical not in KNOWN_CANONICAL_UNITS and unit not in invalid_units:
+        if canonical not in known_units and unit not in invalid_units:
             invalid_units.append(unit)
     if not invalid_units:
         return []
@@ -391,7 +426,8 @@ def _validate_mqtt_units(row: dict[str, str], row_number: int) -> list[ImportErr
             message=(
                 "Expected units contains unrecognized unit value(s): "
                 + ", ".join(invalid_units)
-                + "."
+                + ". "
+                + _CUSTOM_UNITS_HINT
             ),
         )
     ]
@@ -553,6 +589,13 @@ def _base_row_validation(required_columns: tuple[str, ...], row: dict[str, str],
 def _field_check(field: str, fn: Callable[[dict[str, str], int, str], list[ImportErrorRecord]]) -> Callable[[dict[str, str], int], list[ImportErrorRecord]]:
     def wrapper(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
         return fn(row, row_number, field)
+
+    return wrapper
+
+
+def _unit_check(field: str) -> Callable[[dict[str, str], int, frozenset[str]], list[ImportErrorRecord]]:
+    def wrapper(row: dict[str, str], row_number: int, known_units: frozenset[str]) -> list[ImportErrorRecord]:
+        return _validate_units(row, row_number, field, known_units)
 
     return wrapper
 
@@ -730,9 +773,9 @@ PROFILES: dict[ImportType, ImportProfile] = {
             _field_check("Expected reporting interval", _validate_positive_numeric),
             _validate_payload_type,
             _validate_payload_applicability,
-            _validate_mqtt_units,
             _validate_mqtt_point_unit_pairs,
         ),
+        unit_checks=(_validate_mqtt_units,),
     ),
     "asset_validation": ImportProfile(
         import_type="asset_validation",
@@ -772,9 +815,9 @@ PROFILES: dict[ImportType, ImportProfile] = {
             _field_check("Device instance", _validate_numeric),
             _field_check("BACnet network", _validate_numeric),
             _field_check("Object instance", _validate_numeric),
-            _field_check("Expected units", _validate_units),
             _field_check("Internetwork ID", _validate_internetwork_id),
         ),
+        unit_checks=(_unit_check("Expected units"),),
     ),
     "mqtt_points": ImportProfile(
         import_type="mqtt_points",
@@ -793,9 +836,9 @@ PROFILES: dict[ImportType, ImportProfile] = {
         duplicate_key_fields=("Asset ID", "JSON path or field name", "Expected point name"),
         extra_checks=(
             _field_check("Topic", _validate_topic),
-            _field_check("Expected units", _validate_units),
             _field_check("Expected reporting interval", _validate_numeric),
         ),
+        unit_checks=(_unit_check("Expected units"),),
     ),
     "mapping": ImportProfile(
         import_type="mapping",
@@ -818,9 +861,8 @@ PROFILES: dict[ImportType, ImportProfile] = {
             _field_check("BACnet device instance", _validate_numeric),
             _field_check("BACnet object instance", _validate_numeric),
             _field_check("MQTT topic", _validate_topic),
-            _field_check("BACnet units", _validate_units),
-            _field_check("MQTT units", _validate_units),
         ),
+        unit_checks=(_unit_check("BACnet units"), _unit_check("MQTT units")),
     ),
     "tolerances": ImportProfile(
         import_type="tolerances",
@@ -1014,7 +1056,8 @@ class ImportService:
 
     def __init__(self, engine: Engine | None = None) -> None:
         ensure_runtime_directories()
-        self._repository = ImportRepository(engine if engine is not None else get_engine())
+        self._engine = engine if engine is not None else get_engine()
+        self._repository = ImportRepository(self._engine)
 
     def list_profiles(self) -> list[ImportProfileSummary]:
         return [profile.as_summary() for profile in PROFILES.values()]
@@ -1047,6 +1090,14 @@ class ImportService:
         stored_path.write_bytes(file_bytes)
 
         mapped_rows, missing_columns = self._canonicalize_rows(profile, rows)
+        # A site's Custom Units (Configuration > Validation Rules) widen the
+        # pinned DBO vocabulary for this import; no site means DBO only.
+        custom_units = (
+            ConfigurationService(self._engine).custom_units(project_id, site_id)
+            if profile.unit_checks and project_id and site_id
+            else []
+        )
+        known_units = KNOWN_CANONICAL_UNITS | custom_canonical_units(custom_units)
         errors: list[ImportErrorRecord] = []
         warnings: list[ImportErrorRecord] = []
         accepted_rows: list[dict[str, str]] = []
@@ -1070,7 +1121,7 @@ class ImportService:
                 zip(mapped_rows, rows, strict=True),
                 start=2,
             ):
-                row_errors = profile.validate_row(row, row_number)
+                row_errors = profile.validate_row(row, row_number, known_units)
                 # Warnings never affect acceptance and are collected even for
                 # rejected rows, so one re-upload can fix everything at once.
                 warnings.extend(profile.collect_warnings(row, row_number))
@@ -1136,6 +1187,8 @@ class ImportService:
         stored_summary["file_sha256"] = hashlib.sha256(file_bytes).hexdigest()
         stored_summary["accepted_rows_sha256"] = canonical_sha256(accepted_rows)
         stored_summary["authority_schema_version"] = "1.0"
+        if custom_units:
+            stored_summary["custom_units"] = custom_units
 
         created_record = self._repository.create(
             import_id=import_id,

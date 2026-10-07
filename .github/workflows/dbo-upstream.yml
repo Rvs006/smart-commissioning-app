@@ -1,0 +1,32 @@
+name: DBO upstream check
+
+# The DBO unit vocabulary is pinned (core/smart_commissioning_core/dbo_units.py)
+# so validation runs offline and the same register always gets the same
+# verdict. This weekly job only reports when Google's units.yaml moves past the
+# pinned bytes; re-pinning stays a reviewed change that ships in a release.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  units:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare pinned units.yaml with upstream master
+        # Explicit bash adds pipefail, so a failed download fails the job
+        # instead of hashing an empty stream.
+        shell: bash
+        run: |
+          pinned=$(grep -oE '[0-9a-f]{64}' core/smart_commissioning_core/schemas/dbo/UPSTREAM.md | head -n 1)
+          upstream=$(curl -fsSL https://raw.githubusercontent.com/google/digitalbuildings/master/ontology/yaml/resources/units/units.yaml | sha256sum | cut -d ' ' -f 1)
+          echo "pinned:   ${pinned}"
+          echo "upstream: ${upstream}"
+          if [ -z "${pinned}" ] || [ "${pinned}" != "${upstream}" ]; then
+            echo "::error title=DBO units changed upstream::google/digitalbuildings units.yaml no longer matches the pinned copy. Review the upstream diff, then re-pin dbo_units.py and schemas/dbo/UPSTREAM.md."
+            exit 1
+          fi
