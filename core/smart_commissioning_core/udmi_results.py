@@ -344,8 +344,10 @@ def _payload_observations(source: dict[str, object]) -> dict[str, dict[str, obje
         )
         observations[payload_type]["topics"] = topics
         # Live captures record every delivery per topic; the latest-message
-        # store alone cannot. Pasted payloads and older runs have no count.
-        if isinstance(topic_counts, dict) and topics:
+        # store alone cannot. The dict exists only once the subscription was
+        # live, so an empty one is a measured zero. Pasted payloads, older
+        # runs and captures that never connected have no count.
+        if isinstance(topic_counts, dict):
             counts = [topic_counts.get(topic) for topic in topics]
             observations[payload_type]["message_count"] = sum(
                 count if isinstance(count, int) and count > 0 else 1 for count in counts

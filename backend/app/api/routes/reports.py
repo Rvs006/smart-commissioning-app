@@ -1934,10 +1934,9 @@ def _payload_count_cell(asset: dict[str, object], payload_type: str) -> str:
             if payload.get("expected") is not True:
                 break
             count = payload.get("message_count")
-            if isinstance(count, int):
-                return str(count)
-            # Runs captured before deliveries were counted.
-            return "0" if payload.get("received") is not True else _NO_VALUE
+            # No count means nothing was measured (an older run, or a capture
+            # that never connected), never a measured zero.
+            return str(count) if isinstance(count, int) else _NO_VALUE
     return "N/A"
 
 

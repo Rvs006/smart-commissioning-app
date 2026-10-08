@@ -2559,6 +2559,7 @@ def _capture_live_payloads_per_asset(
     # Every registered delivery per topic, not just the latest the store keeps.
     # ponytail: deliveries the transport drops at a full cap are not counted.
     topic_message_counts: dict[str, int] = {}
+    counting_started = False
     progress_state_lock = threading.Lock()
 
     def matching_validation_entries(topic: str, *, store: bool = True) -> frozenset[int]:
@@ -2791,7 +2792,7 @@ def _capture_live_payloads_per_asset(
         )
 
     def on_message(message: MqttMessage) -> None:
-        nonlocal progress_message_count
+        nonlocal progress_message_count, counting_started
         if not matches_normal_capture_scope(message):
             # The transport already offered this broker delivery to the
             # topic-only ``on_observed_message`` ledger. Do not let a message
@@ -2799,6 +2800,12 @@ def _capture_live_payloads_per_asset(
             # in-progress validation projection.
             return
         with progress_state_lock:
+            if not counting_started:
+                # A delivery proves the subscription is live, so a silent asset
+                # now has a measured zero rather than no count at all.
+                counting_started = True
+                for entry in entries:
+                    entry.setdefault("topic_message_counts", {})
             latest_progress_messages[message.topic] = message
             matching_entries = set(matching_validation_entries(message.topic))
             wrong_topic_entry = None

@@ -2771,12 +2771,19 @@ class AssetScheduleDeliveryCountTests(unittest.TestCase):
                         "asset_id": "A1",
                         "payload_results": [
                             payload("pointset", message_count=212),
-                            payload("metadata", received=False, message_count=None),
+                            payload("metadata", received=False, message_count=0),
                             payload("state", expected=False, message_count=4),
                         ],
                     },
-                    # Captured before deliveries were counted.
-                    {"asset_id": "A2", "payload_results": [payload("pointset")]},
+                    # Captured before deliveries were counted, or never
+                    # connected: no count is not a measured zero.
+                    {
+                        "asset_id": "A2",
+                        "payload_results": [
+                            payload("pointset"),
+                            payload("metadata", received=False, message_count=None),
+                        ],
+                    },
                 ]
             }
         )
@@ -2787,7 +2794,9 @@ class AssetScheduleDeliveryCountTests(unittest.TestCase):
             "Number of State Payloads Received",
         )
         self.assertEqual([rows[0][column] for column in columns], ["212", "0", "N/A"])
-        self.assertEqual([rows[1][column] for column in columns], ["\N{EM DASH}", "N/A", "N/A"])
+        self.assertEqual(
+            [rows[1][column] for column in columns], ["\N{EM DASH}", "\N{EM DASH}", "N/A"]
+        )
 
 
 if __name__ == "__main__":

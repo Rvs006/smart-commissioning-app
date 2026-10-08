@@ -16,7 +16,8 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   nothing came, and `N/A` when the register does not ask for that payload.
   The capture store still keeps only the latest message per topic; the count
   comes from the per-delivery hook, so a long run reports real cadence instead
-  of "seen at least once". Runs captured before this change show a dash. Each
+  of "seen at least once". A dash means nothing was measured: a run captured
+  before this change, or a capture that never reached the broker. Each
   payload result in the validation export carries the same number as
   `message_count`.
 

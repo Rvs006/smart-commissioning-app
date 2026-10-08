@@ -2531,10 +2531,32 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
             for asset in result.result_summary["validation_summary_v1"]["asset_results"]
             for payload in asset["payload_results"]
         }
+        # A2 stayed silent while the subscription was live: a measured zero.
         self.assertEqual(
             counts,
-            {("A1", "state"): 1, ("A1", "pointset"): 3, ("A2", "state"): None},
+            {("A1", "state"): 1, ("A1", "pointset"): 3, ("A2", "state"): 0},
         )
+
+    def test_payload_counts_stay_unmeasured_when_the_broker_never_connects(self) -> None:
+        def refused(_settings: object, **_kwargs: object) -> MqttCaptureOutcome:
+            raise OSError("connection refused")
+
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                ],
+            },
+            live_capture=refused,
+            cancel_check=lambda: False,
+        )
+
+        payloads = result.result_summary["validation_summary_v1"]["asset_results"][0][
+            "payload_results"
+        ]
+        self.assertEqual([payload["message_count"] for payload in payloads], [None])
 
     def test_one_shared_capture_routes_payloads_to_each_asset(self) -> None:
         # ONE live_capture call subscribes every asset's topics; messages route
