@@ -566,6 +566,11 @@ def _normalise_payload_results(value: object) -> list[dict[str, Any]] | None:
             "not_required",
         }:
             return None
+        # Absent on pasted payloads and on runs captured before deliveries
+        # were counted; None renders as "no count", never as zero.
+        message_count = raw.get("message_count")
+        if message_count is not None and _non_negative_int(message_count) is None:
+            return None
         raw_topics = raw.get("topics", [])
         if not isinstance(raw_topics, list) or any(
             not isinstance(topic, str) or not topic.strip()
@@ -591,6 +596,7 @@ def _normalise_payload_results(value: object) -> list[dict[str, Any]] | None:
                 "retained": bool(raw.get("retained", False)),
                 "saw_non_retained": bool(raw.get("saw_non_retained", False)),
                 "cadence_status": str(cadence_status),
+                "message_count": message_count,
             }
         )
     rows.sort(key=lambda row: _PAYLOAD_ORDER[row["payload_type"]])

@@ -1680,6 +1680,9 @@ _UDMI_ASSET_COLUMNS = (
     "All Payloads Received",
     "All Payloads Validated",
     "Evidence Timestamp",
+    "Number of Pointset Payloads Received",
+    "Number of Metadata Payloads Received",
+    "Number of State Payloads Received",
 )
 _UDMI_FAULT_MATRIX_COLUMNS = (
     "Asset ID",
@@ -1912,9 +1915,30 @@ def _udmi_asset_rows(data: dict[str, object]) -> list[dict[str, str]]:
                 # This is the latest retained evidence timestamp. It may be the
                 # event time carried by a payload, so do not imply receipt time.
                 "Evidence Timestamp": _display_timestamp(asset.get("last_observed_at")),
+                **{
+                    f"Number of {payload_type.title()} Payloads Received": _payload_count_cell(
+                        asset, payload_type
+                    )
+                    for payload_type in ("pointset", "metadata", "state")
+                },
             }
         )
     return rows
+
+
+def _payload_count_cell(asset: dict[str, object], payload_type: str) -> str:
+    """Deliveries of one expected payload type; N/A when the register does not ask for it."""
+    payloads = asset.get("payload_results")
+    for payload in payloads if isinstance(payloads, list) else []:
+        if isinstance(payload, dict) and payload.get("payload_type") == payload_type:
+            if payload.get("expected") is not True:
+                break
+            count = payload.get("message_count")
+            if isinstance(count, int):
+                return str(count)
+            # Runs captured before deliveries were counted.
+            return "0" if payload.get("received") is not True else _NO_VALUE
+    return "N/A"
 
 
 def _udmi_wrong_topic_rows(data: dict[str, object]) -> list[dict[str, str]]:

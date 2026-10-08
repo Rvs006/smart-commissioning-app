@@ -3,7 +3,7 @@ import json
 import math
 import re
 import threading
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1853,9 +1853,11 @@ def _route_capture_messages_to_assets(
     *,
     observed_at: str,
     wrong_topic_routes: dict[str, int] | None = None,
+    topic_message_counts: dict[str, int] | None = None,
 ) -> None:
     """Route the latest live evidence into every matching register asset."""
     wrong_topic_routes = wrong_topic_routes or {}
+    topic_message_counts = topic_message_counts or {}
     for entry_index, (entry, subscribed_topics, validation_topics) in enumerate(
         zip(
             entries,
@@ -1908,6 +1910,13 @@ def _route_capture_messages_to_assets(
             )
             for message in entry_messages
         ]
+        # The hook count wins; the returned messages are the floor when it
+        # never ran (adapters without on_message, pre-cap wrong-topic slots).
+        delivered = Counter(message.topic for message in entry_messages)
+        entry["topic_message_counts"] = {
+            topic: max(topic_message_counts.get(topic, 0), seen)
+            for topic, seen in delivered.items()
+        }
         _route_latest_payloads(entry, entry_messages)
 
 
@@ -2547,6 +2556,9 @@ def _capture_live_payloads_per_asset(
                 exact_topic_routes.setdefault(topic_filter, set()).add(entry_index)
     validation_entry_cache: dict[str, frozenset[int]] = {}
     progress_message_count = 0
+    # Every registered delivery per topic, not just the latest the store keeps.
+    # ponytail: deliveries the transport drops at a full cap are not counted.
+    topic_message_counts: dict[str, int] = {}
     progress_state_lock = threading.Lock()
 
     def matching_validation_entries(topic: str, *, store: bool = True) -> frozenset[int]:
@@ -2806,6 +2818,9 @@ def _capture_live_payloads_per_asset(
             if is_registered_validation_message:
                 progress_message_count += 1
                 latest_progress_validation_messages[message.topic] = message
+                topic_message_counts[message.topic] = (
+                    topic_message_counts.get(message.topic, 0) + 1
+                )
             if wrong_topic_entry is not None:
                 matching_entries.add(wrong_topic_entry)
             observed_at = message.received_at.isoformat()
@@ -2830,6 +2845,11 @@ def _capture_live_payloads_per_asset(
                 entry["observed_topics"] = list(
                     dict.fromkeys(captured.topic for captured in routed_messages)
                 )
+                # A new dict, never an in-place update: progress snapshots
+                # copy each entry shallowly.
+                entry["topic_message_counts"] = {
+                    topic: topic_message_counts.get(topic, 1) for topic in entry_messages
+                }
                 _route_latest_payloads(entry, routed_messages)
         if progress_callback is not None:
             progress_callback(build_progress_snapshot)
@@ -2998,6 +3018,7 @@ def _capture_live_payloads_per_asset(
             normal_messages,
             observed_at=capture_observed_at,
             wrong_topic_routes=wrong_topic_routes,
+            topic_message_counts=topic_message_counts,
         )
         _measure_unexpected_publishers(
             parameters,

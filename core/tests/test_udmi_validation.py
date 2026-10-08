@@ -2490,6 +2490,52 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
                 self.assertEqual(call["max_messages"], expected_limit)
                 self.assertEqual(call["secondary_max_messages"], expected_limit)
 
+    def test_payload_results_count_every_delivery_per_payload_type(self) -> None:
+        # The transport keeps only the latest message per topic, so the count
+        # has to come from the on_message hook, which sees every delivery.
+        deliveries = [
+            _msg("site/a1/events/pointset"),
+            _msg("site/a1/events/pointset"),
+            _msg("site/a1/state"),
+            _msg("site/a1/events/pointset"),
+        ]
+
+        def latest_only_capture(_settings: object, **kwargs: object) -> MqttCaptureOutcome:
+            on_message = kwargs["on_message"]
+            assert callable(on_message)
+            latest: dict[str, MqttMessage] = {}
+            for message in deliveries:
+                on_message(message)
+                latest[message.topic] = message
+            return _deadline_outcome(list(latest.values()))
+
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "assets": [
+                    {
+                        "expected_schedule": {"asset_id": "A1"},
+                        "state_topic": "site/a1/state",
+                        "pointset_topic": "site/a1/events/pointset",
+                    },
+                    {"expected_schedule": {"asset_id": "A2"}, "state_topic": "site/a2/state"},
+                ],
+            },
+            live_capture=latest_only_capture,
+            cancel_check=lambda: False,
+        )
+
+        counts = {
+            (asset["asset_id"], payload["payload_type"]): payload["message_count"]
+            for asset in result.result_summary["validation_summary_v1"]["asset_results"]
+            for payload in asset["payload_results"]
+        }
+        self.assertEqual(
+            counts,
+            {("A1", "state"): 1, ("A1", "pointset"): 3, ("A2", "state"): None},
+        )
+
     def test_one_shared_capture_routes_payloads_to_each_asset(self) -> None:
         # ONE live_capture call subscribes every asset's topics; messages route
         # back to each entry's payload slots (duplicates keep the last payload).

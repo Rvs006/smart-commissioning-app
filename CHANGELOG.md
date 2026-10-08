@@ -7,6 +7,19 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- **Payload delivery counts on the Asset Validation Schedule.** The sheet (and
+  the PDF and Word asset tables) gains "Number of Pointset / Metadata / State
+  Payloads Received" columns. Each shows how many times that payload arrived on
+  the asset's topics during the capture, `0` when the register expects it and
+  nothing came, and `N/A` when the register does not ask for that payload.
+  The capture store still keeps only the latest message per topic; the count
+  comes from the per-delivery hook, so a long run reports real cadence instead
+  of "seen at least once". Runs captured before this change show a dash. Each
+  payload result in the validation export carries the same number as
+  `message_count`.
+
 ## [0.1.62] - 2026-10-06
 
 A field-fix release. The IP, BACnet and MQTT pages no longer get stuck on

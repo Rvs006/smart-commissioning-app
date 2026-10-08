@@ -2757,5 +2757,38 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertEqual(legacy_title_cell.data_type, "s")
 
 
+class AssetScheduleDeliveryCountTests(unittest.TestCase):
+    def test_count_columns_show_deliveries_zero_na_and_uncounted(self) -> None:
+        from app.api.routes.reports import _udmi_asset_rows
+
+        def payload(payload_type: str, **fields: object) -> dict[str, object]:
+            return {"payload_type": payload_type, "expected": True, "received": True, **fields}
+
+        rows = _udmi_asset_rows(
+            {
+                "asset_results": [
+                    {
+                        "asset_id": "A1",
+                        "payload_results": [
+                            payload("pointset", message_count=212),
+                            payload("metadata", received=False, message_count=None),
+                            payload("state", expected=False, message_count=4),
+                        ],
+                    },
+                    # Captured before deliveries were counted.
+                    {"asset_id": "A2", "payload_results": [payload("pointset")]},
+                ]
+            }
+        )
+
+        columns = (
+            "Number of Pointset Payloads Received",
+            "Number of Metadata Payloads Received",
+            "Number of State Payloads Received",
+        )
+        self.assertEqual([rows[0][column] for column in columns], ["212", "0", "N/A"])
+        self.assertEqual([rows[1][column] for column in columns], ["\N{EM DASH}", "N/A", "N/A"])
+
+
 if __name__ == "__main__":
     unittest.main()
