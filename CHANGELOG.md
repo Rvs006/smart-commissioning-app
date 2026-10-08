@@ -23,6 +23,17 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Fixed
 
+- **Long UDMI captures no longer fall behind the broker.** The capture loop
+  checks for Stop run around every broker message, and that check loaded the
+  whole run row: the register parameters plus the growing provisional result,
+  several MB of JSON per call. On a large register the reader slowed to a few
+  messages a second, the broker's per-client queue filled, and QoS 0 deliveries
+  past it were dropped. Assets that did publish during the window could show
+  as Not observed, and the evidence that did arrive was minutes old. The check
+  now selects only the cancel flag (plus owner and status on the leased-run
+  path) in `DbRunStore.is_cancel_requested` and
+  `RunLifecycleRepository.is_cancel_requested`. A local replay of an 890-asset
+  register went from about 5 to about 220 messages a second.
 - **UDMI summary says which filter it is showing.** With a result filter on,
   the validation summary used to show only a generic "reflect the active
   filter" line while its cards dropped to the filtered rows, so an Observation

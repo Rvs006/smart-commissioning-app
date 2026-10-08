@@ -31,7 +31,7 @@ from smart_commissioning_core.db.repositories import (
 )
 from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import event, func, inspect, select, text
 
 # The JSON file run-record shape produced today by backend RunService
 # (RunRecord.model_dump_json) and worker FileRunStore. DbRunStore must return
@@ -335,6 +335,37 @@ class RunLifecycleTests(SqliteTestCase):
         # The public run dict shape is unchanged (no cancel_requested key leaks
         # into the API contract); cancellation is observed via is_cancel_requested.
         self.assertEqual(list(self.store.get_run(run_id)), FILE_RECORD_KEYS)
+
+    def test_cancel_poll_never_reads_run_json_blobs(self) -> None:
+        # Engines poll per broker message; decoding parameters/result_summary
+        # on each poll throttled a long UDMI capture to a few messages a second.
+        from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
+
+        run_id = self.store.create_run(
+            project_id="demo-project",
+            site_id="demo-site",
+            job_type="udmi_validation",
+            parameters={"assets": ["x" * 1000]},
+        )["run_id"]
+        statements: list[str] = []
+
+        def observe_sql(_conn, _cursor, statement, *_args) -> None:
+            statements.append(statement)
+
+        event.listen(self.engine, "before_cursor_execute", observe_sql)
+        self.addCleanup(event.remove, self.engine, "before_cursor_execute", observe_sql)
+        self.assertFalse(self.store.is_cancel_requested(run_id))
+        self.assertFalse(RunLifecycleRepository(self.engine).is_cancel_requested(run_id))
+        self.store.request_cancel(run_id)
+        statements.clear()
+        self.assertTrue(self.store.is_cancel_requested(run_id))
+        self.assertTrue(RunLifecycleRepository(self.engine).is_cancel_requested(run_id))
+
+        selects = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
+        self.assertEqual(len(selects), 2)
+        for statement in selects:
+            self.assertNotIn("parameters", statement)
+            self.assertNotIn("result_summary", statement)
 
     def test_is_cancel_requested_false_for_missing_run(self) -> None:
         self.assertFalse(self.store.is_cancel_requested("run_00000000000000_deadbeef"))

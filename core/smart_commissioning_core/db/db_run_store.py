@@ -345,9 +345,14 @@ class DbRunStore:
         Returns False for a missing run (a vanished run cannot be cancelled),
         so engine cancellation polling never raises.
         """
+        # Engines poll this per broker message. Select the flag alone: loading
+        # the Run row decodes the multi-MB parameters + result_summary JSON on
+        # every call, which throttled a long UDMI capture to ~5 msg/s.
         with self._query_session_factory() as session:
-            run = session.scalars(select(Run).where(Run.id == run_id)).one_or_none()
-            return bool(run is not None and run.cancel_requested)
+            cancel_requested = session.scalars(
+                select(Run.cancel_requested).where(Run.id == run_id)
+            ).one_or_none()
+            return bool(cancel_requested)
 
     # -- edge->hub sync accessors --------------------------------------------
     # edge_id / synced_at are kept out of the public _run_to_dict contract (like
