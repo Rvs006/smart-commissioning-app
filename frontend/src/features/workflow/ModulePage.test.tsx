@@ -5608,6 +5608,25 @@ describe("ModulePage UDMI workbench live results", () => {
       await within(table).findByRole("button", { expanded: true, name: /EM-1/ }),
     ).toBeInTheDocument();
     expect(within(table).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
+    // The summary names the active filter and the share of the register it
+    // covers, so a filtered count is never read as the whole run, and it does
+    // not blame a filtered-out unexpected-device count on the measurement.
+    expect(
+      within(summaryPanel).getByText(/Filtered by Observation: Observed this run\./),
+    ).toBeInTheDocument();
+    expect(
+      within(summaryPanel).getByText(/Counts cover 1 of 2 expected assets\./),
+    ).toBeInTheDocument();
+    expect(
+      within(summaryPanel).getByText(/covers only rows the active result filter retains/),
+    ).toBeInTheDocument();
+    expect(
+      within(summaryPanel).queryByText(/measurement was unavailable/i),
+    ).not.toBeInTheDocument();
+    fireEvent.click(within(summaryPanel).getByRole("button", { name: "Clear filters" }));
+    expect(screen.getByLabelText("Observation")).toHaveValue("all");
+    expect(within(expectedAssets).getByText("2")).toBeInTheDocument();
+    expect(within(summaryPanel).queryByText(/Filtered by/)).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "all" } });
     fireEvent.change(screen.getByLabelText("System"), { target: { value: "BMS" } });
