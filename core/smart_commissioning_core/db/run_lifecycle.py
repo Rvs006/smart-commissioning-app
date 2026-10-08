@@ -1310,8 +1310,11 @@ class RunLifecycleRepository:
             return False
 
     def is_cancel_requested(self, run_id: str, owner_token: str | None = None) -> bool:
+        # Polled per broker message; never load the JSON blobs (see DbRunStore).
         with self._query_session_factory() as session:
-            run = session.get(Run, run_id)
+            run = session.execute(
+                select(Run.owner_token, Run.status, Run.cancel_requested).where(Run.id == run_id)
+            ).one_or_none()
             if run is None:
                 return True
             if owner_token is not None and (run.owner_token != owner_token or run.status != "running"):
