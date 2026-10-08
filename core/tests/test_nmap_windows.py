@@ -379,13 +379,31 @@ class NmapWindowsBoundaryTests(unittest.TestCase):
                 windows.close_process(process)
             windows.close_job(job)
 
-    @unittest.skipUnless(
-        sys.platform == "win32" and Path(r"C:\Program Files\Git\cmd\git.exe").is_file(),
-        "requires one embedded-signed protected-root executable",
-    )
+    @unittest.skipUnless(sys.platform == "win32", "requires the Windows trust APIs")
     def test_live_trust_backend_uses_final_path_acl_signature_and_version_apis(self) -> None:
         backend = CtypesNmapTrustBackend()
-        executable = r"C:\Program Files\Git\cmd\git.exe"
+        # Runner images change which bundled tools carry an embedded signature
+        # (the windows-2022 20261002 image ships an unsigned Git 2.56 git.exe),
+        # so take the first protected-root candidate that has one. Only "no
+        # embedded signature" moves on; any other trust error still fails.
+        crypt_e_not_found = -2146885623
+        executable = signature = None
+        for candidate in (
+            r"C:\Program Files\Git\cmd\git.exe",
+            r"C:\Program Files\GitHub CLI\gh.exe",
+        ):
+            if not Path(candidate).is_file():
+                continue
+            try:
+                signature = backend.authenticode(candidate)
+            except OSError as error:
+                if error.winerror != crypt_e_not_found:
+                    raise
+                continue
+            executable = candidate
+            break
+        if executable is None or signature is None:
+            self.skipTest("requires one embedded-signed protected-root executable")
 
         self.assertEqual(backend.canonicalize(executable), executable)
         self.assertFalse(backend.has_reparse_component(executable))
