@@ -291,6 +291,7 @@ def _payload_observations(source: dict[str, object]) -> dict[str, dict[str, obje
             "received_at": None,
             "retained": False,
             "saw_non_retained": False,
+            "message_count": None,
         }
         for payload_type in _PAYLOAD_TYPES
     }
@@ -335,12 +336,22 @@ def _payload_observations(source: dict[str, object]) -> dict[str, dict[str, obje
             observations[message_payload_type]["received_at"] = str(
                 message["received_at"]
             )
+    topic_counts = source.get("topic_message_counts")
     for payload_type in _PAYLOAD_TYPES:
         topics = sorted(
             observed_topics[payload_type],
             key=lambda topic: (topic.casefold(), topic),
         )
         observations[payload_type]["topics"] = topics
+        # Live captures record every delivery per topic; the latest-message
+        # store alone cannot. The dict exists only once the subscription was
+        # live, so an empty one is a measured zero. Pasted payloads, older
+        # runs and captures that never connected have no count.
+        if isinstance(topic_counts, dict):
+            counts = [topic_counts.get(topic) for topic in topics]
+            observations[payload_type]["message_count"] = sum(
+                count if isinstance(count, int) and count > 0 else 1 for count in counts
+            )
         if topics:
             expected_topic = str(source.get(f"{payload_type}_topic") or "")
             observations[payload_type]["topic"] = (
@@ -572,6 +583,7 @@ def build_validation_summary_v1(
                     "retained": retained,
                     "saw_non_retained": saw_non_retained,
                     "cadence_status": cadence_status,
+                    "message_count": observations[payload_type]["message_count"],
                 }
             )
 

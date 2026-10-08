@@ -7,6 +7,20 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- **Payload delivery counts on the Asset Validation Schedule.** The sheet (and
+  the PDF and Word asset tables) gains "Number of Pointset / Metadata / State
+  Payloads Received" columns. Each shows how many times that payload arrived on
+  the asset's topics during the capture, `0` when the register expects it and
+  nothing came, and `N/A` when the register does not ask for that payload.
+  The capture store still keeps only the latest message per topic; the count
+  comes from the per-delivery hook, so a long run reports real cadence instead
+  of "seen at least once". A dash means nothing was measured: a run captured
+  before this change, or a capture that never reached the broker. Each
+  payload result in the validation export carries the same number as
+  `message_count`.
+
 ### Fixed
 
 - **Long UDMI captures no longer fall behind the broker.** The capture loop
