@@ -8755,17 +8755,18 @@ function UdmiSummaryPanel({
               : " for this run"}
             .
           </strong>
-        ) : filtered ? (
-          <strong>
-            The unexpected-device count covers only rows the active result filter retains; clear
-            filters to see the full run.
-          </strong>
         ) : unexpectedCount > 0 ? (
           <strong>
             Unexpected-device measurement was incomplete for this run; at least{" "}
             {formatMetricCount(unexpectedCount)} unexpected{" "}
-            {unexpectedCount === 1 ? "publisher was" : "publishers were"} seen, and the true count
+            {unexpectedCount === 1 ? "publisher was" : "publishers were"} seen
+            {filtered ? " in the rows the active result filter retains" : ""}, and the true count
             may be higher.
+          </strong>
+        ) : filtered ? (
+          <strong>
+            The unexpected-device count covers only rows the active result filter retains; clear
+            filters to see the full run.
           </strong>
         ) : (
           <strong>

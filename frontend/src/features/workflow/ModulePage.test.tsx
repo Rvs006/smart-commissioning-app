@@ -4853,8 +4853,7 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(flagged.some((line) => line.textContent?.includes('"energy_sensor"'))).toBe(false);
   });
 
-  it("uses listed unexpected devices when the provisional scalar is stale at zero", async () => {
-    const runWithUnexpected = {
+  const runWithUnexpectedDevice = (measured: boolean) => ({
       ...udmiTerminalRun,
       result_summary: {
         ...udmiTerminalRun.result_summary,
@@ -4931,12 +4930,18 @@ describe("ModulePage UDMI workbench live results", () => {
               last_seen: "2026-07-23T11:09:30Z",
             },
           ],
-          unexpected_devices_measured: true,
+          unexpected_devices_measured: measured,
           unexpected_devices_measurement_scope: "the MQTT capture window",
         },
       },
-    };
-    stubUdmiRunFetch({ run_id: "run-udmi-1", issues: [] }, undefined, runWithUnexpected);
+  });
+
+  it("uses listed unexpected devices when the provisional scalar is stale at zero", async () => {
+    stubUdmiRunFetch(
+      { run_id: "run-udmi-1", issues: [] },
+      undefined,
+      runWithUnexpectedDevice(true),
+    );
     renderModule("udmi-validation");
 
     const runButton = await screen.findByRole("button", { name: "Execute capture" });
@@ -4969,6 +4974,35 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(expectedMetric).getByText("0")).toBeInTheDocument();
     expect(within(unexpectedMetric).getByText("1")).toBeInTheDocument();
     expect(await screen.findByText("Observed outside the expected register")).toBeInTheDocument();
+  });
+
+  it("keeps the lower-bound unexpected-device warning when a filter retains devices", async () => {
+    stubUdmiRunFetch(
+      { run_id: "run-udmi-1", issues: [] },
+      undefined,
+      runWithUnexpectedDevice(false),
+    );
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/plus 1 unexpected device/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Category"), {
+      target: { value: "unexpected-devices" },
+    });
+    const summaryPanel = screen
+      .getByRole("heading", { name: "Validation summary" })
+      .closest(".udmi-summary") as HTMLElement;
+    expect(
+      await within(summaryPanel).findByText(
+        /incomplete for this run; at least 1 unexpected publisher was seen in the rows the active result filter retains, and the true count may be higher/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(summaryPanel).getByText(/Filtered by Category: Unexpected devices\./),
+    ).toBeInTheDocument();
   });
 
   it("shows the actual issue text in the Inspector when View issues is clicked", async () => {
