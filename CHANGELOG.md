@@ -7,6 +7,18 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Fixed
+
+- **UDMI summary says which filter it is showing.** With a result filter on,
+  the validation summary used to show only a generic "reflect the active
+  filter" line while its cards dropped to the filtered rows, so an Observation
+  filter could turn "890 expected assets" into "716" with nothing above the
+  cards saying why. The summary heading now names each active filter, states
+  how many of the run's expected assets the counts cover, and has its own
+  Clear filters button. The unexpected-device note no longer claims the
+  measurement was unavailable for the run when the filter simply excluded
+  those devices.
+
 ## [0.1.62] - 2026-10-06
 
 A field-fix release. The IP, BACnet and MQTT pages no longer get stuck on

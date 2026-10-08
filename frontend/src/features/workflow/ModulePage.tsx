@@ -3701,6 +3701,36 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             { label: "Warn", value: "warn" },
             { label: "No verdict", value: "none" },
           ];
+  // Named in the UDMI summary heading so a filtered count (say 716 of 890
+  // expected assets) is never read as the whole run.
+  const activeResultsFilterLabels = [
+    resultsTextFilter.trim() ? `Filter results "${resultsTextFilter.trim()}"` : "",
+    resultsToneFilter !== "all"
+      ? `Verdict: ${resultsToneOptions.find((option) => option.value === resultsToneFilter)?.label ?? resultsToneFilter}`
+      : "",
+    resultsTopicContainsFilter.trim()
+      ? `Topic contains "${resultsTopicContainsFilter.trim()}"`
+      : "",
+    ...(isUdmiValidation
+      ? [
+          resultsSystemFilter !== "all" ? `System: ${resultsSystemFilter}` : "",
+          resultsObservationFilter !== "all"
+            ? `Observation: ${OBSERVATION_FILTER_OPTIONS.find((option) => option.value === resultsObservationFilter)?.label ?? resultsObservationFilter}`
+            : "",
+          resultsCategoryFilter !== "all"
+            ? `Category: ${CATEGORY_FILTER_OPTIONS.find((option) => option.value === resultsCategoryFilter)?.label ?? resultsCategoryFilter}`
+            : "",
+        ]
+      : []),
+  ].filter(Boolean);
+  const clearResultsFilters = () => {
+    setResultsTextFilter("");
+    setResultsTopicContainsFilter("");
+    setResultsToneFilter("all");
+    setResultsSystemFilter("all");
+    setResultsObservationFilter("all");
+    setResultsCategoryFilter("all");
+  };
 
   // Keep the selected row inside the FILTERED view: if the active selection is
   // filtered out, move it to the first visible row's ORIGINAL index so the
@@ -6508,10 +6538,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
             {displayedValidationSummary ? (
               <UdmiSummaryPanel
+                activeFilters={activeResultsFilterLabels}
                 filtered={isResultsFilterActive}
                 lastRunAt={validationRunQuery.data?.updated_at}
+                onClearFilters={clearResultsFilters}
                 provisional={!activeRunTerminal}
                 summary={displayedValidationSummary}
+                totalExpectedAssets={validationSummaryDisplay?.asset_metrics.expected ?? null}
               />
             ) : activeRunTerminal && !validationRunQuery.isLoading ? (
               <div className="empty-workspace">
@@ -6676,9 +6709,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           onChange={(event) => setResultsObservationFilter(event.target.value)}
                           value={resultsObservationFilter}
                         >
-                          <option value="all">Observed or not observed</option>
-                          <option value="observed">Observed this run</option>
-                          <option value="not-observed">Not observed this run</option>
+                          {OBSERVATION_FILTER_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
                         </select>
                       </label>
                       <label className="results-filter-facet">
@@ -6691,9 +6726,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           }
                           value={resultsCategoryFilter}
                         >
-                          <option value="all">Expected and unexpected</option>
-                          <option value="validation">Expected validation</option>
-                          <option value="unexpected-devices">Unexpected devices</option>
+                          {CATEGORY_FILTER_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
                         </select>
                       </label>
                     </>
@@ -6716,14 +6753,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   {isResultsFilterActive && (
                     <button
                       className="secondary-button compact"
-                      onClick={() => {
-                        setResultsTextFilter("");
-                        setResultsTopicContainsFilter("");
-                        setResultsToneFilter("all");
-                        setResultsSystemFilter("all");
-                        setResultsObservationFilter("all");
-                        setResultsCategoryFilter("all");
-                      }}
+                      onClick={clearResultsFilters}
                       type="button"
                     >
                       Clear filters
@@ -8604,16 +8634,35 @@ function WrongTopicAssetsPanel({
   );
 }
 
+const OBSERVATION_FILTER_OPTIONS = [
+  { label: "Observed or not observed", value: "all" },
+  { label: "Observed this run", value: "observed" },
+  { label: "Not observed this run", value: "not-observed" },
+];
+
+const CATEGORY_FILTER_OPTIONS: { label: string; value: UdmiReportScopeV1["filters"]["category"] }[] =
+  [
+    { label: "Expected and unexpected", value: "all" },
+    { label: "Expected validation", value: "validation" },
+    { label: "Unexpected devices", value: "unexpected-devices" },
+  ];
+
 function UdmiSummaryPanel({
+  activeFilters,
   filtered,
   lastRunAt,
+  onClearFilters,
   provisional,
   summary,
+  totalExpectedAssets,
 }: {
+  activeFilters: string[];
   filtered: boolean;
   lastRunAt: string | undefined;
+  onClearFilters: () => void;
   provisional: boolean;
   summary: UdmiSummaryDisplay;
+  totalExpectedAssets: number | null;
 }) {
   const unexpectedCount = summary.asset_metrics.unexpected ?? 0;
   const assets: SummaryMetric[] = [
@@ -8642,10 +8691,22 @@ function UdmiSummaryPanel({
             {provisional ? "Provisional validation summary" : "Validation summary"}
           </h3>
           {filtered ? (
-            <p className="section-copy">
-              Metrics, details, and generated reports reflect the exact rows retained by every
-              active result filter.
-            </p>
+            <>
+              <p className="section-copy">
+                <strong>
+                  Filtered by {activeFilters.length > 0 ? activeFilters.join("; ") : "result filters"}
+                  .
+                </strong>{" "}
+                {totalExpectedAssets !== null
+                  ? `Counts cover ${formatMetricCount(summary.asset_metrics.expected)} of ${formatMetricCount(totalExpectedAssets)} expected assets. `
+                  : ""}
+                Metrics, details, and generated reports reflect the exact rows retained by every
+                active result filter.
+              </p>
+              <button className="secondary-button compact" onClick={onClearFilters} type="button">
+                Clear filters
+              </button>
+            </>
           ) : null}
         </div>
         <dl className="udmi-summary-run-meta">
@@ -8698,8 +8759,14 @@ function UdmiSummaryPanel({
           <strong>
             Unexpected-device measurement was incomplete for this run; at least{" "}
             {formatMetricCount(unexpectedCount)} unexpected{" "}
-            {unexpectedCount === 1 ? "publisher was" : "publishers were"} seen, and the true count
+            {unexpectedCount === 1 ? "publisher was" : "publishers were"} seen
+            {filtered ? " in the rows the active result filter retains" : ""}, and the true count
             may be higher.
+          </strong>
+        ) : filtered ? (
+          <strong>
+            The unexpected-device count covers only rows the active result filter retains; clear
+            filters to see the full run.
           </strong>
         ) : (
           <strong>
